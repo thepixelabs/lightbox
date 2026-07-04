@@ -1,0 +1,19 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Build outputs (stack-specific entries added once the stack is approved)
+target/
+dist/
+build/
+node_modules/
+
+# Local scratch
+*.log
+.env
+.env.*
