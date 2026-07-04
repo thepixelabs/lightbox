@@ -32,10 +32,25 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-wgpu = "30"
+# wgpu is pinned to the major that current egui-wgpu/eframe (0.35) links against:
+# the zero-copy seam (spec §2.3 seam 2) requires the shell and the engine to
+# share ONE wgpu::Device, which means one wgpu crate version workspace-wide.
+wgpu = "29"
+eframe = { version = "0.35", default-features = false, features = [
+  "wgpu",
+  "default_fonts",
+  "wayland",
+  "x11",
+] }
+ciborium = "0.2"
+tokio = { version = "1", default-features = false }
 pollster = "0.4"
 toml = "1"
-twox-hash = { version = "2", default-features = false, features = ["xxhash3_128", "std"] }
+twox-hash = { version = "2", default-features = false, features = [
+  "xxhash3_128",
+  "xxhash3_64",
+  "std",
+] }
 sha2 = "0.11"
 proptest = "1"
 tempfile = "3"

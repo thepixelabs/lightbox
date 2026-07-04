@@ -9,4 +9,11 @@
 //! **E06** grows it (priority preemption, pause/resume, activity center);
 //! the surface frozen here is E06's stated starting point.
 //!
-//! **Status: skeleton** — reserved by E01 Phase 1 (T1); no logic yet.
+//! **Status: seed in progress.** [`CancelToken`] landed with E01 Phase 2 —
+//! the render engine's frozen `SourceResolver`/`GpuCtx` surfaces (spec §3.4,
+//! §3.5) carry it, so it could not wait for Phase 4. `JobSystem`, `Class`,
+//! `spawn`/`spawn_blocking` and `JobHandle` arrive with Phase 4 (T14).
+
+mod cancel;
+
+pub use cancel::CancelToken;

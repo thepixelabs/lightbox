@@ -11,7 +11,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+lightbox-types.workspace = true
+lightbox-edit.workspace = true
+lightbox-jobs.workspace = true
 wgpu.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+twox-hash.workspace = true
+pollster.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true

@@ -10,5 +10,20 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "lightbox"
+path = "src/main.rs"
+
+[dependencies]
+lightbox-types.workspace = true
+lightbox-edit.workspace = true
+lightbox-jobs.workspace = true
+lightbox-render.workspace = true
+eframe.workspace = true
+wgpu.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+
 [lints]
 workspace = true

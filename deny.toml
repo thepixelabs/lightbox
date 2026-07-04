@@ -32,6 +32,24 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# Scoped, per-crate exceptions (NOT global allowlist additions — the global
+# list above stays exactly the spec §5 T3 set). Each entry names why it is
+# acceptable; all are recorded in docs/plan/epics/E01-deviations.md (Phase 2)
+# and flagged for licensing review.
+exceptions = [
+  # Boost Software License 1.0 — OSI-approved permissive (Boost, NOT the
+  # "Business Source License"). Windows clipboard support pulled in by
+  # egui-winit → arboard. Consistent with Phase 1's stance of not adding
+  # BSL-1.0 globally (xxhash-rust was swapped out instead of allowlisted).
+  { crate = "clipboard-win", allow = ["BSL-1.0"] },
+  { crate = "error-code", allow = ["BSL-1.0"] },
+  # egui's embedded UI fonts. OFL-1.1 and Ubuntu-font-1.0 are font licenses
+  # permitting embedding/redistribution with attribution; they apply to the
+  # font DATA, making this the first entry of license surface 3 (bundled
+  # content, E16) rather than a code-license question. Flagged for review.
+  { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

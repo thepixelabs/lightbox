@@ -66,6 +66,24 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      # E01 Phase 2 (T5/T7): zero-copy seam smoke — boots the eframe shell for
+      # 60 frames and verifies a texture produced by Engine::submit was
+      # composited on the SHARED wgpu device (exit 1 otherwise). Linux runs
+      # under Xvfb; macOS/Windows use the runner's desktop session.
+      # continue-on-error until observed green across the runner fleet —
+      # promotion to a blocking gate is part of the T29 exit drill (recorded
+      # in docs/plan/epics/E01-deviations.md).
+      - name: shell seam smoke (Xvfb)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y xvfb libxkbcommon-x11-0
+          xvfb-run -a cargo run -p lightbox-shell --bin lightbox -- --smoke 60
+      - name: shell seam smoke
+        if: runner.os != 'Linux'
+        continue-on-error: true
+        run: cargo run -p lightbox-shell --bin lightbox -- --smoke 60
+
   deny:
     name: cargo-deny (license surface 1)
     runs-on: ubuntu-latest
