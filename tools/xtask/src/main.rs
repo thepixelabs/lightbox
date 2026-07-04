@@ -3,12 +3,13 @@
 
 //! `xtask` — workspace task runner (invoked as `cargo xtask …`).
 //!
-//! Owned by **E01** (spec §2): fixture fetch with pinned hashes (T4, here),
-//! CI helpers, and the migration-registry lint (T9, E01 Phase 3).
+//! Owned by **E01** (spec §2): fixture fetch with pinned hashes (T4),
+//! CI helpers, and the migration-registry lint (T9).
 
 mod fixtures;
 mod generate;
 mod hashing;
+mod migrations_lint;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,6 +24,8 @@ Commands:
                                    corpus into fixtures/ (see fixtures/manifest.toml)
   hash <file>...                   print xxh3-128 and sha256 of files (for
                                    authoring manifest pins)
+  lint-migrations                  cross-check docs/plan/migrations.md against
+                                   crates/lightbox-catalog/migrations/ (CI gate)
 ";
 
 /// Workspace root (xtask lives in `tools/xtask`).
@@ -49,6 +52,7 @@ fn run() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("fixtures") => cmd_fixtures(&args[1..]),
         Some("hash") => cmd_hash(&args[1..]),
+        Some("lint-migrations") => migrations_lint::lint(&workspace_root()),
         Some("--help" | "-h" | "help") | None => {
             eprint!("{USAGE}");
             Ok(())

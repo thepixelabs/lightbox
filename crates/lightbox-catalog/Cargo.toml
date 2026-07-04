@@ -10,5 +10,24 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+lightbox-types.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tracing.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+fastrand.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[[bench]]
+name = "images_page"
+harness = false
+
 [lints]
 workspace = true

@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nightly gates (E01 spec §5 T13, §6, DoD §8.3): the 1000-iteration kill -9
+# fault-injection run at 0 corruptions / 0 lost commits. The perf scenario
+# harness (T28) joins this workflow in E01 Phase 8.
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fault-injection:
+    name: kill -9 fault injection x1000 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Crash-safety is filesystem/OS-semantics dependent — run the long
+        # leg on all three platforms, like the PR subset.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fault injection (1000 iterations, release)
+        env:
+          LIGHTBOX_FAULT_ITERS: "1000"
+        run: >
+          cargo test -p lightbox-catalog --test fault_injection --release --
+          kill9_leaves_catalog_clean_and_committed_txns_present
+          --exact --nocapture

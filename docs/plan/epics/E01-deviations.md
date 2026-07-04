@@ -118,3 +118,69 @@ Each entry names the spec point, the deviation, and why.
   256 globally; polling an evicted ticket reads `Superseded`. This is what
   lets the texture pool actually recycle (a retained `Ready` state would pin
   its texture's refcount forever).
+
+## Phase 3 — Catalog
+
+- **Four keyset-pagination indexes added to migration `0001` beyond the §4.3
+  DDL:** `asset_added(added_at)`, `asset_filename(filename)`,
+  `asset_folder_capture(folder_id, capture_time)`,
+  `asset_folder_added(folder_id, added_at)`. T10's AC ("every `images_page`
+  query plan uses an index — no full scans") is unsatisfiable with the §4.3
+  index set for the AddedAsc/Desc and global-FilenameAsc sort orders and for
+  folder-filtered capture/added sorts. Verified by `EXPLAIN QUERY PLAN`
+  tests over every sort × folder-filter × cursor combination (no `SCAN`
+  without `USING INDEX`, no `USE TEMP B-TREE`); measured at 100 k synthetic
+  assets: worst page fetch ~0.21 ms (criterion, T10's informal proof).
+- **Generated column `camera` added to `asset` in `0001`:** FTS5
+  external-content tables require the content table to expose a column per
+  FTS column, and the spec's `assets_fts` declares `camera` (make ⊕ model)
+  with `content='asset'`, which has no such column — integrity-check,
+  column reads, and E07's planned rebuild all fail with "no such column:
+  T.camera". A `VIRTUAL` generated column (same `trim(coalesce(...))`
+  expression as the spec's triggers) keeps §4.3's FTS shape working
+  unchanged. The §4.3 triggers themselves are verbatim.
+- **Timestamps are RFC3339 UTC with fixed 6-digit subseconds**
+  (`…T18:30:00.000000Z`). §4.3 requires lexicographic == chronological;
+  variable-precision RFC3339 (e.g. `time`'s default `Rfc3339` formatter)
+  violates that across rows whose subsecond digit counts differ.
+- **Backup dated dirs get a `-N` suffix on same-second collisions**
+  (`2026-07-05-183000-2`); §4.4 names only `YYYY-MM-DD-HHMMSS`. Suffixes are
+  allocated max+1 and never reused, and pruning/`newest-backup` order by the
+  parsed `(stamp, suffix)` key — naive lexicographic ordering plus name
+  reuse let a burst of same-second backups prune the newest one (caught by
+  the T12 retention test).
+- **`Catalog::create` refuses an existing catalog** (`AlreadyExists`);
+  "create→open idempotent" (T8 AC) is read as create-then-reopen applying
+  migrations exactly once, not as create-twice.
+- **`remove_import_session` deletes the `import_session` row too**, not just
+  the session's asset/image rows — "removes catalog rows only" (§3.2) is
+  read as "as opposed to files on disk".
+- **`NewAsset` carries `decode_error`** so T18's "catalogue probe/hash
+  failures" lands in the same single insert transaction;
+  `mark_decode_error` exists per §3.2 for post-insert failures.
+- **`with_txn` contains closure panics** (`catch_unwind` → rollback →
+  `CatalogError::Internal`; the writer thread survives). The spec doesn't
+  address panics; a poisoned writer would otherwise wedge every later
+  mutation.
+- **Crate choices (current versions, July 2026):** rusqlite 0.40
+  (`bundled` amalgamation — FTS5 included — + `backup` feature), zstd 0.13
+  (statically linked C libzstd, BSD-3-Clause/MIT — first native C dep beside
+  SQLite itself, both spec-mandated; noted for E16's SBOM surface), time 0.3
+  (timestamp formatting), criterion 0.8 + fastrand 2 (dev-only).
+- **`docs/plan/migrations.md` created under `docs/`** — spec-mandated
+  artifact (§2 layout, T9 AC), same reading of the ground rules as Phase 1's
+  licensing.md. Registry format: markdown table linted by
+  `cargo xtask lint-migrations` (duplicate numbers, unregistered or
+  misnamed migration files, gaps in the shipped sequence) — wired into CI.
+- **`nightly.yml` created with the 1000-iteration fault-injection job only**
+  (3-OS matrix); the T28 perf harness joins it in Phase 8. The PR-gate
+  fault-injection subset (50 kills) runs inside `cargo test` as spec'd; the
+  `synchronous=OFF`/DELETE-journal negative control is documented (not
+  shipped) in the harness's module docs, including why demonstrating it
+  needs power-cut simulation rather than SIGKILL.
+- **Fault-harness journaling protocol hardened:** asset inserts journal
+  after commit (journal ⊆ committed), rating overwrites journal
+  intent-before/done-after — plain after-commit journaling of overwrites
+  would misreport a kill landing in the commit→journal window as a lost or
+  phantom write. Parent tolerates a torn final journal line (a kill can
+  interrupt the journal append itself).

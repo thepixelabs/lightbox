@@ -46,6 +46,11 @@ ciborium = "0.2"
 tokio = { version = "1", default-features = false }
 pollster = "0.4"
 toml = "1"
+# The SQLite amalgamation is bundled (spec §4.2: no system dependency; public
+# domain); `backup` exposes the online-backup API used by verified backups.
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+zstd = "0.13"
+time = { version = "0.3", features = ["std", "formatting", "parsing", "macros"] }
 twox-hash = { version = "2", default-features = false, features = [
   "xxhash3_128",
   "xxhash3_64",
@@ -54,6 +59,10 @@ twox-hash = { version = "2", default-features = false, features = [
 sha2 = "0.11"
 proptest = "1"
 tempfile = "3"
+fastrand = "2"
+criterion = { version = "0.8", default-features = false, features = [
+  "cargo_bench_support",
+] }
 
 # Shared lints: `cargo clippy --workspace --all-targets -- -D warnings` is the CI gate.
 # `unsafe_code` is denied workspace-wide; only lightbox-render (GPU interop) and future

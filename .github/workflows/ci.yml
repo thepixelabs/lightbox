@@ -5,8 +5,9 @@
 # test}, plus cargo-deny (license surface 1) and REUSE lint. The wgpu adapter
 # smoke test runs inside `cargo test`: macOS uses Metal, Windows falls back to
 # DX12 WARP, Ubuntu gets a software Vulkan adapter (Mesa lavapipe).
-# The nightly workflow (perf + long fault-injection) arrives with E01 Phases
-# 3/8 (T13, T28).
+# The 50-iteration kill -9 fault-injection subset (E01 T13, Risk-5 gate) runs
+# inside `cargo test`; the 1000-iteration leg is in nightly.yml (perf harness
+# T28 joins it in Phase 8).
 
 name: CI
 
@@ -50,6 +51,9 @@ jobs:
 
       - name: clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: migration registry lint (E01 T9)
+        run: cargo xtask lint-migrations
 
       - name: build
         run: cargo build --workspace
