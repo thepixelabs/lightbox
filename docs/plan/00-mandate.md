@@ -11,7 +11,8 @@ Build an open-source desktop application that a working photographer could adopt
 1. **Local-first.** The catalog, previews, edit recipes, and ML inference all live and run on the user's machine. Any future sync is an optional layer, never a requirement.
 2. **Non-destructive.** Originals are never modified. Edits are ordered parameter recipes, persisted in the catalog and exportable as XMP sidecars.
 3. **Cross-platform desktop.** macOS and Windows at v1; Linux must not be architecturally excluded.
-4. **Original implementation.** No Adobe code, SDKs, assets, icons, or trade dress. Interoperate through open/industry formats only (DNG, XMP, ICC, EXIF/IPTC).
+4. **Original implementation.** No proprietary Adobe product code, assets, icons, or trade dress, and no reverse-engineering of Adobe binaries. Interoperate through open/industry formats only (DNG, XMP, ICC, EXIF/IPTC).
+   *Clarified 2026-07-04 (mandate-owner ruling, v1.1):* Adobe-**published, OSI-licensed open-source libraries** (e.g., the ISO 16684 XMP Toolkit reference implementation under BSD-3, c2pa-rs) are **permitted** under the same per-dependency license review as any third-party dependency, each use requiring explicit CTO sign-off. The bar targets Lightroom's protected expression and proprietary SDKs, not open-source code Adobe happens to author.
 5. **License hygiene.** The application ships under a permissive or weak-copyleft license; GPL components may be used only where their license terms are compatible with the chosen distribution model — the architect must call this out explicitly per dependency.
 6. **AI runs offline.** Masking, denoise, upscale, inpainting via locally-executed open models. Model downloads are allowed; inference calls to remote APIs are not part of v1.
 
