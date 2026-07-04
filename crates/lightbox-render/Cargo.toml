@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lightbox-render"
+description = "GPU render engine seed: GpuContext, Engine ticket lifecycle, NodeRegistry, DisplayTransformNode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+
+[lints]
+workspace = true

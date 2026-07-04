@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "2"
+members = ["crates/*", "tools/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Intra-workspace crates
+lightbox-types = { path = "crates/lightbox-types" }
+lightbox-catalog = { path = "crates/lightbox-catalog" }
+lightbox-core = { path = "crates/lightbox-core" }
+lightbox-jobs = { path = "crates/lightbox-jobs" }
+lightbox-decode = { path = "crates/lightbox-decode" }
+lightbox-preview = { path = "crates/lightbox-preview" }
+lightbox-render = { path = "crates/lightbox-render" }
+lightbox-edit = { path = "crates/lightbox-edit" }
+lightbox-ingest = { path = "crates/lightbox-ingest" }
+
+# Third-party (shared versions; adapt here, not per-crate)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+wgpu = "30"
+pollster = "0.4"
+toml = "1"
+twox-hash = { version = "2", default-features = false, features = ["xxhash3_128", "std"] }
+sha2 = "0.11"
+proptest = "1"
+tempfile = "3"
+
+# Shared lints: `cargo clippy --workspace --all-targets -- -D warnings` is the CI gate.
+# `unsafe_code` is denied workspace-wide; only lightbox-render (GPU interop) and future
+# FFI crates may locally `#![allow(unsafe_code)]` with justification (E01 spec §5 T1).
+[workspace.lints.rust]
+unsafe_code = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+
+# Golden-image and fault-injection tests are IO/CPU heavy; keep dev-deps optimized enough.
+[profile.dev.package."*"]
+opt-level = 1

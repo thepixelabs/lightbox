@@ -7,13 +7,25 @@ Thumbs.db
 .vscode/
 *.swp
 
-# Build outputs (stack-specific entries added once the stack is approved)
+# Build outputs
 target/
 dist/
 build/
 node_modules/
 
+# Rust
+**/*.rs.bk
+*.pdb
+
+# Test fixtures: fetched by `cargo xtask fixtures`, never committed —
+# only the pinned manifest is (E01 spec §2 workspace layout).
+/fixtures/*
+!/fixtures/manifest.toml
+
 # Local scratch
 *.log
 .env
 .env.*
+
+# Lightbox catalogs created during local testing
+*.lbdata/

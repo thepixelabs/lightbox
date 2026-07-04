@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lightbox-edit"
+description = "Edit-recipe placeholder: only { schema, pv } + Recipe::identity() are frozen by E01; E09 owns the real recipe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightbox-types.workspace = true
+
+[lints]
+workspace = true

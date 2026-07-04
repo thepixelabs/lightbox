@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pinned test-fixture corpus (E01 spec §5 T4). `cargo xtask fixtures` makes
+# fixtures/ match this file; only this manifest is committed. Every fixture
+# carries provenance: source (URL or deterministic generator), license, and an
+# xxh3-128 pin (canonical big-endian hex). Raw files are CC0 from
+# raw.pixls.us and additionally carry the upstream-published sha256.
+#
+# Ordering matters: `truncate:` generators consume an earlier fixture.
+
+[[fixture]]
+name = "canon-eos-350d.cr2"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Canon EOS 350D [RAW (3:2)]"
+url = "https://raw.pixls.us/getfile.php/758/nice/Canon%20-%20EOS%20350D%20-%20RAW%20%283:2%29.CR2"
+sha256 = "8cbb84e04d93b005fe082da9c954122a612b5281af00aa088d767850f343fd38"
+xxh3_128 = "d5a1ac49c1190c7422107e2460932513"
+
+[[fixture]]
+name = "canon-eos-r6.cr3"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Canon EOS R6 [3:2]"
+url = "https://raw.pixls.us/getfile.php/4659/nice/Canon%20-%20EOS%20R6%20-%203:2.CR3"
+sha256 = "74abb0a113d075ad9887a058082f40dd2a938c4813a08474d82356f11a027778"
+xxh3_128 = "c4496fa24cac3edbce48db466d860d4a"
+
+[[fixture]]
+name = "nikon-d4s.nef"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Nikon D4S [12bit 12bit compressed ((8)) (3:2)]"
+url = "https://raw.pixls.us/getfile.php/2227/nice/Nikon%20-%20D4S%20-%2012bit%2012bit%20compressed%20%28%288%29%29%20%283:2%29.NEF"
+sha256 = "c8256566c01eed83b8f9c4eeec6276a94031d19f607afc511a90cb0c2fa76f9c"
+xxh3_128 = "768f0c3027f7c9c5e2f795b6f0311f8f"
+
+[[fixture]]
+name = "nikon-z6.nef"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Nikon Z 6 [12bit 12bit compressed (3:2)]"
+url = "https://raw.pixls.us/getfile.php/3587/nice/Nikon%20-%20Z%206%20-%2012bit%2012bit%20compressed%20%283:2%29.NEF"
+sha256 = "f0ab08da469ee205f2bc08efd9005778c64cdcb064893cee03768e32e5da1a36"
+xxh3_128 = "a89f5621e18e3be57ec26a0cbe86382a"
+
+[[fixture]]
+name = "sony-ilce7s.arw"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Sony ILCE-7S [14bit 14bit compressed (3:2)]"
+url = "https://raw.pixls.us/getfile.php/1582/nice/Sony%20-%20ILCE-7S%20-%2014bit%2014bit%20compressed%20%283:2%29.ARW"
+sha256 = "a35ebb2fbec929daa5beb20d1ce5c15a8aac7b1a7a231455387f3df8a7442e07"
+xxh3_128 = "7cec9b86a3c3b8d270be2eabf694747b"
+
+[[fixture]]
+name = "fujifilm-xt1.raf"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Fujifilm X-T1 [14bit 14bit uncompressed (3:2)]"
+url = "https://raw.pixls.us/getfile.php/2421/nice/Fujifilm%20-%20X-T1%20-%2014bit%2014bit%20uncompressed%20%283:2%29.RAF"
+sha256 = "e994a1fd6e87e392432fe146a35b0b88584dc2bd50bee2c8c7e886ac2b59fcde"
+xxh3_128 = "6c47c0658b8fe5796c58f0386624aba2"
+
+[[fixture]]
+name = "fujifilm-x100.raf"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Fujifilm FinePix X100 [12bit 12bit uncompressed (3:2)]"
+url = "https://raw.pixls.us/getfile.php/2392/nice/Fujifilm%20-%20FinePix%20X100%20-%2012bit%2012bit%20uncompressed%20%283:2%29.RAF"
+sha256 = "1f4aea4fa43dd314f8b90954d7823655d4906d3e468a9ea014652b872a68db16"
+xxh3_128 = "4295f3d4a4cdc305a588d144912edf1d"
+
+[[fixture]]
+name = "olympus-e1.orf"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Olympus E-1 [16bit (4:3)]"
+url = "https://raw.pixls.us/getfile.php/1800/nice/Olympus%20-%20E-1%20-%2016bit%20%284:3%29.ORF"
+sha256 = "042286653fbae5b085bef4a4e626145385ea6e82e817f166b4904abcef64457c"
+xxh3_128 = "c0ff822797b007a63164b806df75f7c5"
+
+[[fixture]]
+name = "sigma-fp.dng"
+kind = "raw"
+license = "CC0-1.0"
+origin = "raw.pixls.us — Sigma fp [12bit (16:9)]"
+url = "https://raw.pixls.us/getfile.php/7278/nice/Sigma%20-%20fp%20-%2012bit%20%2816:9%29.DNG"
+sha256 = "99bcffd118630af5cf5712eeac6832045420311fe258094e3489b94c8d51236a"
+xxh3_128 = "37d94c94e57d214a501ebb632c84d980"
+
+[[fixture]]
+name = "lightbox-tiny.jpg"
+kind = "image"
+license = "CC0-1.0"
+origin = "generated — 16x16 JFIF gradient, self-made, embedded in xtask"
+generator = "jpeg-tiny-16x16"
+xxh3_128 = "fba42b42b26e418074d87e07f129e78e"
+
+[[fixture]]
+name = "gradient-8x8.png"
+kind = "image"
+license = "CC0-1.0"
+origin = "generated — deterministic 8x8 RGB PNG built by xtask"
+generator = "png-gradient-8x8"
+xxh3_128 = "b22604ab9eedec5b60a3f61ca367099b"
+
+[[fixture]]
+name = "gradient-8x8.tiff"
+kind = "image"
+license = "CC0-1.0"
+origin = "generated — deterministic 8x8 uncompressed baseline TIFF built by xtask"
+generator = "tiff-gradient-8x8"
+xxh3_128 = "39deadb7cc046095f1b5f602f7f11705"
+
+[[fixture]]
+name = "corrupt-truncated.cr2"
+kind = "corrupt"
+license = "CC0-1.0"
+origin = "generated — first 4096 bytes of canon-eos-350d.cr2 (deliberately truncated raw)"
+generator = "truncate:canon-eos-350d.cr2:4096"
+xxh3_128 = "998992421ac221ee87952f13318dc6d9"
+
+[[fixture]]
+name = "corrupt-garbage.nef"
+kind = "corrupt"
+license = "CC0-1.0"
+origin = "generated — 64 KiB of seeded xorshift64* noise with a raw extension"
+generator = "garbage:65536"
+xxh3_128 = "cf9a041e3c1c621070abd5348eb1ad39"

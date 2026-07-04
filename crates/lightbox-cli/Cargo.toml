@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lightbox-cli"
+description = "Headless driver over lightbox-core (create/import/list/render/backup/check) — seam-1 proof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+lightbox-core.workspace = true
+
+[lints]
+workspace = true

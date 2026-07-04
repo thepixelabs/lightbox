@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-deny — CI license surface 1 of 3 (E01 spec §5 T3; architecture §1.6/§8).
+#
+# Surface 1 (this file) gates the RUST CRATE GRAPH: permissive licenses only.
+# GPL/AGPL/LGPL are denied here by construction — the allowlist below is
+# exhaustive, so any copyleft license fails `cargo deny check licenses`.
+# LGPL code may enter the *product* only via dynamically-linked C libraries in
+# later epics; those are audited by surface 2 (native-binary SBOM, E16), and
+# bundled content/data by surface 3 (data manifest, E16). See
+# docs/plan/licensing.md.
+#
+# CI runs: cargo deny check licenses bans sources
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+# The allowlist from E01 spec §5 T3. Additions require a licensing review PR
+# that updates docs/plan/licensing.md alongside this file.
+allow = [
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Apache-2.0",
+  "Zlib",
+  "Unicode-3.0",
+  "ISC",
+  "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Intra-workspace path dependencies carry no version; that is fine for
+# private (publish = false) crates.
+allow-wildcard-paths = true
+# Known-bad crates named explicitly (belt over the license suspenders).
+deny = [
+  { crate = "openssl", reason = "native TLS not wanted; use rustls if TLS is ever needed" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+version = 2
+yanked = "deny"

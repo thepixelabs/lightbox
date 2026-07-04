@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pinned toolchain (E01 spec §5 T1). MSRV is recorded as `rust-version` in the
+# workspace Cargo.toml; bumping either is a deliberate, reviewed change.
+
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]

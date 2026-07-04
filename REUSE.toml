@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# REUSE (https://reuse.software) metadata for files that cannot carry their own
+# SPDX headers (or where headers would be noise). Everything else carries an
+# explicit header; `reuse lint` is a CI gate (E01 spec §5 T3).
+
+version = 1
+
+[[annotations]]
+path = [
+  "README.md",
+  "LICENSE",
+  ".gitignore",
+  "Cargo.lock",
+  "docs/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Lightbox contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# The fixture corpus is CC0 by policy: raws are CC0 uploads from
+# raw.pixls.us, everything else is generated (see fixtures/manifest.toml for
+# per-file provenance — URL, upstream checksum, license). The blobs are never
+# committed (gitignored); this annotation covers local checkouts and CI caches.
+[[annotations]]
+path = ["fixtures/**", "tools/xtask/assets/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "raw.pixls.us contributors (CC0) and Lightbox contributors"
+SPDX-License-Identifier = "CC0-1.0"

@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[alias]
+xtask = "run --package xtask --"
