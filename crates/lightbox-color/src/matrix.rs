@@ -101,8 +101,29 @@ pub mod spaces {
 
     /// The "Melissa-style" companion encode for histograms/readouts (E10):
     /// sRGB curve over ProPhoto primaries. **Encode only — never a processing
-    /// space** (spec §3.3). Owner: Phase B (B1)/D2.
-    pub fn companion_encode(_rgb_linear: [f32; 3]) -> [f32; 3] {
-        unimplemented!("D2: Melissa companion encode")
+    /// space** (spec §3.3). Owner: Phase B (B1)/D2 — **filled by Phase D (D2)**.
+    ///
+    /// The working space already carries ProPhoto/ROMM primaries, so the
+    /// companion space (same primaries, sRGB transfer) differs from it only by
+    /// the per-channel transfer function: this is exactly the sRGB opto-electronic
+    /// transfer applied to each linear channel. Input is clamped to `[0, 1]`
+    /// (readout domain). Verified to ≤ 1e-4 against an LCMS2-built
+    /// ProPhoto-linear → ProPhoto-sRGB transform in
+    /// `cms::tests::companion_encode_matches_lcms` (D2).
+    #[must_use]
+    pub fn companion_encode(rgb_linear: [f32; 3]) -> [f32; 3] {
+        fn srgb_oetf(c: f32) -> f32 {
+            let c = c.clamp(0.0, 1.0);
+            if c <= 0.003_130_8 {
+                12.92 * c
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            }
+        }
+        [
+            srgb_oetf(rgb_linear[0]),
+            srgb_oetf(rgb_linear[1]),
+            srgb_oetf(rgb_linear[2]),
+        ]
     }
 }
