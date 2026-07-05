@@ -1,3 +1,5 @@
+> **SUPERSEDED (v2.0, 2026-07-05)** — replaced by [E14-ai-masking.md](E14-ai-masking.md); retained as historical record.
+
 # E14 — AI Masking & Library Intelligence
 
 | | |

@@ -1,3 +1,5 @@
+> **SUPERSEDED (v2.0, 2026-07-05)** — replaced by [E08-editor-shell.md](E08-editor-shell.md); retained as historical record.
+
 # E08 — Library UI & Culling
 
 _Implementation spec. Milestone **M1**. Effort **L–XL ~7–11 pw** (re-baselined per §10 of the architecture: a from-scratch immediate-mode UI surface against a thin widget ecosystem). Depends on: **E01** (workspace, headless core, shell skeleton, command/query bus, shared wgpu device + display-transform node), **E03** (preview pyramid, raw cache, thumb cache), **E06** (job system, activity model, cancellation), **E07** (catalog DAM queries/commands, smart-collection AST→SQL, FTS, metadata commands)._

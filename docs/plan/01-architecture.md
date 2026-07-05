@@ -1,14 +1,30 @@
-# Lightbox — v1 System Architecture
+# Lightbox — v2 System Architecture
 
-_Author: system-architect. Input: `00-mandate.md`, `00-feature-catalog.md`, and the 10 domain research reports. This document is decision-complete: epic planners spec implementation from it without re-litigating stack, seams, data model, or budgets. Where a choice is reversible, the reversal trigger is named; where irreversible, it is flagged for CTO/CEO sign-off._
+_Author: system-architect. Input: `00-mandate.md` (**v2.0**), `00-feature-catalog.md`, and the 10 domain research reports. This document is decision-complete: epic planners spec implementation from it without re-litigating stack, seams, data model, or budgets. Where a choice is reversible, the reversal trigger is named; where irreversible, it is flagged for CTO/CEO sign-off._
+
+---
+
+> ## v2.0 SCOPE REVISION (2026-07-05, system-architect, tracking mandate v2.0)
+>
+> **This is a SCOPE revision, not a technology revision.** The stack (§1), engine design (§4), data-model *mechanics* (§3), license policy (§1.6–§1.7/§8), and testing strategy (§8) all **stand** — every ADR in §1 survives unchanged. What changed is the **product**: Lightbox is now an **editing-first raw developer**, and the entire DAM/library ambition (managed catalog, grid library view, folder panel, collections, keywords, ratings/culling, faces, semantic search, watched folders) is **cut**. The concrete deltas:
+>
+> - **Product thesis** reframed to editing-first (§0).
+> - **Entry model** is drag-and-drop + OS open dialog → editor with a **session filmstrip**; no library. New **editor-shell contract** in **§2.4**.
+> - **Data model** rescoped: `lightbox-catalog` is now an **internal edit store + cache index**; the DAM tables go **keep-dormant** (retained in schema, never populated) — **§3.1**.
+> - **E01 disposition audit** (what built code is retained / repurposed / retired) in **§10.0**.
+> - **Epic set** re-sequenced **develop-first**: milestones and the epic table are revised in **§9** and **§10**; retired/rescoped epics are marked there.
+> - **Effort** recomputed down: v1.x was ~130–155 pw; v2.0 is **~105–120 pw** (§10) — the pixel-engine stream is unchanged; the savings are entirely the cut DAM scope.
+> - **DAM-scale budgets and risks** (import 10k, filter 100k, cull-at-keyboard, catalog-interactive-at-100k, ANN index) are **superseded** — see the v2.0 notes in §7 and §11. The **crash-safety** bar is retained, rescoped to the edit store.
+>
+> Sections not touched by this banner retain their v1.x text as the enduring technical record; where a v1.x paragraph asserts a DAM-scale claim, the v2.0 note in its section governs.
 
 ---
 
 ## 0. Architectural thesis (the one-paragraph version)
 
-Lightbox is a **headless Rust core** (catalog + decode + render + edit-state + jobs) wrapped in a **thin, replaceable UI shell** that shares one GPU device with the render engine. The core's spine is a **GPU compute node-graph** (the vkdt lesson) that renders a **versioned, serializable edit recipe** against an untouched original. The **SQLite catalog is the single source of truth**; XMP sidecars are an opt-in projection, never a second owner. Everything expensive is a **cancellable job**; the UI thread never blocks and a `kill -9` never corrupts the catalog. AI runs on a **crash-isolated out-of-process ONNX inference host**. The whole dependency graph is **permissively licensed by construction** — GPL never links in-process, enforced in CI across **three** surfaces: the Rust crate graph (cargo-deny), the native/FFI binary surface (a vendored-binary SBOM with per-artifact license + build-flag audit), **and the bundled content/data manifest** (camera profiles, look family, LUT packs, lensfun data — §1.7/§8), because the LGPL/GPL exposure concentrates in the dynamically-linked C libraries and their transitive codecs (invisible to the crate graph) **and** the no-Adobe-assets exposure concentrates in bundled color/profile *data* whose open format hides proprietary content (invisible to both binary surfaces).
+Lightbox is the **best local-first, AI-assisted, GPU-fast raw editor** — the FOSS editor that pairs reference-grade raw color with local AI enhancement and a modern interactive engine, a combination no existing open-source editor offers (darktable/RawTherapee have the color but no local AI and a slower fixed-order pipeline; nothing FOSS pairs all three). Two v2.1-mandated capabilities sharpen the differentiation further: a **complete raw develop parameter surface** (every stage the pipeline can vary is a live control on a raw, not a curated subset — §2.4) and **AI Looks — image-adaptive cinematic grading** (E17): a locally-run engine that analyzes the *opened image's own* palette and tonal distribution and proposes varied cinematic grades fitted to its actual colors, every look materializing as an ordinary, fully-editable develop recipe layered on the current edit — **a headline feature no competitor ships locally** (cloud tools bake opaque filters; darktable/RawTherapee ship static preset LUTs that ignore the image's content; nothing FOSS proposes image-fitted, fully-editable cinematic grades offline). Architecturally it is a **headless Rust core** (decode + render + edit-state + jobs + edit-store) wrapped in a **thin, replaceable editor shell** that shares one GPU device with the render engine. The core's spine is a **GPU compute node-graph** (the vkdt lesson) that renders a **versioned, serializable edit recipe** against an untouched original. Files enter by **drag-and-drop or the OS open dialog** and open directly in the editor with a **session filmstrip** — there is no library. The **edit store (`lightbox-catalog`) is the single source of truth** for a file's recipe, keyed by content-hash; XMP sidecars are an opt-in projection, never a second owner. Everything expensive is a **cancellable job**; the UI thread never blocks and a `kill -9` never corrupts the edit store. AI runs on a **crash-isolated out-of-process ONNX inference host**. The whole dependency graph is **permissively licensed by construction** — GPL never links in-process, enforced in CI across **three** surfaces: the Rust crate graph (cargo-deny), the native/FFI binary surface (a vendored-binary SBOM with per-artifact license + build-flag audit), **and the bundled content/data manifest** (camera profiles, look family, LUT packs, lensfun data — §1.7/§8), because the LGPL/GPL exposure concentrates in the dynamically-linked C libraries and their transitive codecs (invisible to the crate graph) **and** the no-Adobe-assets exposure concentrates in bundled color/profile *data* whose open format hides proprietary content (invisible to both binary surfaces).
 
-The three bets, in priority order: (1) the catalog is crash-proof and interactive at 100k+; (2) the node-graph render engine hits <100 ms slider-to-screen; (3) local AI matches the cloud tier offline. Everything else is assembly of mature building blocks.
+The three bets, in priority order: (1) the edit store is crash-proof (`kill -9`-safe, transactional); (2) the node-graph render engine hits <100 ms slider-to-screen; (3) local AI matches the cloud tier offline. Everything else is assembly of mature building blocks. **(v2.0: the former bet "interactive at 100k+ assets" is retired with the DAM; crash-safety is the surviving invariant, rescoped to the edit store.)**
 
 ---
 
@@ -186,8 +202,13 @@ Rust cargo workspace. One crate per bounded responsibility. The seam that matter
    ┌──────────────────┐
    │ lightbox-ingest  │  import pipeline · probe · checksum copy · 2nd-copy · preview build
    │ lightbox-preview │  pyramid (embed/std/1:1) · raw decode cache · demand-driven
+   │ lightbox-looks   │  (v2.1) image-stat analysis · look families → recipe deltas · shuffle
    └──────────────────┘
 ```
+
+> **v2.1 crate-map annotation (AI Looks).** A new leaf crate **`lightbox-looks`** (E17, §10) hosts the image-adaptive cinematic-grading engine: a CPU-side palette/tonal **analyzer** over preview tiles, the parameterized **look families** and the fitting logic that maps them onto **recipe deltas** (color-grade wheels + curves + HSL), and the seeded **shuffle/variations** action. It is a *leaf*: it depends on `lightbox-edit` (E09 — to emit a partial `Recipe` merged onto the current edit) and reads image statistics that the render engine (E05) already computes; it holds **no** GPU device of its own (previews of look proposals render through the existing `Engine`, §4.2) and it is **not** on any hot path. The optional ML hook (a small palette/mood classifier) calls `lightbox-inferd` through the same `InferenceClient` (§2.2) as every other model — no new process, no new IPC. Boring analysis in the data bus; novelty isolated in this leaf, exactly where the thesis puts it.
+
+> **v2.0 crate-map annotations** (the diagram is the built v1.x map; roles reframe, crates keep their names — no churn): the **shell** row `grid · loupe · develop · panels · gizmos` reads, for v2.0, **`drop-zone · filmstrip · loupe · develop · panels · gizmos`** — the grid virtualization becomes the filmstrip (§2.4/§10.0). `lightbox-catalog`'s `smart-coll AST` / `collection` / `keyword` responsibilities are **keep-dormant** (§3.1.1); its live role is the **edit store + cache index**. `lightbox-ingest`'s `checksum copy · 2nd-copy · import pipeline` become the **working-set loader** (walk/probe/hash → session set; **no managed copy**, E04). Everything else in the map is unchanged.
 
 ### 2.2 Crate responsibilities & public interface sketches
 
@@ -264,6 +285,29 @@ pub trait InferenceClient {
 }   // all calls cross the process boundary; supervisor restarts inferd on crash
 ```
 
+**`lightbox-looks`** (v2.1, E17) — image-adaptive cinematic grading. Analyzes the opened image and emits **partial recipes** (never baked pixels) for E09 to merge.
+```rust
+pub struct ImageStats {                        // classical, CPU-side, over preview tiles
+    pub palette: Vec<Swatch>,                  // k-means clusters in a perceptual space (OkLab)
+    pub tone: ToneHistogram,                   // shadow/mid/high mass, black/white points, contrast
+    pub temp_tint: (f32, f32), pub skin_present: bool,
+}
+pub fn analyze(preview: PreviewRef) -> ImageStats;              // no GPU device; reads engine-computed stats where available
+
+pub struct LookFamily { pub id: LookId, pub name: String }     // teal-orange, film-stock, bleach-bypass, …
+pub struct LookProposal {
+    pub family: LookId, pub seed: u64,
+    pub delta: RecipePatch,                    // color-grade wheels + curves + HSL deltas ONLY — a partial Recipe
+}
+/// Fit each family's parameters to THIS image's stats; `seed` drives coherent shuffle/variations.
+pub fn propose(stats: &ImageStats, families: &[LookFamily], seed: u64, n: usize) -> Vec<LookProposal>;
+
+/// Optional ML hook (E13): a small palette/mood classifier that biases family selection.
+/// Absent inferd → classical selection only; NEVER a hard dependency.
+pub fn propose_ml(stats: &ImageStats, infer: &dyn InferenceClient, seed: u64, n: usize) -> Vec<LookProposal>;
+```
+`RecipePatch` is a **partial** `Recipe` (§3.2): only the color-grade / tone-curve / HSL fields it sets are `Some`. Applying a look is `Recipe::apply_patch(&RecipePatch)` in E09 — a single, undoable history step; the result is an **ordinary editable recipe**, not a filter. Look-proposal thumbnails render through the normal `Engine` (§4.2) by evaluating the merged recipe at thumbnail resolution.
+
 **`lightbox-jobs`** — priority scheduler; the activity center's backing model.
 ```rust
 pub enum Class { Interactive, Foreground, Background }        // render / import·export / previews·AI
@@ -280,6 +324,57 @@ pub fn spawn<T>(class: Class, f: impl Future<Output=T>) -> JobHandle<T>;
 3. **Catalog owns edit-state; XMP is a projection.** One source of truth. XMP sidecars are written on opt-in and read on import — they are never a concurrent writer of record. Divergence is surfaced as a badge, resolved by explicit read/write-metadata commands.
 4. **Jobs ↔ inferd (IPC).** The only process boundary in the hot path is ML, chosen because its output is cheap to copy and its crash-likelihood is highest.
 5. **RenderNode registry keyed by (node, process_version).** Old process versions keep their node implementations registered forever → old edits render identically (§4.5).
+
+### 2.4 Editor-shell contract (v2.0 — the entry model that replaces the DAM)
+
+**Problem it solves:** v1.x entered the product through a *managed library* (import → catalog → grid → pick → develop). v2.0 cuts that entirely; the product opens *files*, not a catalog. This section is the decision-complete contract for how a photographer gets pixels on screen and into the develop surface, so no E04/E08 planner guesses. **egui capability is proven:** `eframe` surfaces both `RawInput.hovered_files` and `dropped_files` (path + optional bytes), so the drop target and hover affordance are first-class, not a platform hack.
+
+**Entry points — exactly these, no managed import:**
+
+| Entry | Behavior | Owner |
+|---|---|---|
+| **Drag-drop a single file** onto the window or empty-state drop zone | opens it in the loupe; filmstrip holds the one file | E08 (drop handling) → E04 (load) |
+| **Drag-drop a multi-file selection** | all supported files become the working set; first is active in the loupe; filmstrip shows the set in drop order | E08 → E04 |
+| **Drag-drop a folder** | the folder's directly-contained supported files become the working set (sorted by capture-time then name) | E08 → E04 (walker, non-recursive) |
+| **Drag-drop a folder, recursive** (modifier held, or a prefs default) | the folder tree is walked recursively; all supported files become the working set | E08 → E04 (walker, recursive) |
+| **OS file-open dialog** (menu / Cmd-O) | native multi-select file+folder picker → same working-set construction | E08 (`rfd`) → E04 |
+| **File-association / "Open With" / CLI arg** | OS hands Lightbox one or more paths at launch or via a running-instance IPC → same working-set construction | E08 (platform launch handler) → E04 |
+
+**Empty-state drop zone.** With no working set, the window is a full-bleed **drop zone** ("Drop photos or a folder to start editing — or ⌘O") that also reflects `hovered_files` (highlight + count) before the drop lands. It is the *only* chrome in the empty state — no library, no recents grid required for v1 (a recents *list* is a permitted Should, still session-launched, never a managed catalog).
+
+**The working set (session, not a library).** The working set is **in-memory session state** — an ordered list of opened file paths plus per-file probe results and edit-store handles. It is **not** persisted as a catalog: closing the app discards the set; reopening a file re-derives its recipe from the edit store by content-hash (§3.1). Dropping a new set **replaces** the current one (with an unsaved-nothing guarantee — edits auto-persist continuously, §3.1, so there is never a "save before closing the set?" prompt). The **filmstrip** is the working set's view: a horizontally virtualized strip of T0/T1 previews (E03) in set order, with the active file enlarged in the loupe; it reuses the virtualized-strip machinery E01 built for the grid (§10.0), now bounded to a session set (tens–hundreds of files), not a 100k catalog.
+
+**Raw vs. non-raw develop surface (which controls appear per source type).** Every source runs the **same node-graph pipeline** (§4.1); the develop surface *adapts* to what the source can meaningfully expose. The rule: **raw sources expose the full develop toolset; non-raw sources expose the same toolset minus the raw-only stages**, which are *hidden* (not merely disabled) so the surface never shows a control that cannot act.
+
+**Complete raw parameter surface (v2.1 — binding, not a curated subset).** The mandate (v2.1) makes this a Core guarantee: opening a raw exposes *everything the pipeline can vary* at the raw-decode and demosaic stages — a curated/simplified subset is a scope violation, not a design choice. This is the explicit, decision-complete list of the raw-only parameter groups and the epic that delivers each, so no E02/E10/E11 planner ships a partial surface. Every group here populates the **"full"** cells of the surface table below; on a non-raw source every one is *hidden* per the rule above (no mosaic, no raw latitude, no sensor-native color to reinterpret).
+
+| Raw-only parameter group | Controls that MUST be exposed | Delivered by |
+|---|---|---|
+| **White balance (full sensor)** | as-shot; presets (daylight/cloudy/shade/tungsten/fluorescent/flash); **Kelvin + tint** sliders (true Kelvin from the sensor, not a working-space shift); gray-point **eyedropper** | **E02.1** (WB on the matrix base) → **E10.1** (panel/eyedropper UI) |
+| **Camera profile selection** | matrix base (always available, §1.7 tier 1); curated in-house DCP; user-installed DCP; default-look family + amount | **E02.1/E02.2** (matrix base + DCP eval) → **E10.1** (profile picker) |
+| **Demosaic-stage options** | algorithm select (interim AHD/DCB → clean-room RCD/AMaZE-class; X-Trans Markesteijn where applicable); false-color / maze suppression | **E11.1** (clean-room demosaic) |
+| **Black / white point** | raw black-point offset; white-point / highlight-clip level (per-channel where the sensor exposes it) — operating on the pre-transform linear range | **E02.1** (linearize) → **E10.1** |
+| **Highlight-reconstruction mode** | clip / blend / **rebuild-from-adjacent-channels** (uses raw latitude that a rendered source has already discarded) | **E10.2** (halo-free recovery, raw-fed) |
+| **Full-latitude tone recovery** | highlights/shadows/whites/blacks acting on the pre-clip raw range, not the 8-bit display range | **E10.2** |
+| **Per-channel camera calibration** | camera-calibration R/G/B primary hue + saturation shift and shadow tint (the `crs:` Calibration-block analogue) | **E02.2** (calibration evaluator) → **E10.3** (panel) |
+| **Raw detail / raw geometry** | raw-domain (pre-demosaic) denoise; bad-pixel / hot-pixel removal; raw chromatic aberration | **E11.1/E11.2/E11.3** |
+
+| Develop surface element | Raw (CR3/NEF/ARW/RAF/DNG/…) | Non-raw (JPEG/TIFF/PNG/HEIC) |
+|---|---|---|
+| White balance (Kelvin + tint, as-shot, presets, eyedropper) | **full** (true Kelvin from sensor) | present but **relative** (WB is a working-space shift, not sensor re-interpretation; labeled as such) |
+| Camera profile / base look (matrix base + curated DCP + default look, §1.7) | **full** (matrix base always; DCP where curated) | **hidden** (no mosaic/camera-native color to profile; the embedded rendering is the base) |
+| Black / white point (raw black offset, clip level) | **full** (acts on the pre-transform linear range) | **hidden** (no raw range; levels fold into exposure/tone) |
+| Highlight **reconstruction** (rebuild clipped raw channels) | **full** (raw latitude present) | **hidden** (clipped JPEG data is unrecoverable — offer only highlight *compression*, not reconstruction) |
+| Per-channel camera calibration (primary hue/sat, shadow tint) | **full** (E02.2) | **hidden** (no camera-native primaries to calibrate) |
+| Demosaic / raw-denoise / raw geometry (X-Trans, bad-pixel) | **full** (E11) | **hidden** (already demosaiced) |
+| Exposure/contrast/tone-curve/HSL/color-grade/B&W/presence | **full** | **full** |
+| Detail (sharpen, luma/chroma NR), optics (lens/CA/defringe), geometry (crop/upright/transform) | **full** | **full** (lens profile applies if EXIF identifies the lens; else manual) |
+| Masking, local adjustments, retouch, AI masks | **full** | **full** |
+| Export | **full** | **full** |
+
+The surface is driven by a single `SourceKind { Raw, Rendered }` flag on the probe (§2.2 `AssetProbe`); panels declare a `min_source_kind` and the shell hides those the active file cannot satisfy. **The v2.1 completeness bar is a panel-population contract, not new pipeline work:** the node-graph already varies every one of these parameters (§4.1); the guarantee is that the raw develop surface *surfaces every one of them as a control* rather than presenting a reduced panel — enforced as an E08/E10 acceptance check that every raw-only group above has a live, wired control on a raw source. This mirrors the Lightroom develop experience (raw gets the full basic panel; a JPEG opens in the same Develop module with the raw-only affordances inapplicable) — and it means **the pipeline, engine, edit store, and export path are identical across source types**; only the *visible controls* differ.
+
+**Deployment/rollback story for the entry model:** the working-set loader (E04) and the shell drop-handling (E08) are additive over the built E01 shell. Ship Phase 1 (drop → filmstrip → loupe over the existing display-transform node) with no develop panels; roll back by reverting E04/E08 and dropping no migrations (the working set is not persisted, so there is no schema to unwind). The develop panels layer on top without touching the entry contract.
 
 ---
 
@@ -318,6 +413,35 @@ Ownership is explicit: **`asset`** = one physical file (immutable original); **`
 **Edit-state ownership — one live owner per entity (resolves the `edit_recipe.doc`-vs-mask/retouch-table authority question):** `edit_recipe.doc` is authoritative for the **global** recipe (base profile, global stages, geometry, `lb_extra`, `xmp_passthrough`) and for the **ordered reference lists** (`MaskId[]`, `RetouchOpId[]`) that sequence local edits — it does **not** embed mask or retouch *content*. The **`mask` + `mask_component` tables are the sole authoritative store for mask content** (component geometry/params, per-mask `adjust`, and the AI `cached_raster_ref` / `stale` runtime state); the **`retouch_op` table is the sole authoritative store for retouch objects**. The split is deliberate, not incidental: mask-raster baking and AI-staleness updates (§4.5) mutate `mask_component` on their own cadence and must never rewrite the recipe blob or perturb `history_step` — dual-homing mask/retouch content in both the blob and the tables would be exactly the silent-divergence trap the single-source-of-truth rule exists to prevent. The in-memory `Recipe` (§2.2 / §3.2) is a **materialized view** assembled by joining `edit_recipe.doc`'s reference lists against these tables; `Recipe::to_xmp()` and `snapshot.recipe_doc` are **read-only materialized projections** that gather content from the authoritative tables into one self-contained document — a snapshot is an immutable point-in-time copy, explicitly **not** a second live owner. `edit_index` is derived from `edit_recipe.doc` + the mask tables inside the same write txn, so there is exactly one write path and no divergence.
 
 **Crash-safety invariant:** every catalog mutation is a single WAL transaction; `PRAGMA synchronous = NORMAL` in WAL is proven safe against `kill -9` (torn writes impossible; at most the last uncommitted transaction is lost). Verified by fault-injection tests (§8).
+
+#### 3.1.1 v2.0 rescope — the catalog becomes an internal **edit store + cache index** (retain vs keep-dormant)
+
+The v2.0 mandate cuts the DAM but keeps the *crash-safe transactional store* — it is now the **edit store**: recipes, snapshots, history, mask/retouch content, and cache/preview/sidecar bookkeeping, **keyed by `content_hash` (path is a hint, not identity)**. The crate keeps its name (`lightbox-catalog`) — renaming 16 crates' worth of imports is unwarranted churn (mandate: no code deletion planned); its *role* is reframed, not rebuilt. **On open, a file gets an `asset` row (content-hash keyed) + an `image` row on demand**; there is no managed import, no `import_session`, no folder tree of record. The store is **plumbing, never a user-facing surface**.
+
+**Disposition of the v1.x tables — decision: KEEP-DORMANT (not retire-drop).** One choice, justified: E01 already shipped schema v1 with these tables and is `kill -9`-verified against real catalogs; a destructive migration that *drops* columns/tables carries rollback risk (copy-on-write upgrade, restore drills) for **zero user benefit** — a dormant table that is never written and never queried costs nothing at runtime and nothing in VRAM/disk. Dropping them is a reversible future migration if ever wanted; keeping them dormant is the crash-safe, no-churn default and honors "no code deletion planned in this doc." So:
+
+| Table | v2.0 disposition | Rationale |
+|---|---|---|
+| `asset`, `image` | **RETAIN** (reframed) | one row per opened file / editable instance; `content_hash`-keyed; `folder_id` nullable (path stored on asset), virtual copies still fall out for free |
+| `edit_recipe`, `edit_index` | **RETAIN** — the core of the edit store | recipe authority (§3.2); `edit_index` badges the filmstrip |
+| `history_step`, `snapshot` | **RETAIN** | history + named versions are editor features |
+| `mask`, `mask_component`, `retouch_op` | **RETAIN** | authoritative local-edit content (§3.1 ownership note) |
+| `preview` | **RETAIN** (rescoped) | indexes the preview store for filmstrip + develop-open, not a 100k grid |
+| `model_pack` | **RETAIN** | AI model provenance/license manifest |
+| `metadata_cache` | **RETAIN (read-only, minimal)** | the editor's info panel reads EXIF (camera/lens/exposure/ISO/date); it is a per-open cache, **not** a filter-facet index |
+| `schema_version` | **RETAIN** | migration guard |
+| `folder` | **KEEP-DORMANT** | no managed physical tree of record; the working set is session state (§2.4); asset carries its path directly |
+| `collection`, `collection_set`, `collection_item`, `smart_collection` | **KEEP-DORMANT** | collections/albums/smart-collections cut |
+| `keyword`, `keyword_hierarchy`, `keyword_asset` | **KEEP-DORMANT** | hierarchical keywords cut (XMP `dc:subject` still round-trips as passthrough via E09, not via these tables) |
+| `label`, `flag`, `rating` | **KEEP-DORMANT** | culling grammar cut |
+| `embedding` | **KEEP-DORMANT** | semantic search cut |
+| `face`, `person`, `face_person` | **KEEP-DORMANT** | faces/people cut |
+| `import_session` | **KEEP-DORMANT** | managed import cut; files open in place |
+| `assets_fts` (FTS5) | **KEEP-DORMANT** | free-text filter bar cut |
+
+**Sidecar strategy (per mandate):** the edit store is the **automatic, always-on internal persistence** — every recipe mutation commits transactionally so reopening a file by content-hash restores its recipe with no user action. **XMP sidecar export is opt-in** (a preference / explicit "write metadata"): the edit store is the single writer of record; XMP is a projection (§2.3 seam 3, unchanged), with `xmp_passthrough` preserving foreign fields. The `preview` table's `sidecar sync state` is tracked so a divergent sidecar surfaces a badge rather than silently overwriting — the same divergence contract as v1.x, now the *only* interop surface (no `.lrcat` catalog migration; see E16 rescope, §10).
+
+**Crash-safety, rescoped:** the `kill -9`-safety invariant above **stands unchanged** and is the surviving half of the v1.x "three bets" — it now guards the *edit store* (a lost uncommitted transaction = at most one un-persisted slider change), not a 100k-asset catalog.
 
 ### 3.2 Edit-recipe serialization (versioned, XMP-mappable)
 
@@ -478,6 +602,8 @@ This is the central concurrency decision. The render engine must hand a texture 
 
 ## 7. Performance budgets (tied to the quality bar)
 
+> **v2.0:** the DAM-scale rows below — **"import 10k raws"**, **"cull at keyboard speed"**, and **"catalog interactive at 100k+"** — are **superseded** (no library). The surviving budgets are the **editing** ones: develop slider **< 100 ms**, develop-open first-render, export throughput (now **working-set batch export**), the memory ceiling, and **crash safety** (rescoped to the edit store, §3.1.1). The filmstrip is a session set (tens–hundreds of files); it inherits the develop-open + preview budgets, not a 100k-grid budget. The 10× scale-check dimensions that were DAM-specific (1M assets, burst-import 100k, ANN index) are likewise moot; **fanout → masks/nodes per image** remains the live scale risk and its named rewrite trigger stands.
+
 | Quality-bar requirement | Budget (mid-range GPU: ~RTX 3060 / M-series base) | How the architecture meets it |
 |---|---|---|
 | Import 10k raws without blocking UI | grid browsable **< 60 s**; UI input latency unaffected throughout | embedded-preview-first extraction (multi-core, no render); standard previews build as Background jobs; demand-driven grid never waits on them |
@@ -527,54 +653,80 @@ Rust workspace; `lightbox-core` headless façade + egui shell that opens a catal
 **Why this shape for the skeleton (de-risks the #2 bet a full milestone early):** the two scariest integrations in the whole product are (a) egui custom-paint compositing a texture the render engine produced on the *same* wgpu device (the zero-copy seam, §2.3 seam 2) and (b) the `RenderNode`/DAG/cache trait boundary itself (§4.2). A blit-path skeleton exercises only (a) and defers (b) to M1/E05. Threading even a one-node graph through the real `Engine::submit`/`poll` at skeleton time proves the trait boundary and the shared-device handoff **together**, so E05 grows the DAG rather than discovering its seam is wrong.
 **Exit:** import 1 k raws; browse grid + loupe with no UI stall; the loupe image is produced by `Engine::submit` returning a texture composited zero-copy in the egui frame; `kill -9` mid-import leaves the catalog `integrity_check`-clean.
 
-### M1 — Library complete + develop foundation
-Full DAM (folders/sync, collections/sets, smart collections, hierarchical keywords, ratings/flags/labels, filter bar + FTS, virtual copies, relink); culling grammar + auto-advance; preview pyramid + demand-driven generation + raw cache; job system + activity center; remappable keymap. Render node-graph MVP with the **basic panel** (WB, exposure/contrast/highlights/shadows/whites/blacks, tone curve) at **process version 1**; **license-clean camera-matrix base color + the Lightbox-authored default look (§1.7, E02.1/E02.4) so every camera renders correct color with no bundled profile**; edit-state model + history + snapshots (buildable against the §3.2 schema ahead of the engine, E09); XMP read/write; two-module (Library/Develop) workspace.
-**Exit:** import 10 k raws non-blocking (< 60 s browsable); cull at keyboard speed; basic-panel slider < 100 ms at fit-view; catalog interactive at 100 k.
+> **v2.0 re-sequence (develop-first).** The v1.x milestones below M0 were *library-first* (M1 = "library complete", develop was a foundation slice). v2.0 inverts this: **the next milestone puts a draggable file on screen with working basic-tone editing.** M1 is now the **develop skeleton**; the DAM milestones are cut. M0 (built) stands unchanged — its walking-skeleton shape (one real `RenderNode` through the real `Engine` on the shared device) is exactly the substrate the develop-first M1 grows from. The four v2.0 milestones follow; the retired v1.x M1–M4 text is superseded by this block.
+
+### M1 — Develop skeleton: a dropped file with basic-tone editing (v2.0 headline)
+**Drag-drop / open-dialog entry (§2.4) → filmstrip → loupe → basic-panel editing that persists.** Working-set loader (E04, repurposed from the ingest walker) turns a dropped file/multi-file/folder/recursive-folder or an Open dialog selection into a session working set; the editor shell (E08, repurposed from the grid shell) renders the empty-state drop zone, the filmstrip, and the loupe. Real decode + **license-clean camera-matrix base color + the Lightbox-authored default look** (E02.1/E02.3/E02.4) so every camera renders correct color with no bundled profile; the **render node-graph engine** (E05) grows from the E01 seed; the **basic panel** (WB, exposure/contrast/highlights/shadows/whites/blacks, tone curve) at **process version 1** as the E10.1 slice; edit-state + history + snapshots (E09) auto-persist to the edit store so reopening the file by content-hash restores its recipe; preview pyramid + raw cache (E03) for fast develop-open; jobs (E06). Raw-vs-non-raw develop surface adapts per §2.4.
+**Exit:** drop a raw (and a JPEG) → it appears in the filmstrip and loupe within the preview budget; basic-panel slider **< 100 ms at fit-view**; edits auto-persist and survive `kill -9` (edit-store `integrity_check` clean) and app restart; non-raw source hides the raw-only panels.
 
 ### M2 — Full develop + color + export
-curated in-house **camera-matching DCP profiles** (E02.5 content line) layered over the M1 matrix base + default look; **clean-room RCD demosaic** replaces the interim path; full global toolset (HSL, color grading, curves, B&W, vibrance/sat, presence: clarity/texture/dehaze); detail (sharpen, luma/chroma NR); optics/geometry (lensfun + LCP + opcodes, CA/defringe, crop/rotate, upright/transform, post-crop vignette/grain); display + export color management; presets (incl. read LR `.xmp`); copy/paste/sync; before/after. Export engine (JPEG/PNG/TIFF/DNG/JXL/AVIF, sizing, output sharpening, watermark, metadata filtering, presets, external-editor round-trip).
-**Exit:** global develop feature-complete for the Must set; export a 3 k-image batch without starving the canvas; XMP develop round-trips.
+curated in-house **camera-matching DCP profiles** (E02.5 content line) layered over the M1 matrix base + default look; **clean-room RCD demosaic** replaces the interim path (E11.1); **halo-free highlight/shadow recovery** (E10.2) + full global toolset (HSL, color grading, curves, B&W, vibrance/sat, presence: clarity/texture/dehaze); detail (sharpen, luma/chroma NR); optics/geometry (lensfun + LCP + opcodes, CA/defringe, crop/rotate, upright/transform, post-crop vignette/grain); display + export color management; presets (incl. read LR `.xmp`); copy/paste/sync across the working set; before/after. Export engine (JPEG/PNG/TIFF/DNG/JXL/AVIF, sizing, output sharpening, watermark, metadata filtering, presets, external-editor round-trip).
+**Exit:** global develop feature-complete for the Must set; **batch-export the working set** without starving the canvas; XMP develop round-trips.
 
 ### M3 — Masking + local + AI
-Unified mask model (brush, linear/radial gradients, luminance + color range, boolean add/subtract/intersect); full per-mask slider set; mask management/overlays/pins/amount; non-destructive heal/clone + editable retouch objects (+ red-eye, visualize spots); **`lightbox-inferd`** ONNX host + model-pack manager + VRAM gating; **Select Subject / Sky / Background / Objects** (SAM2/BiRefNet/SegFormer) with AI-mask recompute/staleness.
+Unified mask model (brush, linear/radial gradients, luminance + color range, boolean add/subtract/intersect); full per-mask slider set; mask management/overlays/pins/amount; non-destructive heal/clone + editable retouch objects (+ red-eye, visualize spots); **`lightbox-inferd`** ONNX host + model-pack manager + VRAM gating (E13); **Select Subject / Sky / Background / Objects** (SAM2/BiRefNet/SegFormer) with baked-raster AI masks (E14, AI-masking only — semantic search/faces cut with the DAM).
 **Exit:** AI-masked local adjustments render interactively; masks serialize to recipe + XMP; inference crash is isolated and recovered.
 
-### M4 — v1.0 hardening + interop + core Should tier
-Lightroom `.lrcat` + `.xmp`/`crs:` **migration importer**; semantic search (OpenCLIP + sqlite-vec) + auto-tag; face detection + clustering (YuNet/SFace); content-aware remove (LaMa); smart previews; compare/survey; secondary display; corruption repair/restore flow; performance hardening to budget; cross-platform packaging; CI license/golden gates green. (Neural raw denoise ships as a **v1.x** flag per Risk 8.)
-**Exit — the mandate success scenario:** shoot → ingest & cull 3 000 raws → develop with global + AI-masked local adjustments → export delivered JPEGs, **entirely offline on a mid-range laptop**. All Must + core Should features shipped.
+### M4 — v1.0 hardening + XMP interop + core Should tier
+XMP `.xmp`/`crs:` **read interop** (open a file, honor an existing sidecar recipe approximately per Risk 9 — **no `.lrcat` catalog-migration importer**, cut with the DAM); content-aware remove (LaMa); secondary display; smart previews / offline-editing proxy; edit-store repair/restore flow; performance hardening to budget; cross-platform packaging; CI license/golden gates green. (Neural raw denoise ships as a **v1.x** flag per Risk 8.)
+**Exit — the mandate success scenario (v2.0):** open a 500-raw shoot folder (drop or Open) → color-correct and enhance the keepers with global + AI-masked local adjustments and retouch → apply a look across the working set → **batch-export delivery JPEGs, entirely offline on a mid-range laptop.** All Must + core Should editing features shipped.
 
 ---
 
-## 10. Epic breakdown (v1 Must + core Should)
+## 10. Epic breakdown (v2.0 — editing-first Must + core Should)
 
-16 epics, each individually spec'able by a planner. Dependencies reference epic ids. **Effort is stated honestly, not uniformly** — the earlier "everything is 1–4 weeks" framing was false and directly contradicted this document's own risk analysis (Risks 2 and 4, §4.1). Four epics are **VHigh multi-week, multi-person sub-projects** and are flagged as such with internal phases in §10.1; the rest range from S (~2 pw) to L (~6–10 pw). Sizes are **person-weeks (pw)** of focused engineering, excluding integration/hardening slack.
+### 10.0 E01 disposition audit (what the built code becomes — no deletion planned)
 
-**Team-size assumption the milestone plan depends on (without which M0–M4 convergence is unassessable).** The dependency graph is deliberately shaped into **parallel streams** — a catalog/DAM stream (E01/E03/E04/E07/E08), a pixel-engine stream (E05/E10/E11/E12), an edit/interop stream (E09/E15/E16), and an ML stream (E13/E14) — and the plan assumes **~4–5 engineers working those streams concurrently**. Total v1 effort sums to roughly **130–155 pw (~2.5–3.0 engineer-years)** (up from the earlier figure with E02's camera-color content line now budgeted honestly, §10.1); at 4–5 parallel engineers that is a **~9–12 month wall-clock** program including hardening.
+E01 is fully implemented and `kill -9`-verified (~19k LOC across 16 crates). v2.0 changes scope, not the foundation. **No code is deleted by this document**; each built surface is dispositioned **retained-as-is**, **retained-repurposed**, or **retired-dormant** (feature off, code left in place). This audit is the authoritative map from the built M0 to the v2.0 epics.
 
-**The pixel-engine stream requires ≥2 GPU/imaging-capable engineers — this is a hard resourcing commitment, not a preference.** The stream serializes ~42–62 pw of imaging-hard, dependency-chained work (E05 → E10.2 highlight recovery → E11.1 demosaic → E12.1 mask engine). Staffing it with a **single** specialist makes that engineer a **hero-critical path** — a single-point liability the architecture explicitly refuses to bless — and it breaks the 9–12-month wall-clock, because those four sub-projects cannot be parallelized within one person. **The plan therefore commits to ≥2 GPU/imaging-capable engineers on the pixel-engine stream.** If the org can staff only one such specialist, that is an accepted decision but the timeline changes with it: the four sub-projects **serialize**, adding roughly **+4–6 months** wall-clock (a **~15–18-month** program), and the milestone plan must be re-baselined to that longer clock. **What is not permitted is letting the 9–12-month claim ride on an unstated one-hero assumption** — the two-specialist requirement is stated here so the CTO accepts the headcount or the longer timeline explicitly, never by default. **On a single generalist engineer with no GPU/imaging depth this is not a bounded plan at all** — the pixel-engine sub-projects gate M1–M3 and are not general-backend work. The convergence claim in §9 is credible *only* under the ≥2-specialist parallel-staffing assumption above.
+| Built E01 surface | Disposition | v2.0 role / repurpose target |
+|---|---|---|
+| `lightbox-types` (id newtypes, `ContentHash`, `Orientation`, `ProcessVersion`, `SourceTier`) | **retained-as-is** | unchanged; `ContentHash` is now the edit-store primary key (§3.1.1) |
+| `lightbox-catalog` (SQLite/WAL, migrations, verified backup, integrity, DAOs) | **retained-repurposed** | reframed as the **edit store + cache index** (§3.1.1); DAM tables keep-dormant; crate name kept (no churn) |
+| `lightbox-jobs` (`Class`, `CancelToken`, `JobSystem::spawn`) | **retained-as-is** | the E06 seed; unchanged |
+| `lightbox-render` (`GpuContext`, `Engine` submit/poll, `RenderNode`/`NodeRegistry`, one real GPU node + golden harness) | **retained-as-is** | the E05 seed; E05.1 generalizes the one-node graph to the full DAG |
+| `lightbox-decode` (`probe`/`read_embedded`/`hash_file` frozen; `decode_*` declared) | **retained-as-is** | `probe` gains the `SourceKind` flag (§2.4); real decode is E02 |
+| `lightbox-preview` (`PreviewProvider`, embedded-JPEG extraction) | **retained-repurposed** | feeds the **filmstrip** (session set), not a 100k grid; rendered producers plug in at M1 (E03) |
+| `lightbox-shell` (**virtualized grid** + loupe, shared-device zero-copy composite) | **retained-repurposed** | the **grid virtualization machinery → the filmstrip**; loupe stays the editor canvas; **drop-zone + develop chrome are added** (E08) |
+| `lightbox-ingest` (walk / probe / hash / batch-insert; add-in-place import) | **retained-repurposed** | walker/probe/hash → the **working-set loader** (E04); the managed-import / `import_session` path is **retired-dormant** |
+| `lightbox-core` (`Core`/`Session`, `Command`/`Event` bus, `Queries`) | **retained-as-is** | headless boundary unchanged; commands gain "open working set" (E04/E08) |
+| `lightbox-edit` (`Recipe { schema, pv }` seed) | **retained-as-is** | E09 grows the full recipe |
+| `lightbox-cli` (create→import→list→render→check→backup e2e) | **retained-repurposed** | `import` becomes `open`-a-path; headless harness otherwise unchanged |
+| `lightbox-color` / `lightbox-meta` / `lightbox-mask` / `lightbox-ml` / `lightbox-export` (declared stubs) | **retained-as-is** | grown by E02/E09/E12/E13/E15 respectively |
+| **DAM schema tables** (folder/collection/keyword/label/flag/rating/embedding/face/import_session/FTS — §3.1.1) | **retired-dormant** | present in schema, never written; feature cut, code not deleted |
+| **CI gates** (3-surface license, golden-image, fault-injection, cross-platform matrix) | **retained-as-is** | unchanged — the license/color/crash mandate is untouched by the scope cut |
+
+### 10.1-preamble Epic set, sizing, and streams (v2.0)
+
+**15 live epics + 1 retired.** Dependencies reference epic ids. Effort is stated honestly in **person-weeks (pw)**, excluding integration slack. Four epics remain **VHigh multi-week pixel-engine sub-projects** (E05, E10, E11, E12) with internal phases in §10.1 — **the hard imaging work is unchanged by the scope cut; all v2.0 savings come from cutting the DAM, not from making the engine cheaper.** **(v2.1 adds one epic — E17 AI Looks — riding the existing recipe/color foundation, not the pixel engine.)**
+
+**Streams (v2.0, + v2.1).** The v1.x catalog/DAM stream collapses: E07 is retired; E04/E08 shrink to the entry model. The live streams are a **pixel-engine stream** (E05/E10/E11/E12, unchanged, the critical path), an **editor-shell stream** (E04/E08 entry model + UI), a **decode/color/edit stream** (E02/E03/E09/E15), and an **ML stream** (E13/E14). **v2.1 adds a small looks stream (E17) that hangs off the decode/color/edit stream** — it consumes E09 recipes + E10 color tools and (optionally) the E13 inference host; it touches **neither** the pixel-engine critical path nor the render engine's device. The **pixel-engine stream still requires ≥2 GPU/imaging-capable engineers** — this commitment is unchanged from v1.x (§10.1); it is the reason the timeline is engine-gated, not DAM-gated. E17 does **not** add to that GPU-engineer requirement (classical analysis + recipe synthesis, one generalist).
+
+**Effort recompute (meaningfully smaller — then v2.1 adds one leaf epic).** v1.x summed to ~130–155 pw. v2.0 removes the DAM: **E07 retired (−~6.5 pw)**, E04 shrinks (ingest→working-set loader, ~5→~2.5 pw), E08 shrinks (library-UI→editor-shell, no 100k grid/culling/compare-survey, ~9→~7.5 pw), E14 shrinks (drop CLIP search + faces, ~7.5→~5 pw), E16 shrinks (drop `.lrcat` migration, ~8→~5.5 pw). **v2.0 total ≈ 105–120 pw**, of which E01 (~5 pw) is **already banked**. **v2.1 adds E17 (AI Looks, ~6–8 pw)** → **v2.1 total ≈ 111–128 pw; remaining future effort ≈ 106–123 pw**. The pixel-engine stream (E05/E10/E11/E12 ≈ 42–62 pw) is **untouched by v2.1** and remains the wall-clock driver — E17 rides the recipe/color foundation and parallelizes against the engine, so it does not extend the critical path.
 
 | id | slug | title | effort | milestone | depends_on |
 |---|---|---|---|---|---|
-| E01 | foundation-workspace-catalog | Foundation: workspace, catalog, headless core, shell skeleton (incl. one real RenderNode through the Engine, §9 M0) | **M** ~4–6 pw | M0 | — |
+| E01 | foundation-workspace-catalog | Foundation: workspace, edit-store, headless core, shell skeleton (incl. one real RenderNode through the Engine, §9 M0) — **BUILT** | **M** ~4–6 pw *(done)* | M0 | — |
 | E02 | decode-color-foundation | Decode & color foundation (rawler + LibRaw sandbox; camera-matrix base + DCP parse/evaluate; **Lightbox-authored default look**; LCMS2 + working/display/output color; **curated camera-profile content line** — decomposed in §10.1) | **XL** ~9–14 pw | M1 | E01 |
-| E03 | preview-cache-pyramid | Preview pyramid & raw cache | **M** ~3–5 pw | M0 | E01 |
-| E04 | ingest-import-pipeline | Ingest & import pipeline | **M** ~3–5 pw | M1 | E01, E03 |
+| E03 | preview-cache-pyramid | Preview pyramid & raw cache (rescoped: filmstrip + fast develop-open, not a 100k grid) | **M** ~3–5 pw | M1 | E01 |
+| E04 | working-set-loader | **Working-set loader & drag-drop intake** (repurposed from the ingest walker): walk single/multi/folder/recursive-folder + open-dialog → session working set; probe/hash/order; **no managed import** | **S** ~2–3 pw | M1 | E01, E03 |
 | E05 | render-node-graph-engine | Render node-graph engine — **VHigh, decomposed in §10.1** | **XL** ~10–16 pw / 2 eng | M1 | E01, E02 |
 | E06 | jobs-background-system | Jobs & background task system | **S–M** ~3–4 pw | M1 | E01 |
-| E07 | catalog-dam | Catalog DAM core (folders/sync, collections, smart-collection AST→SQL, keywords, filter+FTS, relink; **EXIF/IPTC metadata viewer + editor, metadata presets, sync-metadata across a selection** — reads the catalog `metadata_cache`/keyword tables, writes out through `lightbox-meta` / E09's write-metadata command, seam 3 §2.3) | **L** ~5–8 pw | M1 | E01 (metadata write-out consumes E09's write-metadata command — same-milestone seam, not a scheduling edge) |
-| E08 | library-ui-culling | Library UI & culling (virtualized grid/loupe/filmstrip, compare/survey, on-canvas gizmos, culling grammar, keymap; **performance preferences panel** — binds cache/raw-cache caps + relocation + T2 retention (E03/§3.3), GPU enable + VRAM thresholds (§6), and job-concurrency knobs (E06) to the prefs store the owning subsystems read) | **L–XL** ~7–11 pw | M1 | E01, E03, E06, E07 |
-| E09 | edit-state-history-presets | Edit state, history, presets, XMP (CBOR recipe, **ISO 16684 XMP Toolkit RDF engine + own `crs:`/`lb:` mapping — §1.6**, `crs:` import, presets) | **M** ~4–6 pw | M1 | E01 |
-| E10 | develop-global-toolset | Develop — global toolset incl. **halo-free highlight/shadow recovery** — **VHigh, decomposed in §10.1** | **XL** ~10–14 pw | M2 | E02, E05, E09 |
+| E07 | catalog-dam | **RETIRED (v2.0).** DAM core (folders/collections/smart-collections/keywords/filter+FTS/relink/metadata-editor) — the entire library concept is cut. The minimal EXIF info panel folds into E08; XMP field round-trip rides E09's passthrough. | *(retired)* | — | — |
+| E08 | editor-shell | **Editor shell, drag-drop entry & develop UI** (repurposed from library-UI/culling): empty-state drop zone, filmstrip (from the grid machinery), loupe, develop panels + on-canvas gizmos, keymap, **performance preferences panel** — binds cache caps/GPU/VRAM/job knobs (§3.3/§6/E06). Grid/culling/compare-survey/smart-collection UI **retired**. | **L** ~7–9 pw | M1 | E01, E03, E04, E05, E09 |
+| E09 | edit-state-history-presets | Edit state, history, presets, XMP (CBOR recipe, **ISO 16684 XMP Toolkit RDF engine + own `crs:`/`lb:` mapping — §1.6**, `crs:` read, presets; **content-hash keyed, auto-persist on open/edit** per §3.1.1) | **M** ~4–6 pw | M1 | E01 |
+| E10 | develop-global-toolset | Develop — global toolset incl. **halo-free highlight/shadow recovery** — **VHigh, decomposed in §10.1** (E10.1 basic-panel slice lands at M1, the develop-skeleton headline) | **XL** ~10–14 pw | M2 | E02, E05, E09 |
 | E11 | detail-optics-geometry | Detail, optics, geometry & **clean-room demosaic** — **VHigh, the single hardest item, decomposed in §10.1** | **XL** ~12–18 pw / GPU-imaging eng | M2 | E02, E05 |
 | E12 | masking-local-and-retouch | Masking, local adjustments & retouch — **VHigh, biggest pixel-engine lift after demosaic, decomposed in §10.1** | **XL** ~10–14 pw | M3 | E05, E10 |
 | E13 | ml-inference-platform | ML inference platform (`lightbox-inferd`, ONNX + **DirectML/CoreML/CPU EPs — CUDA/TensorRT optional user-installed, not bundled, §1.5**, IPC, model-pack manager, VRAM gating, supervision) | **L** ~6–9 pw | M3 | E01, E06 |
-| E14 | ai-masking-and-search | AI masking & library intelligence (SAM2/BiRefNet/SegFormer; baked-raster masks; CLIP search; faces) | **L** ~6–9 pw | M3 | E12, E13, E07 |
-| E15 | export-output | Export & output engine | **M–L** ~5–7 pw | M2 | E05, E06, E09 |
-| E16 | interop-migration-hardening | Interop, migration & v1 hardening (LR `.lrcat`/`crs:` importer, LaMa remove, packaging, CI gates, perf) | **L** ~6–10 pw | M4 | E07, E09, E14, E15 |
+| E14 | ai-masking | **AI masking** (rescoped from ai-masking-and-search): SAM2/BiRefNet/SegFormer Select Subject/Sky/Background/Objects; baked-raster masks (§4.5). **CLIP semantic search + faces/people + auto-tag retired** with the DAM. | **M–L** ~4–6 pw | M3 | E12, E13 |
+| E15 | export-output | Export & output engine (incl. **batch-export the working set**) | **M–L** ~5–7 pw | M2 | E05, E06, E09 |
+| E16 | interop-hardening | **Interop & v1 hardening** (rescoped from interop-migration-hardening): XMP `.xmp`/`crs:` **read** interop, LaMa content-aware remove, packaging, CI gates, perf. **LR `.lrcat` catalog-migration importer retired** (no catalog to migrate into). | **M–L** ~4–7 pw | M4 | E09, E14, E15 |
 
-**Two sizing/dependency corrections worth stating explicitly:**
-- **E08 is re-baselined up (was ~5–8 pw → ~7–11 pw).** A from-scratch immediate-mode egui surface — virtualized 100k grid + loupe + filmstrip + compare/survey + on-canvas gizmos + remappable keymap — is a large build against a thin widget ecosystem (we own the docking/virtualization/gizmo widgets, §1.2). The estimate now carries that buffer. **Backstop:** the headless-core boundary (§1.2/§2.3 seam 1) means the reversal trigger is real — if egui's widget ceiling is hit, `lightbox-shell` swaps for a Qt/Slint shell against the *same* core API, a bounded single-crate rewrite, not an architecture change. Keep that trigger explicit.
-- **E09 depends on the frozen recipe schema (§3.2), not on the render engine (E05).** The CBOR recipe, the XMP `crs:`/`lb:` mapping, and `from_lr_crs()` import can be built and property-tested (§8) against the §3.2 schema *before* the Engine exists — the schema is decision-complete in this document. Decoupling E09 from E05 lets the edit/interop stream start at M1 alongside the pixel stream instead of serializing behind it. (E09 still integrates with E05 at render time, but that is consumption, not a build dependency.)
+**Sizing/dependency notes (v2.0):**
+- **E08 (editor-shell) is re-baselined *down* from v1.x E08 (~7–11 → ~7–9 pw).** The 100k virtualized grid, culling grammar, and compare/survey are cut; the filmstrip reuses the built virtualization machinery (§10.0) bounded to a session set. What it *gains* — drop-zone, develop-panel chrome, raw-vs-non-raw surface (§2.4) — is net smaller than the DAM UI it sheds. The **reversal trigger stands** (§1.2/§2.3 seam 1): if egui's widget ceiling is hit, swap `lightbox-shell` for a Qt/Slint shell against the same headless core — a bounded single-crate rewrite.
+- **E09 depends on the frozen recipe schema (§3.2), not on the render engine (E05).** Unchanged from v1.x. The CBOR recipe + XMP mapping build and property-test against §3.2 before the Engine exists, so the decode/color/edit stream starts at M1 alongside the pixel stream. v2.0 adds content-hash keying + auto-persist (§3.1.1) — additive, not a re-architecture.
+- **E04 (working-set-loader) is the smallest new-scope epic.** It is the ingest walker minus managed copy/second-copy/import-sessions, plus drop-path/open-dialog/recursive-folder intake into a session set (§2.4). Deployment: additive over E01; rollback drops no migrations (the working set is not persisted).
 
 ### 10.1 VHigh sub-project decomposition (internal phases)
 
@@ -617,6 +769,8 @@ These epics are **not** 1–4-week units and must not be spec'd as such. The fou
 ---
 
 ## 11. Risk register
+
+> **v2.0:** the pixel-engine and license risks (1, 2, 3, 4, 6, 7, 8, 9, 10) are **unchanged** — the scope cut does not touch the hard imaging/color/licensing work. **Risk 5 (catalog corruption on `kill -9`)** survives, **rescoped to the edit store** (§3.1.1) — it remains the surviving member of the "three bets". The DAM-scale worries folded into §7's superseded rows (1M-asset ANN index, burst-import) are **retired with the library**. **Risk 9 (LR migration fidelity)** narrows: `.lrcat` catalog migration is cut (E16), so only **XMP `crs:` read** interop carries the approximate-develop-settings caveat.
 
 The risks the rest of this document references by number. Each names the failure mode, the epic/section that carries it, and the mitigation the design commits to. Two of these (Risk 2, Risk 4) are the reason four pixel-engine epics are sized as VHigh sub-projects in §10.1; two (Risk 1, Risk 10) are the reason the CI license gate is a **three-surface** gate in §8 — crate graph, native binaries, **and bundled content/data**.
 

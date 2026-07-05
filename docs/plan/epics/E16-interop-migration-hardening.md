@@ -1,3 +1,5 @@
+> **SUPERSEDED (v2.0, 2026-07-05)** — replaced by [E16-interop-hardening.md](E16-interop-hardening.md); retained as historical record.
+
 # E16 — Interop, migration & v1 hardening
 
 _Epic spec. Milestone: **M4**. Effort: **L, ~6–10 pw** (this plan lands at ~40 task-days ≈ 8 pw). Depends on: **E07** (catalog DAM: rule AST, collections/keywords commands), **E09** (recipe/XMP: `from_lr_crs`, `xmp_passthrough`), **E14** (AI masking platform in place; transitively E12 retouch objects + E13 `lightbox-inferd`), **E15** (export engine, needed by the end-to-end scenario and release validation)._

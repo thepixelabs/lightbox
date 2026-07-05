@@ -1,3 +1,5 @@
+> # ⛔ SUPERSEDED (v2.0) — E07 is RETIRED. Lightbox is now an editing-first raw developer with no DAM; the entire library concept (folders/collections/smart-collections/keywords/filter+FTS/relink/metadata-editor) is cut. This spec is retained as historical record only — do not implement. See `docs/plan/00-mandate.md` (v2.0) and `docs/plan/01-architecture.md` §10 (v2.0 epic table) / §3.1.1 (DAM tables keep-dormant).
+
 # E07 — Catalog DAM core
 
 _Implementation spec. Milestone **M1** · Effort **L ~5–8 pw** · Depends on **E01** (foundation: workspace, catalog crate, headless core, migrations, command bus)._

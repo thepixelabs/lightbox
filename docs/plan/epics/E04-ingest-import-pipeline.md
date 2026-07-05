@@ -1,3 +1,5 @@
+> **SUPERSEDED (v2.0, 2026-07-05)** — replaced by [E04-working-set-loader.md](E04-working-set-loader.md); retained as historical record.
+
 # E04 — Ingest & Import Pipeline
 
 _Implementation spec. Milestone **M1**. Effort **M ~3–5 pw** (cut-line named in §8). Depends on **E01** (workspace, catalog schema v1, headless core, job-runtime seed), **E03** (preview pyramid & raw cache API). Planner: staff-engineer, per `01-architecture.md` (decision-complete; nothing here re-litigates stack, seams, or data-model ownership)._
