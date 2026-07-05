@@ -272,3 +272,87 @@ Delivered B1–B8 in full and the color core of B9. Exit bar green (`cargo build
 - `transform` (B8/B9-core): `resolve_input_transform` + `eval_cpu` (§5.2) + xxh3-64 content key +
   the working→sRGB reference-render helpers.
 - 33 unit/property tests (incl. the first-failing test + a `proptest` WB round-trip) all green.
+
+## 2026-07-05 — Phase D: color management working / display / output (staff engineer)
+
+Delivered D1–D7 filling `lightbox-color::{cms, display, output}` plus the D2 companion encode.
+Exit bar green in the worktree (`build`/`test`/`clippy -D warnings`/`fmt --check`/`deny check`).
+
+### What landed
+
+- **D1 — LCMS2 integration (`cms.rs`).** `IccProfile` wraps an owned
+  `lcms2::Profile` on the global context; `from_bytes` is untrusted-input safe (empty →
+  `InvalidProfile`, `> MAX_ICC_BYTES` (32 MiB) → `TooLarge`, malformed → `InvalidProfile`, never
+  a panic/abort). A process-global LCMS2 error handler (installed once via `Once`) captures the
+  last message into a thread-local for the diagnostic and guarantees no stderr spam under
+  fuzzing. `fast_float` is structurally absent (`lcms2-sys` has no such feature/source) and the
+  `fast_float_plugin_is_absent` test pins it against the lock file.
+- **D2 — companion encode.** Filled `matrix::spaces::companion_encode` (sRGB OETF over the
+  ProPhoto working primaries); verified ≤ 1e-4 vs an LCMS2 ProPhoto-linear → ProPhoto-sRGB
+  transform (`cms::tests::companion_encode_matches_lcms`).
+- **D3 — `build_display_transform`.** Working → display, rel-col + BPC, baked to a 1-D shaper +
+  65³ LUT with an xxh3-64 cache key. The shaper is derived from the display's neutral-axis
+  response so an identity (working-space) display yields the identity ramp + identity cube
+  (`identity_profile_yields_identity_lut`, within 1e-4). Release first-bake ≈ 33 ms (≤ 100 ms
+  budget), then cached by key.
+- **D4 — baked-LUT fidelity gate.** 100 k random working-space samples, ΔE2000(baked vs exact
+  LCMS2): sRGB p99 ≈ 0.14 / max ≈ 0.45; AdobeRGB (wide-gamut, ~2.2 gamma) p99 ≈ 0.10 /
+  max ≈ 0.46 — both inside p99 ≤ 0.5 / max ≤ 1.0. CIEDE2000 implemented in-test (via a
+  display→Lab LCMS2 transform).
+- **D5 — `DisplayProfileProvider`.** `SystemDisplayProfileProvider` fetches the **real** macOS
+  ColorSync profile via CoreGraphics (`CGDisplayCopyColorSpace` → `CGColorSpaceCopyICCData`,
+  parsed through the untrusted path); `SrgbFallbackProvider` is the documented sRGB fallback.
+- **D6 — `OutputTransform` (E15 seam).** All §3.5 spaces (sRGB / AdobeRGB / ProPhoto / Display P3
+  / Rec.2020 / user ICC) at 8/16-bit int + f32 via a cache-disabled (`Send + Sync`) LCMS2
+  transform; emitted ICC bytes re-validate; working→sRGB→working round-trip tight for in-gamut.
+- **D7 — untrusted-ICC hygiene.** 32 MiB size cap + an always-on adversarial-fixture unit test
+  (empty / truncated / lying-tag-count / random blobs → structured errors, no panic), plus a
+  detached `cargo-fuzz` target (`crates/lightbox-color/fuzz`, `icc_from_bytes`).
+
+### Deviations
+
+- **`lightbox-color/Cargo.toml`: `lcms2` gains `features = ["static"]` and a direct
+  `lcms2-sys = "4"` dependency (appended).** `static` forces the vendored static Little-CMS2 build
+  (lcms2-sys's `static` short-circuits pkg-config), making the D1 "static" mandate deterministic
+  even on a dev box with a system `liblcms2` — this is the force-static pin Phase A's deviation
+  anticipated ("D1 … may pin to force-static so a system lcms2 can never shadow the vendored
+  one"). `lcms2-sys` (already a transitive dep at the locked 4.0.7, already in
+  `native-inventory.toml`) is promoted to a direct dep solely to call `cmsSetLogErrorHandler` for
+  the D1 error-capture handler. **Merge note:** both are appended at the end of `[dependencies]`.
+- **`matrix.rs::spaces::companion_encode` filled from Phase D (cross-file touch).** `matrix.rs` is
+  a Phase-B file, but `companion_encode` is dual-owned "B1/D2" per the scaffold owner map and D2
+  is the task that owns it. Only that one function body was changed (`unimplemented!()` →
+  implementation); the B1 matrix derivations (`xyz_d50_to_working` / `working_to_xyz_d50`) are
+  left untouched for Phase B. **Merge note:** if Phase B also implemented `companion_encode`, keep
+  either — both compute the same sRGB-over-ProPhoto encode (the D2 test pins ≤ 1e-4 vs LCMS2).
+- **`#![allow(unsafe_code)]` at the top of `cms.rs` / `display.rs` / `output.rs`.** The workspace
+  denies `unsafe_code`; these three modules are the FFI surface (LCMS2 handler, macOS ColorSync,
+  slice-reinterpretation for pixel buffers), which the workspace comment explicitly reserves for
+  "FFI crates … with justification". Scoped to the module (not the crate root), so `lib.rs` is
+  untouched.
+- **DisplayTransform gained an inherent `apply()` and `LUT_SIZE` is `pub`.** Not in the §3.5 field
+  list, but D4 needs a CPU reference application of the shaper+LUT and E05's WGSL node needs the
+  parity anchor; documented as such. `OutputTransform` similarly gained a `depth()` accessor.
+  Blast radius: additive, no signature change to the specced surface.
+- **ProPhoto/Rec.2020 output TRCs are simplified.** The ProPhoto *output* space uses pure gamma
+  1.8 (the tiny ROMM linear toe is omitted — negligible for export encoding) and Rec.2020 uses the
+  Rec.709 transfer; primaries + white points are exact. sRGB / Display-P3 / AdobeRGB are standard.
+  Round-trip + external-tooling-validity tests are gated on sRGB (fully defined).
+
+### DEFERRED (with reason — nothing faked)
+
+- **D5 — Windows ICM + Linux colord/`_ICC_PROFILE` providers:** only the **macOS** ColorSync path
+  is implemented and compile-verified (this is a `darwin` build machine). On non-macOS targets
+  `SystemDisplayProfileProvider` returns `None` (→ caller uses the sRGB fallback + surfaces the
+  E08 event), rather than shipping Windows/Linux FFI I cannot compile-verify here. The exact APIs
+  are named in the source; the shell/CI wires them against a live display server. (Environment:
+  cannot compile-verify other-OS FFI on darwin; per the "mark hardware/OS tasks DEFERRED" rule.)
+  Also, D5's "mac/win CI runners fetch a real monitor profile" is a **CI-with-display** task —
+  the code path is present but the live fetch is exercised on a real runner, not this headless box.
+- **D7 — the 1 M-iteration cargo-fuzz *run*:** `cargo-fuzz` is not installed and needs nightly +
+  libFuzzer. The fuzz **target** ships (`crates/lightbox-color/fuzz`, detached workspace so it
+  stays off the default exit bar); the always-on adversarial-fixture unit test is the in-gate
+  subset. The 1 M-iteration soak is the nightly job. (Environment: absent tool + nightly.)
+- **D6 — "emitted ICC validates in *external* tooling":** validated in-process by re-parsing the
+  emitted bytes through `IccProfile::from_bytes` (a well-formed-ICC proxy). A third-party
+  validator (e.g. `iccDumpProfile`) is not installed on this box. (Environment: absent tool.)

@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-fuzz target for the untrusted ICC parser (E02 §6 D7: "fuzz target over
+# IccProfile::from_bytes", "1 M+ iterations zero crash/OOM"). Fuzzing is a
+# nightly/off-gate job — this crate is a DETACHED workspace (own empty
+# `[workspace]` table below) so it never enters the default
+# build/clippy/deny/fmt exit bar. Build and run with:
+#
+#   cargo +nightly fuzz run icc_from_bytes    # from crates/lightbox-color
+#
+# The in-tree adversarial-fixture unit test (`cms::tests`) is the always-on
+# subset; this target is the deep corpus the nightly job drives.
+
+[package]
+name = "lightbox-color-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lightbox-color = { path = ".." }
+
+[[bin]]
+name = "icc_from_bytes"
+path = "fuzz_targets/icc_from_bytes.rs"
+test = false
+doc = false
+bench = false
