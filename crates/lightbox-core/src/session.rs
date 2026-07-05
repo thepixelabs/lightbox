@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use lightbox_catalog::{BackupOpts, BackupReport, Catalog, CatalogTxn};
 use lightbox_ingest::{import_add_in_place, ImportEvent, ImportOptions};
 use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
-use lightbox_preview::{PreviewProvider, UnavailablePreviewProvider};
+use lightbox_preview::{EmbeddedPreviewProvider, PreviewProvider};
 use lightbox_render::{Engine, GpuContext, NodeRegistry, NullSourceResolver};
 use tokio::sync::{broadcast, mpsc};
 
@@ -41,6 +41,7 @@ use crate::command::{Command, CommandTicket};
 use crate::config::CoreConfig;
 use crate::error::Result;
 use crate::event::{ChangeSet, Event};
+use crate::previews::CatalogAssetLocator;
 use crate::queries::Queries;
 
 /// The headless core (spec §3.8): owns the job system; opens sessions.
@@ -202,11 +203,19 @@ impl Session {
             schema_version = catalog.schema_version(),
             "session open"
         );
+        // T21 wiring: the embedded-preview provider, LRU capped in bytes
+        // per CoreConfig (spec §3.6), resolving images via the catalog.
+        let previews: Arc<dyn PreviewProvider> = Arc::new(EmbeddedPreviewProvider::new(
+            Arc::clone(&core.jobs),
+            Arc::new(CatalogAssetLocator::new(Arc::clone(&catalog))),
+            core.cfg.preview_cache_bytes,
+        ));
+
         Ok(Session {
             inner: Arc::new(SessionInner {
                 catalog,
                 engine,
-                previews: Arc::new(UnavailablePreviewProvider::default()),
+                previews,
                 events,
                 cmd_tx,
                 next_ticket: AtomicU64::new(1),
@@ -244,9 +253,11 @@ impl Session {
         self.inner.events.subscribe()
     }
 
-    /// The preview provider (spec §3.6 seam). Phase-4 sessions hand out the
-    /// `UnavailablePreviewProvider` placeholder; T21 wires the real
-    /// `EmbeddedPreviewProvider`.
+    /// The preview provider (spec §3.6 seam): the embedded-preview
+    /// implementation at M0 (demand-driven, cancellable, request-deduped,
+    /// byte-capped LRU per `CoreConfig::preview_cache_bytes`). Callers that
+    /// stop polling a ticket must `cancel` it (the grid cancels on
+    /// scroll-out, spec §5.3).
     pub fn previews(&self) -> Arc<dyn PreviewProvider> {
         Arc::clone(&self.inner.previews)
     }

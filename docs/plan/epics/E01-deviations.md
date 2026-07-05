@@ -293,3 +293,95 @@ Each entry names the spec point, the deviation, and why.
 - **New third-party crates:** `walkdir` 2 (Unlicense OR MIT — T17 names it)
   and `unicode-normalization` 0.1 (MIT OR Apache-2.0 — §4.3 NFC filenames).
   Both pass the cargo-deny license gate unchanged.
+
+## Phase 5 — Probe & previews
+
+- **rawler replaced by in-crate permissive container walkers (T19).** The
+  spec's "rawler metadata path for raws" collides with its own PR-blocking
+  license gate: rawler is **LGPL-2.1** (all published versions, incl. 0.7.2,
+  checked July 2026), and architecture §1.6/deny.toml deny copyleft in the
+  crate graph ("LGPL only via dynamic FFI, never as a crate"). Following the
+  Phase 1 precedent (xxhash-rust → twox-hash), the dependency was replaced,
+  not allowlisted: `lightbox-decode` now ships a bounded TIFF/IFD walker
+  (CR2/NEF/ARW/ORF/DNG/plain TIFF + embedded TIFF blobs), an ISO-BMFF walker
+  for CR3 (CMT1/CMT2 metadata, THMB/PRVW/track-JPEG previews), and a RAF
+  header parser — structures only, bounds-checked, iteration-capped,
+  cycle-guarded; malformed input is `Err`, never a panic. Verified against
+  an independent (python) walk of the pinned corpus at authoring time; all
+  seven fixture mounts probe correctly. Coverage risk R4 now applies to our
+  walkers instead of rawler; E02's LibRaw-sandbox fallback seam is unchanged.
+- **New third-party crates (all pass the deny gate unchanged):**
+  `kamadak-exif` 0.6 (BSD-2-Clause; + its dep `mutate_once`, BSD-2-Clause) —
+  spec-named, used for JPEG APP1 and PNG eXIf fields; `zune-jpeg` 0.5
+  (MIT/Apache-2.0/Zlib; + `zune-core`) and `fast_image_resize` 6 (MIT/
+  Apache-2.0) per §3.6. TIFF files ride the same in-crate walker as the
+  raws rather than kamadak-exif (one parser, already required for preview
+  byte ranges).
+- **Content-first sniffing; the extension plays two spec-mandated roles.**
+  Magic bytes pick the walker. Unrecognizable content behind an extension
+  that *claims* a supported format (`.cr2`, `.jpg`, …) is
+  `ProbeError::Malformed` — satisfying the T19 AC that the corrupt corpus
+  "returns Err" — and ingest catalogues it as a `decode_error` row (T18);
+  unrecognizable content behind unknown extensions stays
+  `ProbedFormat::Unsupported` (catalogued, badged) per §3.7. Recognizable
+  but unimplemented containers (HEIC-brand BMFF, Panasonic RW2's 0x0055
+  TIFF magic) are `Unsupported`, not `Malformed`.
+- **JPEG originals are their own "embedded preview"** (whole-file byte
+  range in `AssetProbe::embedded`) so the M0 provider serves imported JPEGs
+  through the same pipeline; PNG/TIFF originals report none and render the
+  grid placeholder until E02 decodes them.
+- **capture_time:** probe returns "RFC3339 with offset if present" (§3.7
+  verbatim): local time bare when the file has no `OffsetTimeOriginal`,
+  `±HH:MM`-suffixed when it does (Z 6/R6/fp fixtures). §4.3's
+  "UTC-normalized storage" note is thus only approximated at M0 — ingest
+  stores the probe string verbatim (Phase 4 behavior, unchanged);
+  UTC-normalizing at the ingest seam is E04/E07 cleanup if wanted.
+- **Full-size dims for raws are best-metadata, not decode-derived:** EXIF
+  `PixelX/YDimension` when present, else the largest non-preview IFD's dims
+  (sensor-area, e.g. E-1 2624×1966 vs 2560×1920 output), else the largest
+  embedded preview's SOF dims (the RAF path — its metadata JPEG *is* the
+  full-size reference). Committed expectations:
+  `crates/lightbox-decode/tests/probe_expectations.toml`.
+- **T19's "< 20 ms probe" AC is logged, not hard-asserted** (warm probes
+  measure ~0.1–1.3 ms on the dev machine; the test asserts a generous 250 ms
+  blowup guard because CI timing asserts flake — the formal budget belongs
+  to T28's perf harness).
+- **`decode_raw`/`decode_image` declared returning
+  `DecodeError::Unimplemented`** (spec: "declared but unimplemented") with
+  `#[non_exhaustive]` placeholder types (`DecodeOpts`, `MosaicImage`,
+  `LinearImage`) whose real bodies E02 designs; `camera_matrix_base` is NOT
+  declared (§3.7 doesn't spell its signature — freezing a guess would bind
+  E02 wrongly).
+- **"Tiny embedded preview" rule (T20 AC):** a rendition is unusable when
+  its long edge < 256 px *and* it doesn't cover the original's full
+  dimensions (a small JPEG original is its own image and always usable; the
+  E-1's 160×120 thumb inside a 5 MP raw is not). Loupe requires a usable
+  rendition; `Thumb{max_px}` relaxes the bar to `min(max_px, 256)`. Below
+  it: `PreviewError::NoEmbedded` → grid placeholder. The Sigma fp DNG
+  fixture (no JPEG rendition at all) covers the "no" case.
+- **`AssetLocator` seam added in `lightbox-preview`** (`ImageId → path +
+  effective orientation`): §3.6 leaves `EmbeddedPreviewProvider`'s
+  construction unspecified, and the provider must not depend on
+  `lightbox-catalog`; `lightbox-core` implements it over the reader pool
+  (`image_detail` + `asset_abs_path`). Documented as wiring, not part of
+  the frozen surface.
+- **Provider semantics the spec leaves open:** `cancel()` also *releases*
+  ticket state (idempotent; polling a released ticket = `Cancelled`) —
+  callers that stop polling must cancel, which §5.3 already mandates for
+  the grid; thumbs bake orientation *after* the downscale (cheaper, same
+  pixels); thumb selection picks the smallest rendition covering the
+  requested edge (cheapest decode), loupe the largest; a decoded image
+  larger than the whole cache budget is served but not cached; per-ticket
+  failures (`Io`/`Decode`) don't poison the provider or the job counters.
+- **`cargo-fuzz` seed target lives at `crates/lightbox-decode/fuzz`**
+  (workspace-`exclude`d so the nightly-only libFuzzer crate never enters
+  the PR-gate graph), fuzzing `probe()` + `read_embedded()` with
+  extension-varied inputs; non-gating at M0 per T19.
+- **Phase 4 ingest tests updated for the real probe:** synthetic import
+  trees now write real tiny-JPEG payloads (unique EOI-trailing pads keep
+  content hashes distinct) so success-path tests still test success;
+  junk-content-behind-supported-extension behavior got its own T18 test
+  (row lands with `decode_error` set, per-file report entry, batch not
+  aborted). `Session::previews()` now hands out the real provider — the
+  Phase 4 placeholder test asserts the request→job→poll lifecycle against
+  an unknown image id instead of `Unavailable`.

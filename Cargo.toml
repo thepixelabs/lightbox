@@ -4,6 +4,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "tools/*"]
+# The cargo-fuzz seed target (spec §5 T19: fuzzing non-gating at M0) builds
+# only under `cargo fuzz` (nightly, libFuzzer); keep it out of the PR-gate graph.
+exclude = ["crates/lightbox-decode/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -59,6 +62,13 @@ twox-hash = { version = "2", default-features = false, features = [
   "std",
 ] }
 sha2 = "0.11"
+# Probe + embedded-preview pipeline (spec §3.6/§3.7). NOTE: the spec names
+# rawler for raw metadata, but rawler is LGPL-2.1 — denied in the crate graph
+# by deny.toml/architecture §1.6 — so raw containers are probed by
+# lightbox-decode's own permissive walkers instead (E01-deviations.md, Phase 5).
+kamadak-exif = "0.6"
+zune-jpeg = "0.5"
+fast_image_resize = "6"
 proptest = "1"
 tempfile = "3"
 fastrand = "2"

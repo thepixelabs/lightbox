@@ -5,22 +5,27 @@
 //! [`PreviewProvider`].
 //!
 //! Owned by **E01 as a seed** (spec §3.6). This crate freezes the trait and
-//! its vocabulary types; `EmbeddedPreviewProvider` — a cancellable,
+//! its vocabulary types; [`EmbeddedPreviewProvider`] — cancellable,
 //! request-deduping, byte-capped in-memory LRU over the camera's embedded
-//! JPEG — is E01 Phase 5 (T21). **E03** owns the real tiered on-disk pyramid
-//! (T0/T1/T2) behind the same trait — this crate is explicitly a seam, not a
-//! competing implementation.
+//! JPEG — is the M0 implementation (T20/T21). **E03** owns the real tiered
+//! on-disk pyramid (T0/T1/T2) behind the same trait — this crate is
+//! explicitly a seam, not a competing implementation.
 //!
-//! **Status: Phase-4 slice.** The frozen §3.6 surface below is what
-//! `lightbox-core`'s `Session::previews()` (seam 1) hands out; until T21
-//! lands, sessions are wired with [`UnavailablePreviewProvider`], which fails
-//! every request immediately instead of pretending to have pixels.
+//! Wiring: the provider maps `ImageId → file path + orientation` through the
+//! small [`AssetLocator`] seam (implemented by `lightbox-core` over the
+//! catalog) so this crate stays SQL-free and unit-testable.
 
+mod embedded;
+mod pipeline;
+
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use lightbox_jobs::Class;
-use lightbox_types::{ImageId, SourceTier};
+use lightbox_types::{ImageId, Orientation, SourceTier};
+
+pub use embedded::{EmbeddedPreviewProvider, ProviderStats};
 
 /// Which rendition of an image is being asked for (spec §3.6).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -115,6 +120,26 @@ impl PreviewTicket {
     }
 }
 
+/// Where an image's original file lives on disk (plus its effective
+/// orientation). The provider's link back to the catalog **without** a
+/// catalog dependency: `lightbox-core` implements this over its readers.
+/// Constructor plumbing for [`EmbeddedPreviewProvider`] — not part of the
+/// frozen §3.6 surface.
+pub trait AssetLocator: Send + Sync {
+    /// Resolves an image to its backing original.
+    fn locate(&self, image: ImageId) -> Result<LocatedAsset, PreviewError>;
+}
+
+/// One located original.
+#[derive(Clone, Debug)]
+pub struct LocatedAsset {
+    /// Absolute path of the original file.
+    pub path: PathBuf,
+    /// Effective orientation (image override or the asset's EXIF value) —
+    /// baked into thumbnails, left to the render node for the loupe source.
+    pub orientation: Orientation,
+}
+
 /// Demand-driven preview provision (spec §3.6, frozen surface for E03).
 pub trait PreviewProvider: Send + Sync {
     /// Requests a preview of `image` at `class`, scheduled under
@@ -127,10 +152,10 @@ pub trait PreviewProvider: Send + Sync {
     fn cancel(&self, t: &PreviewTicket);
 }
 
-/// Wiring placeholder until T21's `EmbeddedPreviewProvider`: every request
-/// fails immediately with [`PreviewError::Unavailable`]. Sessions built in
-/// Phase 4 hand this out so `Session::previews()` (spec §3.8) exists without
-/// pretending pixels are coming.
+/// A provider that fails every request immediately with
+/// [`PreviewError::Unavailable`] — for embedders/tests that need a
+/// `Session`-shaped object without preview wiring. Real sessions hand out
+/// [`EmbeddedPreviewProvider`] since T21.
 #[derive(Debug, Default)]
 pub struct UnavailablePreviewProvider {
     next_id: AtomicU64,
@@ -143,7 +168,7 @@ impl PreviewProvider for UnavailablePreviewProvider {
 
     fn poll(&self, _t: &PreviewTicket) -> PreviewState {
         PreviewState::Failed(PreviewError::Unavailable(
-            "embedded preview provider lands in E01 Phase 5 (T21)".to_owned(),
+            "no preview provider is wired to this session".to_owned(),
         ))
     }
 

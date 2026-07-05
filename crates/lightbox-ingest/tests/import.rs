@@ -14,6 +14,23 @@ use lightbox_ingest::{
 use lightbox_jobs::CancelToken;
 use tempfile::TempDir;
 
+/// A real (826-byte) JPEG so files probe cleanly since T19 landed the real
+/// `probe()` (junk bytes behind a supported extension now catalogue as
+/// `decode_error` rows — covered by their own test below).
+const TINY_JPG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tools/xtask/assets/lightbox-tiny.jpg"
+));
+
+/// A valid JPEG payload with a unique trailing pad (after EOI, ignored by
+/// decoders) so every file gets a distinct content hash.
+fn jpeg_payload(tag: &str) -> Vec<u8> {
+    let mut bytes = TINY_JPG.to_vec();
+    bytes.extend_from_slice(b"pad:");
+    bytes.extend_from_slice(tag.as_bytes());
+    bytes
+}
+
 /// A source tree:
 /// ```text
 /// src/
@@ -21,7 +38,7 @@ use tempfile::TempDir;
 ///   notes.txt              (filtered: unknown extension)
 ///   .hidden.jpg            (filtered: hidden)
 ///   sub/
-///     NESTED_0001.cr3 … NESTED_000m.cr3
+///     NESTED_0001.cr3 … NESTED_000m.cr3   (JPEG bytes: content-sniffed)
 /// ```
 fn source_tree(n_root: usize, m_sub: usize) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
@@ -30,14 +47,14 @@ fn source_tree(n_root: usize, m_sub: usize) -> (TempDir, PathBuf) {
     for i in 1..=n_root {
         std::fs::write(
             src.join(format!("IMG_{i:04}.jpg")),
-            format!("root jpeg payload {i}"),
+            jpeg_payload(&format!("root {i}")),
         )
         .unwrap();
     }
     for i in 1..=m_sub {
         std::fs::write(
             src.join("sub").join(format!("NESTED_{i:04}.cr3")),
-            format!("nested raw payload {i}"),
+            jpeg_payload(&format!("nested {i}")),
         )
         .unwrap();
     }
@@ -278,7 +295,7 @@ fn filenames_are_stored_nfc_normalized() {
     let nfd_name = "cafe\u{0301}.jpg";
     let nfc_name = "caf\u{e9}.jpg";
     assert_ne!(nfd_name, nfc_name);
-    std::fs::write(src.join(nfd_name), "payload").unwrap();
+    std::fs::write(src.join(nfd_name), jpeg_payload("café")).unwrap();
 
     let catalog = temp_catalog(dir.path());
     let outcome = import_add_in_place(
@@ -316,7 +333,7 @@ fn non_utf8_filename_is_rejected_per_file() {
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(src.join("good.jpg"), "good payload").unwrap();
+    std::fs::write(src.join("good.jpg"), jpeg_payload("good")).unwrap();
     let bad_name = OsStr::from_bytes(b"bad\xff\xfe.jpg");
     match std::fs::write(src.join(bad_name), "bad payload") {
         Ok(()) => {}
@@ -338,6 +355,60 @@ fn non_utf8_filename_is_rejected_per_file() {
     assert_eq!(outcome.report.errors.len(), 1);
     assert!(outcome.report.errors[0].1.contains("UTF-8"));
     assert_eq!(catalog.reader().counts().unwrap().assets, 1);
+}
+
+/// T18 (with the real T19 probe): content that fails probing — junk behind
+/// a supported extension, like the corrupt corpus — still catalogues, with
+/// `decode_error` set and a per-file report entry; the batch never aborts.
+#[test]
+fn malformed_content_catalogues_with_decode_error() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("good.jpg"), jpeg_payload("good")).unwrap();
+    std::fs::write(src.join("junk.cr2"), "definitely not a raw file").unwrap();
+
+    let catalog = temp_catalog(dir.path());
+    let outcome = import_add_in_place(
+        &catalog.writer(),
+        &src,
+        &ImportOptions::default(),
+        &CancelToken::new(),
+        &mut no_events(),
+    )
+    .unwrap();
+
+    assert_eq!(outcome.report.imported, 2, "both rows land (T18)");
+    assert_eq!(
+        outcome.report.errors.len(),
+        1,
+        "{:?}",
+        outcome.report.errors
+    );
+    assert!(
+        outcome.report.errors[0].1.contains("probe failed"),
+        "{:?}",
+        outcome.report.errors
+    );
+
+    let reader = catalog.reader();
+    let page = reader
+        .images_page(&lightbox_catalog::ImageQuery {
+            folder: None,
+            sort: lightbox_catalog::SortOrder::FilenameAsc,
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    let flag_of = |name: &str| {
+        page.items
+            .iter()
+            .find(|i| i.filename == name)
+            .unwrap_or_else(|| panic!("{name} missing"))
+            .decode_error
+    };
+    assert!(flag_of("junk.cr2"), "junk row carries decode_error");
+    assert!(!flag_of("good.jpg"), "good row is clean");
 }
 
 /// The report round-trips through the session `stats` JSON (what the

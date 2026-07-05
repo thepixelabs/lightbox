@@ -24,6 +24,7 @@ mod config;
 mod error;
 mod event;
 pub mod observability;
+mod previews;
 mod queries;
 mod session;
 

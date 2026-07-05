@@ -4,19 +4,24 @@
 //! `lightbox-decode` — file probing, hashing, and (later) raw decode.
 //!
 //! Owned by **E01 for the probe surface only** (spec §3.7): `probe()`
-//! (rawler metadata for raws, header/EXIF parse for JPEG/TIFF/PNG),
+//! (container metadata for raws, header/EXIF parse for JPEG/TIFF/PNG),
 //! `read_embedded()`, streaming xxh3-128 [`hash_file`]. `decode_raw` /
 //! `decode_image` / camera-matrix color are declared by E01 but
 //! **implemented by E02** — E01 takes zero dependency on raw decode
 //! (architecture §9 M0).
 //!
-//! **Status: Phase-4 slice.** [`hash_file`] is final (T17 needs content
-//! hashes for dup-skip). [`probe`] is the **T19 stub** the spec's task order
-//! explicitly tolerates ("T19 stub returns `Unsupported` until Phase 5
-//! lands", T17): it stats the file and reports [`ProbedFormat::Unsupported`]
-//! for everything, never panicking. Phase 5 (T19/T20) replaces the body with
-//! the real rawler/EXIF probing plus `read_embedded`, behind these exact
-//! frozen types.
+//! **Status: Phase-5 (T19/T20).** [`probe`] is real: content-sniffed
+//! dispatch into bounded, never-panicking container walkers — an in-crate
+//! TIFF/IFD walker for CR2/NEF/ARW/ORF/DNG/TIFF, an ISO-BMFF walker for CR3,
+//! the RAF fixed header, JPEG SOF scan + `kamadak-exif`, PNG IHDR.
+//! [`read_embedded`] does the ranged read of a probed preview. `decode_raw`
+//! / `decode_image` are declared (E02 implements).
+//!
+//! **Deviation (recorded in E01-deviations.md):** the spec suggests rawler
+//! for raw metadata, but rawler is LGPL-2.1 and the crate graph's license
+//! gate (deny.toml, architecture §1.6) forbids copyleft crates — the
+//! permissive in-crate walkers above replace it, covering all seven fixture
+//! mounts.
 
 use std::io::Read;
 use std::ops::Range;
@@ -24,6 +29,8 @@ use std::path::Path;
 
 use lightbox_jobs::CancelToken;
 use lightbox_types::{ContentHash, Orientation};
+
+mod probe;
 
 /// What kind of file a probe found (spec §3.7, frozen).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -109,36 +116,51 @@ pub enum ProbeError {
 }
 
 /// Metadata-only probe of an original file (spec §3.7). Never panics on
-/// malformed input; anything unrecognized is [`ProbedFormat::Unsupported`].
+/// malformed input; anything unrecognized is [`ProbedFormat::Unsupported`]
+/// — still catalogued, badged, never a crash. Content whose *extension*
+/// claims a supported format but whose bytes are unrecognizable (the
+/// corrupt corpus) is [`ProbeError::Malformed`].
 ///
-/// **Phase-4 stub (T19 lands the real body):** stats the file and returns
-/// `Unsupported(<extension>)` with unknown dimensions for *every* input —
-/// the task order spec T17 explicitly tolerates ("T19 stub returns
-/// `Unsupported` until Phase 5 lands"). Files imported while the stub is in
-/// force are catalogued as `'UNSUPPORTED'`.
+/// Reads structures only (a few KiB even on a 45 MB raw), never image
+/// payloads — hashing is separate ([`hash_file`]) and streamed.
 pub fn probe(path: &Path) -> Result<AssetProbe, ProbeError> {
-    let meta = std::fs::metadata(path)?;
-    if !meta.is_file() {
-        return Err(ProbeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("not a regular file: {}", path.display()),
+    probe::probe_impl(path)
+}
+
+/// Reads one embedded preview's byte range from the original file
+/// (spec §3.7). The range comes from a prior [`probe`]; a range that no
+/// longer fits the file (edited/truncated since probing) is
+/// [`ProbeError::Malformed`].
+pub fn read_embedded(path: &Path, info: &EmbeddedPreviewInfo) -> Result<Vec<u8>, ProbeError> {
+    let len = info
+        .byte_range
+        .end
+        .checked_sub(info.byte_range.start)
+        .filter(|l| *l > 0)
+        .ok_or_else(|| ProbeError::Malformed("empty embedded-preview range".into()))?;
+    let file_len = std::fs::metadata(path)?.len();
+    if info.byte_range.end > file_len {
+        return Err(ProbeError::Malformed(format!(
+            "embedded-preview range {}..{} exceeds file size {file_len}",
+            info.byte_range.start, info.byte_range.end
         )));
     }
-    let hint = path
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "no extension".to_owned());
-    Ok(AssetProbe {
-        format: ProbedFormat::Unsupported(format!("probe pending T19 ({hint})")),
-        width: 0,
-        height: 0,
-        orientation: Orientation::O1,
-        camera_make: None,
-        camera_model: None,
-        capture_time: None,
-        file_bytes: meta.len(),
-        embedded: Vec::new(),
-    })
+    let mut file = std::fs::File::open(path)?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(info.byte_range.start))?;
+    let mut buf = vec![
+        0u8;
+        usize::try_from(len).map_err(|_| {
+            ProbeError::Malformed("embedded-preview range exceeds addressable memory".into())
+        })?
+    ];
+    file.read_exact(&mut buf).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            ProbeError::Malformed("embedded preview truncated on disk".into())
+        } else {
+            ProbeError::Io(e)
+        }
+    })?;
+    Ok(buf)
 }
 
 /// Chunk size for [`hash_file`] — 1 MiB per spec §3.7; cancellation is
@@ -169,6 +191,51 @@ pub fn hash_file(path: &Path, cancel: &CancelToken) -> Result<ContentHash, Probe
         hasher.write(&buf[..n]);
     }
     Ok(ContentHash(hasher.finish_128().to_be_bytes()))
+}
+
+// ---------------------------------------------------------------------------
+// Declared now, implemented by E02 (spec §3.7 / §1.1: the E02 seam). Only
+// the *signatures* are frozen; the option/image types below are placeholders
+// whose real bodies E02 designs — `#[non_exhaustive]` keeps callers honest.
+// ---------------------------------------------------------------------------
+
+/// Options for raw decode (E02 designs the real fields).
+#[non_exhaustive]
+#[derive(Clone, Debug, Default)]
+pub struct DecodeOpts {}
+
+/// A mosaic (pre-demosaic) raw image. E02 designs the real body.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct MosaicImage {}
+
+/// A linear-light decoded image (non-raw originals). E02 designs the real body.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct LinearImage {}
+
+/// Errors from the (E02) decode surface.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DecodeError {
+    /// E01 ships probe + embedded previews only (architecture §9 M0: zero
+    /// dependency on raw decode); E02 replaces this with the real pipeline.
+    #[error("raw/image decode is not implemented until E02")]
+    Unimplemented,
+}
+
+/// Decodes a raw file to its mosaic image. **E02 implements** (spec §2.2);
+/// E01 only freezes the signature.
+pub fn decode_raw(path: &Path, opts: DecodeOpts) -> Result<MosaicImage, DecodeError> {
+    let _ = (path, opts);
+    Err(DecodeError::Unimplemented)
+}
+
+/// Decodes a non-raw image (JPEG/TIFF/PNG) to linear light. **E02
+/// implements**; E01 only freezes the signature.
+pub fn decode_image(path: &Path) -> Result<LinearImage, DecodeError> {
+    let _ = path;
+    Err(DecodeError::Unimplemented)
 }
 
 #[cfg(test)]
@@ -216,14 +283,22 @@ mod tests {
     }
 
     #[test]
-    fn probe_stub_reports_unsupported_with_size() {
+    fn probe_of_junk_claiming_a_supported_extension_is_malformed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("IMG_0001.jpg");
         std::fs::write(&path, b"not really a jpeg").unwrap();
+        assert!(matches!(probe(&path), Err(ProbeError::Malformed(_))));
+    }
+
+    #[test]
+    fn probe_of_unknown_junk_is_unsupported_with_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, b"not an image and not claiming to be").unwrap();
         let p = probe(&path).unwrap();
         assert!(matches!(p.format, ProbedFormat::Unsupported(_)));
         assert_eq!(p.format.catalog_tag(), "UNSUPPORTED");
-        assert_eq!(p.file_bytes, 17);
+        assert_eq!(p.file_bytes, 35);
         assert_eq!((p.width, p.height), (0, 0));
         assert_eq!(p.orientation, Orientation::O1);
         assert!(p.embedded.is_empty());
@@ -235,6 +310,48 @@ mod tests {
         assert!(matches!(
             probe(&dir.path().join("gone.cr3")),
             Err(ProbeError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn read_embedded_validates_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        std::fs::write(&path, (0u8..=99).collect::<Vec<_>>()).unwrap();
+        let ok = read_embedded(
+            &path,
+            &EmbeddedPreviewInfo {
+                width: 1,
+                height: 1,
+                byte_range: 10..14,
+            },
+        )
+        .unwrap();
+        assert_eq!(ok, vec![10, 11, 12, 13]);
+        // Out-of-file and empty ranges are malformed, never a panic.
+        #[allow(clippy::reversed_empty_ranges)] // inverted range is the point
+        for range in [90..110u64, 5..5u64, 7..3u64] {
+            let out = read_embedded(
+                &path,
+                &EmbeddedPreviewInfo {
+                    width: 1,
+                    height: 1,
+                    byte_range: range,
+                },
+            );
+            assert!(matches!(out, Err(ProbeError::Malformed(_))), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn e02_decode_surface_is_declared_but_unimplemented() {
+        assert!(matches!(
+            decode_raw(Path::new("x.cr3"), DecodeOpts::default()),
+            Err(DecodeError::Unimplemented)
+        ));
+        assert!(matches!(
+            decode_image(Path::new("x.png")),
+            Err(DecodeError::Unimplemented)
         ));
     }
 

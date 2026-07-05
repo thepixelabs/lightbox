@@ -533,16 +533,35 @@ fn engine_and_previews_are_reachable_headless() {
         lightbox_render::BackendKind::CpuOnly
     );
 
-    // Phase-4 previews: the placeholder fails fast instead of pretending.
+    // T21 previews: the real embedded-preview provider is wired. An image
+    // id the catalog does not know must fail that TICKET cleanly (Io from
+    // the catalog lookup, through a real decode job) — proving the
+    // request→job→poll lifecycle headlessly. Positive decode paths are
+    // covered by lightbox-preview's own fixture tests.
     let previews = session.previews();
     let ticket = previews.request(
-        ImageId(1),
+        ImageId(999_999),
         lightbox_preview::PreviewClass::Thumb { max_px: 256 },
         lightbox_jobs::Class::Background,
     );
-    match previews.poll(&ticket) {
-        lightbox_preview::PreviewState::Failed(lightbox_preview::PreviewError::Unavailable(_)) => {}
-        other => panic!("expected Unavailable, got {other:?}"),
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let outcome = loop {
+        match previews.poll(&ticket) {
+            lightbox_preview::PreviewState::Pending => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "preview never resolved"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            done => break done,
+        }
+    };
+    match outcome {
+        lightbox_preview::PreviewState::Failed(lightbox_preview::PreviewError::Io(msg)) => {
+            assert!(msg.contains("catalog lookup"), "{msg}");
+        }
+        other => panic!("expected Io failure for an unknown image, got {other:?}"),
     }
     session.close(ClosePolicy::Skip.into()).unwrap();
 }

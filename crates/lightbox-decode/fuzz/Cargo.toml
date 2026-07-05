@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-fuzz seed target for probe() (E01 spec §5 T19: "also seeds a
+# cargo-fuzz target, fuzzing itself is not CI-gating at M0"). Excluded from
+# the workspace (root Cargo.toml `exclude`); build/run with:
+#
+#   cargo +nightly fuzz run probe    # from crates/lightbox-decode
+#
+# The corpus grows in E02 alongside the real decoders.
+
+[package]
+name = "lightbox-decode-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+lightbox-decode = { path = ".." }
+
+[[bin]]
+name = "probe"
+path = "fuzz_targets/probe.rs"
+test = false
+doc = false
+bench = false
