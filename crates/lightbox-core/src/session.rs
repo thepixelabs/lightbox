@@ -33,8 +33,10 @@ use std::time::{Duration, Instant};
 use lightbox_catalog::{BackupOpts, BackupReport, Catalog, CatalogTxn};
 use lightbox_ingest::{import_add_in_place, ImportEvent, ImportOptions};
 use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
-use lightbox_preview::{EmbeddedPreviewProvider, PreviewProvider};
-use lightbox_render::{Engine, GpuContext, NodeRegistry, NullSourceResolver};
+use lightbox_preview::{AssetLocator, EmbeddedPreviewProvider, PreviewProvider};
+use lightbox_render::nodes::display_transform::{DisplayTransformNode, DisplayTransformPlanner};
+use lightbox_render::{Engine, GpuContext, NodeRegistry};
+use lightbox_types::PV_M0;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::command::{Command, CommandTicket};
@@ -43,6 +45,7 @@ use crate::error::Result;
 use crate::event::{ChangeSet, Event};
 use crate::previews::CatalogAssetLocator;
 use crate::queries::Queries;
+use crate::render_source::PreviewSourceResolver;
 
 /// The headless core (spec §3.8): owns the job system; opens sessions.
 pub struct Core {
@@ -161,14 +164,31 @@ impl Session {
         let lbdata = catalog.lbdata_dir().to_path_buf();
         let catalog = Arc::new(catalog);
 
-        // Engine wiring at Phase 4: empty registry, no sources, no planner —
-        // the ticket lifecycle exists; Phase 6 (T23) registers
-        // `display.transform` and the embedded-preview `SourceResolver`.
+        // T21 wiring: the embedded-preview provider, LRU capped in bytes
+        // per CoreConfig (spec §3.6), resolving images via the catalog.
+        let locator: Arc<dyn AssetLocator> =
+            Arc::new(CatalogAssetLocator::new(Arc::clone(&catalog)));
+        let previews: Arc<dyn PreviewProvider> = Arc::new(EmbeddedPreviewProvider::new(
+            Arc::clone(&core.jobs),
+            Arc::clone(&locator),
+            core.cfg.preview_cache_bytes,
+        ));
+
+        // T23 wiring: `display.transform` under PV_M0, planned over the
+        // embedded-preview SourceResolver — the loupe image is produced by
+        // Engine::submit, never a blit path that bypasses the engine
+        // (spec §9 M0, verbatim requirement).
+        let mut registry = NodeRegistry::new();
+        registry.register(PV_M0, Arc::new(DisplayTransformNode::new()));
         let engine = Arc::new(Engine::new(
             gpu,
-            NodeRegistry::new(),
-            Arc::new(NullSourceResolver),
+            registry,
+            Arc::new(PreviewSourceResolver::new(
+                Arc::clone(&previews),
+                Arc::clone(&locator),
+            )),
         )?);
+        engine.set_planner(Arc::new(DisplayTransformPlanner));
 
         let (events, _) = broadcast::channel::<Event>(core.cfg.event_capacity.max(16));
 
@@ -203,13 +223,6 @@ impl Session {
             schema_version = catalog.schema_version(),
             "session open"
         );
-        // T21 wiring: the embedded-preview provider, LRU capped in bytes
-        // per CoreConfig (spec §3.6), resolving images via the catalog.
-        let previews: Arc<dyn PreviewProvider> = Arc::new(EmbeddedPreviewProvider::new(
-            Arc::clone(&core.jobs),
-            Arc::new(CatalogAssetLocator::new(Arc::clone(&catalog))),
-            core.cfg.preview_cache_bytes,
-        ));
 
         Ok(Session {
             inner: Arc::new(SessionInner {

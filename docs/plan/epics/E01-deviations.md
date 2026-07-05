@@ -385,3 +385,67 @@ Each entry names the spec point, the deviation, and why.
   aborted). `Session::previews()` now hands out the real provider — the
   Phase 4 placeholder test asserts the request→job→poll lifecycle against
   an unknown image id instead of `Unavailable`.
+
+## Phase 6 — The real node & goldens
+
+- **Golden sources are synthetic, not the fetched raw corpus.** T23's AC
+  reads "golden test per fixture orientation case (1,3,6,8 at minimum)", but
+  every raw fixture in the pinned corpus carries EXIF orientation 1, and the
+  corpus itself is not committed (goldens must verify from a bare checkout,
+  offline). The golden matrix therefore renders a deterministic in-test
+  source card through `Engine::submit` at **all eight** orientations
+  (params-driven) plus two native-scale legs — exceeding the 1/3/6/8
+  minimum — with goldens committed at
+  `crates/lightbox-render/goldens/display.transform/pv1/` (~0.2–0.4 KB
+  each; the `<pv>` path segment is spelled `pv1`). Fixture previews are
+  covered end-to-end by a `lightbox-core` integration test (import real
+  fixtures → `Session::engine()` → render: CR3 → 240×160, JPEG original →
+  its own preview, previewless Sigma fp DNG → `Failed(Source)`, plus
+  byte-stability across runs).
+- **Goldens are blessed from the CPU path only; the GPU path is verified
+  against them** (and against the CPU output — the T24 parity leg). The
+  spec leaves bless-source policy open; a GPU-blessed golden would vary by
+  backend. `LIGHTBOX_BLESS=1` under CI fails (T22 AC), detected via the
+  `CI` env var. Observed on Metal: GPU output byte-identical to CPU.
+- **Comparator semantics the spec leaves open:** ΔE2000 is computed over
+  RGB (through Lab, D65, CIEDE2000 per Sharma 2005 — validated against the
+  paper's published test pairs); PSNR is computed over **all four RGBA**
+  channels so alpha regressions cannot hide (Lab has no alpha axis).
+  p99 is nearest-rank. Dimension mismatch is a hard error, never a ΔE.
+- **Planner policy (non-frozen scaffolding): `FitWithin` never upscales**
+  (output = oriented source fitted, capped at native size) — honest about
+  M0 embedded-preview resolution, matching T26's loupe wording; `Native` =
+  oriented source size. Pinned by `output_size` unit tests + golden sizes.
+- **`SourceResolver` M0 impl lives in `lightbox-core`
+  (`render_source.rs`), not `lightbox-preview`:** the resolver needs both
+  the `PreviewProvider` and `lightbox-render`'s trait, and Phase 4's
+  `SourceTier` deviation deliberately keeps wgpu out of
+  `lightbox-preview`'s tree. It requests the **loupe-class** rendition
+  (largest embedded preview, unoriented) at `Class::Interactive` and polls
+  on the render worker with cancel checkpoints; `RenderScale` is unused at
+  M0 (documented — E03's tiered store keys tiers off it behind the same
+  seam). Orientation comes from the catalog via the Phase-5 `AssetLocator`;
+  a provider that reports `orientation_applied` resolves as O1
+  (double-rotation guard).
+- **GPU/CPU determinism details documented in `display_transform.md`:**
+  both paths share written filter math (pixel-center bilinear in oriented
+  space, taps mapped through the EXIF table; explicit `a*(1-t)+b*t` lerp —
+  not WGSL `mix`); CPU quantizes round-half-up, GPU float→unorm tie
+  behavior is backend-defined; `pow` may differ by ULPs — all bounded by
+  ±1 LSB, inside the §4.4 perceptual gate. The CPU path (rayon over rows,
+  each pixel a pure function) is byte-stable across runs and thread counts
+  — asserted at both the render-crate and session level; the
+  `lightbox-cli render --cpu` byte-stability AC itself lands with the CLI
+  in Phase 7 (T27) on top of this property.
+- **New third-party crates (deny gate green, allowlist untouched):**
+  `png` 0.18 (MIT/Apache-2.0; pulls fdeflate/miniz_oxide/crc32fast/
+  simd-adler32, all allowlisted) for golden + failure-artifact IO, and
+  `rayon` 1.12 (MIT/Apache-2.0 — spec-named for the CPU path). Committed
+  golden PNGs are covered by a `REUSE.toml` annotation
+  (`crates/*/goldens/**`, Apache-2.0 — self-generated content, no
+  third-party pixels).
+- **CI: golden-failure artifact upload step added to ci.yml**
+  (`actions/upload-artifact@v4`, `if: failure()`, over
+  `target/tmp/golden-failures/` where the harness writes
+  actual/heatmap/golden PNGs) — the "failure artifact uploaded in CI" half
+  of the T22 AC.

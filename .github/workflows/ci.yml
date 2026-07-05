@@ -70,6 +70,17 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+      # E01 Phase 6 (T22): golden-image mismatches write actual/heatmap/golden
+      # PNGs under target/tmp/golden-failures — surfaced as CI artifacts so a
+      # red golden gate is diagnosable without a local repro.
+      - name: Upload golden-image failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures-${{ matrix.os }}
+          path: target/tmp/golden-failures/
+          if-no-files-found: ignore
+
       # E01 Phase 2 (T5/T7): zero-copy seam smoke — boots the eframe shell for
       # 60 frames and verifies a texture produced by Engine::submit was
       # composited on the SHARED wgpu device (exit 1 otherwise). Linux runs

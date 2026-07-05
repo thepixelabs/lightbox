@@ -8,8 +8,10 @@
 //! submit/poll/cancel with per-viewport latest-wins coalescing,
 //! [`NodeRegistry`] keyed `(NodeId, ProcessVersion)`, the [`RenderNode`]
 //! trait, the output [`TexturePool`], and the `solid.color` tracer node.
-//! Phase 6 (T23–T24) adds `DisplayTransformNode` in WGSL + CPU with golden
-//! parity tests. **E05** generalizes the seed to the full DAG (cache, tiling,
+//! Phase 6 (T23–T24) added [`nodes::display_transform`] — the one real M0
+//! node (WGSL compute + rayon CPU from one written algorithm spec,
+//! `display_transform.md`), golden-image tested with CPU/GPU parity per
+//! §4.4. **E05** generalizes the seed to the full DAG (cache, tiling,
 //! progressive refinement, device-lost recovery) starting from this exact
 //! trait surface — no double-build (architecture §10.1).
 //!

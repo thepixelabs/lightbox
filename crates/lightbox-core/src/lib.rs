@@ -26,6 +26,7 @@ mod event;
 pub mod observability;
 mod previews;
 mod queries;
+mod render_source;
 mod session;
 
 pub use command::{Command, CommandTicket};

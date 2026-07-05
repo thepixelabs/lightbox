@@ -26,6 +26,7 @@ lightbox-preview = { path = "crates/lightbox-preview" }
 lightbox-render = { path = "crates/lightbox-render" }
 lightbox-edit = { path = "crates/lightbox-edit" }
 lightbox-ingest = { path = "crates/lightbox-ingest" }
+lbx-image-compare = { path = "tools/lbx-image-compare" }
 
 # Third-party (shared versions; adapt here, not per-crate)
 serde = { version = "1", features = ["derive"] }
@@ -69,6 +70,11 @@ sha2 = "0.11"
 kamadak-exif = "0.6"
 zune-jpeg = "0.5"
 fast_image_resize = "6"
+# Golden-image harness (spec §5 T22): committed goldens + failure heatmaps
+# are PNGs; `png` is the image-rs codec (MIT/Apache-2.0).
+png = "0.18"
+# CPU node evaluation (spec §3.4/§5 T24 names rayon for the CPU path).
+rayon = "1"
 proptest = "1"
 tempfile = "3"
 fastrand = "2"

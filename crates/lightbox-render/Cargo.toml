@@ -21,9 +21,13 @@ serde.workspace = true
 ciborium.workspace = true
 twox-hash.workspace = true
 pollster.workspace = true
+# The display.transform CPU path (spec §3.4/§5 T24 names rayon).
+rayon.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
+# Golden-image + CPU/GPU parity tests (spec §5 T22–T24).
+lbx-image-compare.workspace = true
 
 [lints]
 workspace = true
