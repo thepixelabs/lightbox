@@ -264,6 +264,16 @@ pub(crate) fn newest_backup(backups_dir: &Path) -> Option<PathBuf> {
     best.map(|(_, p)| p)
 }
 
+/// When the newest verified backup was taken, parsed (UTC) from its dated
+/// directory name. Drives the exit-time backup policy in `lightbox-core`
+/// (spec §5 T15 / OQ-6).
+pub(crate) fn newest_backup_time(backups_dir: &Path) -> Option<std::time::SystemTime> {
+    let zst = newest_backup(backups_dir)?;
+    let dir_name = zst.parent()?.file_name()?.to_str()?;
+    let (stamp, _) = parse_dated_name(dir_name)?;
+    crate::clock::parse_backup_stamp_utc(stamp)
+}
+
 /// Removes all but the newest `retain` dated backups. Never touches
 /// `pre-upgrade-*` copies or anything else that is not a dated backup dir.
 fn prune(dest_root: &Path, retain: u32) -> Result<()> {

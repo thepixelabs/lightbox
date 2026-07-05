@@ -164,6 +164,15 @@ impl Catalog {
         self.schema_version
     }
 
+    /// When the newest *verified* backup was taken (UTC, parsed from its
+    /// dated directory name under `backups/`), or `None` when no verified
+    /// backup exists. `lightbox-core`'s exit-time backup policy ("on close,
+    /// unless the last backup is fresher than 24 h" — spec §5 T15, OQ-6)
+    /// keys on this.
+    pub fn newest_backup_time(&self) -> Option<std::time::SystemTime> {
+        crate::backup::newest_backup_time(&self.lbdata_dir.join("backups"))
+    }
+
     /// The `.lbdata` directory this catalog lives in.
     pub fn lbdata_dir(&self) -> &Path {
         &self.lbdata_dir

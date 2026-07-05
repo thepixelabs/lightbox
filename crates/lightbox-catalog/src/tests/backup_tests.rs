@@ -188,6 +188,29 @@ fn dest_override_redirects_backups() {
         .is_none());
 }
 
+#[test]
+fn newest_backup_time_tracks_verified_backups() {
+    let (dir, catalog) = temp_catalog();
+    let (_root, folder) = seed_folder(&catalog, dir.path());
+    seed_assets(&catalog, folder, "t", 2, 0, &[]);
+
+    // No backups yet.
+    assert_eq!(catalog.newest_backup_time(), None);
+
+    let before = std::time::SystemTime::now();
+    catalog.backup_verified(&BackupOpts::default()).unwrap();
+    let taken = catalog
+        .newest_backup_time()
+        .expect("a verified backup exists");
+    // Stamp precision is one second; allow that plus a little slack.
+    let skew = std::time::Duration::from_secs(2);
+    assert!(taken >= before - skew, "backup time in the past: {taken:?}");
+    assert!(
+        taken <= std::time::SystemTime::now() + skew,
+        "backup time in the future: {taken:?}"
+    );
+}
+
 fn list_sorted(dir: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()

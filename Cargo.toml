@@ -51,6 +51,8 @@ toml = "1"
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 zstd = "0.13"
 time = { version = "0.3", features = ["std", "formatting", "parsing", "macros"] }
+walkdir = "2"
+unicode-normalization = "0.1"
 twox-hash = { version = "2", default-features = false, features = [
   "xxhash3_128",
   "xxhash3_64",

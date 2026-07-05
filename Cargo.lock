@@ -1624,16 +1624,32 @@ version = "0.1.0"
 name = "lightbox-core"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
+ "lightbox-catalog",
+ "lightbox-ingest",
+ "lightbox-jobs",
+ "lightbox-preview",
+ "lightbox-render",
+ "lightbox-types",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
 name = "lightbox-decode"
 version = "0.1.0"
+dependencies = [
+ "lightbox-jobs",
+ "lightbox-types",
+ "tempfile",
+ "thiserror 2.0.18",
+ "twox-hash",
+]
 
 [[package]]
 name = "lightbox-edit"
@@ -1649,13 +1665,29 @@ version = "0.1.0"
 [[package]]
 name = "lightbox-ingest"
 version = "0.1.0"
+dependencies = [
+ "lightbox-catalog",
+ "lightbox-decode",
+ "lightbox-jobs",
+ "lightbox-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tracing",
+ "unicode-normalization",
+ "walkdir",
+]
 
 [[package]]
 name = "lightbox-jobs"
 version = "0.1.0"
 dependencies = [
  "pollster",
+ "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1673,6 +1705,11 @@ version = "0.1.0"
 [[package]]
 name = "lightbox-preview"
 version = "0.1.0"
+dependencies = [
+ "lightbox-jobs",
+ "lightbox-types",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "lightbox-render"
@@ -3186,12 +3223,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinyvec"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e61e67053d25a4e82c844e8424039d9745781b3fc4f32b8d55ed50f5f667ef3"
+dependencies = [
+ "tinyvec_macros",
+]
+
+[[package]]
+name = "tinyvec_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
 name = "tokio"
 version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
  "pin-project-lite",
+ "tokio-macros",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -3358,6 +3422,15 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-segmentation"

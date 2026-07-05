@@ -66,14 +66,10 @@ pub enum SourcePixelFormat {
     Rgba8Srgb,
 }
 
-/// Which pipeline tier the source pixels came from.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-#[non_exhaustive]
-pub enum SourceTier {
-    /// The camera's embedded JPEG preview (M0's only tier; E03 adds the
-    /// pyramid tiers, E02+E05 the raw decode).
-    EmbeddedPreview,
-}
+// `SourceTier` is shared vocabulary with `lightbox-preview`'s `DecodedImage`
+// (spec §3.6), so it lives in `lightbox-types`; re-exported here so the spec
+// §3.5 path (`lightbox_render::SourceTier`) is unchanged.
+pub use lightbox_types::SourceTier;
 
 /// A resolver with no sources: every resolve is [`SourceError::NotFound`].
 ///

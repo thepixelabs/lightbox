@@ -134,6 +134,19 @@ pub struct ProcessVersion(pub u16);
 /// The M0 process version — the only one that exists during E01.
 pub const PV_M0: ProcessVersion = ProcessVersion(1);
 
+/// Which pipeline tier produced a set of pixels (spec §3.5/§3.6).
+///
+/// Shared vocabulary between the pixels-in seam (`lightbox-render`'s
+/// `SourceImage`) and the preview seam (`lightbox-preview`'s `DecodedImage`).
+/// M0 knows only the camera's embedded JPEG; **E03** adds the on-disk pyramid
+/// tiers and **E02+E05** the raw-decode path — hence `#[non_exhaustive]`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum SourceTier {
+    /// The camera's embedded JPEG preview.
+    EmbeddedPreview,
+}
+
 /// Pick/reject flag on an `image` row. Stored as -1/0/+1 in the catalog.
 #[derive(
     Copy, Clone, PartialEq, Eq, Hash, Debug, Default, serde::Serialize, serde::Deserialize,

@@ -9,11 +9,21 @@
 //! **E06** grows it (priority preemption, pause/resume, activity center);
 //! the surface frozen here is E06's stated starting point.
 //!
-//! **Status: seed in progress.** [`CancelToken`] landed with E01 Phase 2 —
-//! the render engine's frozen `SourceResolver`/`GpuCtx` surfaces (spec §3.4,
-//! §3.5) carry it, so it could not wait for Phase 4. `JobSystem`, `Class`,
-//! `spawn`/`spawn_blocking` and `JobHandle` arrive with Phase 4 (T14).
+//! # Shape (spec §3.3, frozen surface for E06)
+//!
+//! - [`Class`] — Interactive / Foreground / Background, each with its own
+//!   semaphore budget: Interactive never queues behind Background.
+//! - [`JobSystem::spawn`] / [`JobSystem::spawn_blocking`] — async and sync
+//!   work under a class budget, returning a [`JobHandle`].
+//! - [`JobHandle`] — `cancel` / `join` (async) / `try_result` (non-blocking
+//!   poll for the UI).
+//! - [`CancelToken`] — hierarchical, cooperative cancellation
+//!   (`JobError::Cancelled` is a normal outcome).
+//! - Stages talk over ordinary **bounded** `tokio::sync::mpsc` channels; the
+//!   seed adds no channel wrapper of its own.
 
 mod cancel;
+mod system;
 
 pub use cancel::CancelToken;
+pub use system::{Class, JobConfig, JobError, JobHandle, JobSystem};

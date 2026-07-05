@@ -54,6 +54,10 @@ pub struct InsertOutcome {
     pub inserted: Vec<AssetId>,
     /// Rows skipped because their `content_hash` already existed.
     pub skipped_duplicates: u64,
+    /// Batch indices of the skipped rows, ascending (`len() ==
+    /// skipped_duplicates`) — lets callers attribute per-file outcomes
+    /// (`lightbox-ingest` report accounting).
+    pub skipped: Vec<usize>,
 }
 
 /// What `remove_import_session` removed (spec §3.2).
@@ -153,11 +157,12 @@ impl CatalogTxn<'_> {
                  decode_error, import_session_id, added_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
-            for a in batch {
+            for (idx, a) in batch.iter().enumerate() {
                 let hash: &[u8] = &a.content_hash.0;
                 let dup: bool = exists.query_row(params![hash], |r| r.get(0))?;
                 if dup {
                     outcome.skipped_duplicates += 1;
+                    outcome.skipped.push(idx);
                     continue;
                 }
                 insert.execute(params![

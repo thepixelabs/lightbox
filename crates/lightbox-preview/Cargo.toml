@@ -10,5 +10,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+lightbox-jobs.workspace = true
+lightbox-types.workspace = true
+thiserror.workspace = true
+
 [lints]
 workspace = true

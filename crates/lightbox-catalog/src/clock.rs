@@ -32,6 +32,14 @@ pub(crate) fn now_backup_stamp_utc() -> String {
         .expect("formatting a UTC timestamp with a const format cannot fail")
 }
 
+/// Parses a `YYYY-MM-DD-HHMMSS` backup stamp back into a UTC instant
+/// (inverse of [`now_backup_stamp_utc`]); `None` on malformed input.
+pub(crate) fn parse_backup_stamp_utc(stamp: &str) -> Option<std::time::SystemTime> {
+    time::PrimitiveDateTime::parse(stamp, &BACKUP_STAMP)
+        .ok()
+        .map(|dt| dt.assume_utc().into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,5 +62,16 @@ mod tests {
         assert_eq!(s.as_bytes()[4], b'-');
         assert_eq!(s.as_bytes()[7], b'-');
         assert_eq!(s.as_bytes()[10], b'-');
+    }
+
+    #[test]
+    fn backup_stamp_round_trips_to_a_recent_instant() {
+        let before = std::time::SystemTime::now();
+        let parsed = parse_backup_stamp_utc(&now_backup_stamp_utc()).expect("parse own stamp");
+        // Stamp precision is one second; allow that plus a little slack.
+        let skew = std::time::Duration::from_secs(2);
+        assert!(parsed >= before - skew && parsed <= before + skew);
+        assert_eq!(parse_backup_stamp_utc("not-a-stamp"), None);
+        assert_eq!(parse_backup_stamp_utc("2026-13-40-996100"), None);
     }
 }

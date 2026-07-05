@@ -184,3 +184,112 @@ Each entry names the spec point, the deviation, and why.
   would misreport a kill landing in the commit→journal window as a lost or
   phantom write. Parent tolerates a torn final journal line (a kill can
   interrupt the journal append itself).
+
+## Phase 4 — Jobs & core façade
+
+- **`SourceTier` moved to `lightbox-types`** (re-exported from
+  `lightbox-render::source`, so the spec §3.5 path is unchanged). §3.6's
+  `DecodedImage.tier` and §3.5's `SourceImage.tier` share the type across
+  crates; hosting it in the render crate would have dragged wgpu into
+  `lightbox-preview`'s dependency tree.
+- **The frozen `PreviewProvider` surface (§3.6) landed in Phase 4, its
+  implementation stays Phase 5 (T21).** `Session::previews()` (§3.8) needs
+  the trait to exist; until `EmbeddedPreviewProvider` lands, sessions hand
+  out an `UnavailablePreviewProvider` that fails every request immediately
+  (`PreviewError::Unavailable`) instead of pretending pixels are coming.
+  `PreviewTicket` (a type §3.6 uses but never defines) is an opaque
+  provider-allocated id with a public constructor so E03 can implement the
+  trait outside E01's crate.
+- **`lightbox-decode`: `hash_file` (a T19 item) implemented in Phase 4;
+  `probe()` is the stub T17 explicitly tolerates** ("T19 stub returns
+  `Unsupported` until Phase 5 lands"). Import needs real content hashes for
+  dup-skip; it does not need real metadata. The full §3.7 type surface
+  (`ProbedFormat`/`AssetProbe`/`EmbeddedPreviewInfo`/`ProbeError`) is in
+  place; `read_embedded`/`decode_raw`/`decode_image` declarations arrive
+  with Phase 5/E02 as spec'd. `hash_file` renders xxh3-128 big-endian —
+  the same canonicalization as the fixture pins (Phase 1 note).
+- **T18's failure-cataloguing rule refined at the hash boundary:** probe
+  failures are catalogued with `decode_error` set *and* reported in
+  `ImportReport.errors` (spec verbatim); **hash failures get an errors entry
+  but no row** — `content_hash` is `NOT NULL` by the §4.3 schema, and a file
+  that cannot be read has no identity to dedupe or relink by. With the
+  Phase-4 probe stub, probe *errors* (vs. `Unsupported` results) are nearly
+  unreachable, so the corrupt-fixture `decode_error`-row AC is completed by
+  Phase 5's real probe; the pipeline mechanism is in place and the
+  hash-failure leg is tested now.
+- **`ImportReport` lives in `lightbox-ingest` and is re-exported by
+  `lightbox-core`** (§3.8 sketches it inside core): one definition, no
+  duplicate type to keep in sync. Same for `ImportOptions`. The session's
+  `stats` JSON stores `{cancelled, report}` — the `cancelled` marker
+  implements T17's "session marked finished-with-stats" for cancelled
+  imports without adding a field to the spec's report shape.
+- **`InsertOutcome` gained `skipped: Vec<usize>`** (batch indices of
+  dup-skipped rows; additive to Phase 3's shape) so the import report can
+  attribute per-file outcomes (unsupported counts exclude duplicates)
+  without a second catalog query.
+- **Import discovery details the spec leaves open:** hidden entries
+  (dot-names: `.DS_Store`, AppleDouble `._*.jpg`) are skipped below the
+  root; discovered files are sorted by path (deterministic batches);
+  `source_dir` is canonicalized before becoming a `library_root` path;
+  `volume_uuid` is stored `NULL` at M0 (platform volume-UUID lookup goes
+  with E04's device/card work, per T9's "the import path's job" note).
+  Known-extension list covers the seven fixture raw mounts + jpg/jpeg,
+  tif/tiff, png, pef, rw2.
+- **Undo-import leaves `folder` rows behind** (assets/images/import_session
+  rows are removed exactly, FTS follows by trigger — asserted in tests).
+  `remove_import_session` (Phase 3) never touched folders; empty-folder
+  reconciliation is E07's fs-reconciliation territory. T18's "exact
+  pre-import row counts" is asserted for asset/image/import_session/FTS.
+- **`JobSystem::new` panics if the tokio runtime cannot be built** — the
+  frozen §3.3 signature returns `JobSystem`, not a `Result`; a dead runtime
+  is startup-fatal anyway. Documented on the method.
+- **Async job cancellation is select-based at await points** (the job future
+  is dropped, resolving `Cancelled`) *plus* cooperative via the token;
+  blocking jobs are purely cooperative (`f(&CancelToken)` checkpoints, 50 ms
+  budget per T14). `JobHandle::try_result` consumes the result exactly once;
+  `join` after that returns `JobError::ResultTaken` (spec silent on the
+  interaction). Panics in job bodies are contained as `JobError::Panicked`.
+- **Additive, non-frozen accessors:** `JobSystem::handle()` (runtime handle
+  for long-lived system tasks — the core's command dispatcher must not
+  consume a class budget slot), `JobSystem::running(class)` (test/diagnostic
+  gauge), `Core::jobs()`. E06 may replace all three.
+- **Command bus ordering semantics (spec silent):** trivial writer commands
+  (`SetRating`/`SetFlag`/`UndoImport`) run strictly in submission order,
+  awaited one at a time by the dispatcher; `ImportAddInPlace` (Foreground)
+  and `BackupNow` (Background) spawn as jobs so the queue never blocks
+  behind them — a rating edit mid-import commits immediately, interleaved
+  on the single writer. `submit()` never blocks via an unbounded command
+  queue (user-scale traffic; the event side stays bounded/lossy as spec'd).
+- **`Session::close` drains before backing up:** close cancels the
+  session-scoped token tree, waits (bounded by `CoreConfig::close_wait`,
+  default 10 s) for in-flight command jobs — a cancelled import still
+  flushes its finished-with-stats session row — then runs the exit backup.
+  `CloseOpts` carries a `ClosePolicy` (`Auto` = spec's 24 h rule via new
+  `Catalog::newest_backup_time()` (additive, parses the dated dir name);
+  `Always`; `Skip` for tests). Since `Session` is clone-cheap, `close`
+  consumes one handle and hard shutdown happens at last-drop; commands
+  submitted after close fail with `CommandFailed`.
+- **Session engine wiring at Phase 4 is deliberately inert:** empty
+  `NodeRegistry`, `NullSourceResolver`, unconfigured planner — the §3.8
+  `engine()` seam exists and the ticket lifecycle runs, but real rendering
+  through the session arrives with Phase 6 (T23) exactly as the task order
+  implies. `Event::DeviceDegraded` is wired to `Engine::on_device_lost`.
+- **`ChangeSet` (a type §3.8 names but never defines):** coarse
+  `{ images: Vec<ImageId>, folders: bool, all_images: bool }`;
+  `CommandTicket` is a session-unique `u64` newtype.
+- **T17's fixture-corpus AC is deferred to Phase 5 with the probe stub**
+  (rows land, but as `UNSUPPORTED` with zero dims until T19 replaces the
+  stub); the T17/T18 ACs that don't depend on real metadata — dup-skip
+  re-import, cancel-commits-complete-batches, per-file failure cataloguing,
+  undo, 1 k-import heartbeat (< 16 ms max gap asserted) — are tested now
+  against synthetic files.
+- **T15's kill -9-during-close-backup harness self-calibrates:** the parent
+  measures a full close-with-backup on a 60 k-row catalog and samples kill
+  delays inside that window (asserting ≥ 1 kill actually landed mid-window);
+  a fixed spec-style delay was observed to always miss the window on fast
+  machines. A kill mid-backup can leave a `.tmp-*` scratch dir under
+  `backups/` — never promoted, ignored by newest/prune (verified by the
+  harness); cosmetic cleanup is left to future backups' hygiene (E16).
+- **New third-party crates:** `walkdir` 2 (Unlicense OR MIT — T17 names it)
+  and `unicode-normalization` 0.1 (MIT OR Apache-2.0 — §4.3 NFC filenames).
+  Both pass the cargo-deny license gate unchanged.
