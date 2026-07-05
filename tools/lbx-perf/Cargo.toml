@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lbx-perf"
+description = "Perf scenario harness (E01 T28): import-1k, page-query @100k, loupe nav-swap — nightly, baseline-compared, non-blocking"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+lightbox-catalog.workspace = true
+lightbox-core.workspace = true
+lightbox-edit.workspace = true
+lightbox-render.workspace = true
+lightbox-types.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[lints]
+workspace = true

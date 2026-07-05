@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Native-dependency inventory — the SBOM surface-2 PLACEHOLDER (E01 spec
+# §8 DoD 6; architecture §8 license surface 2, owned by E16).
+#
+# Every `*-sys` crate in Cargo.lock must be classified here; CI enforces the
+# match (`cargo xtask lint-native-deps`). A new native dependency therefore
+# lands only with an explicit, reviewed entry — that review is where the
+# license surface-2/3 conversation happens (E16 turns the `bundled-c`
+# entries into a real SBOM with per-binary license attribution).
+#
+# kinds:
+#   bundled-c    compiles/links VENDORED C or C++ sources into our binaries
+#                (this is the SBOM surface-2 inventory)
+#   os-binding   declarations for OS-provided libraries (linked or dlopened
+#                at runtime; we ship no third-party native code for these)
+#   wasm-binding JS/wasm interface types; no native code at all
+#
+# Limitations (accepted at M0): crates that bundle C without the `-sys`
+# naming convention are not auto-detected — they must be added here by the
+# PR that introduces them. E16 replaces this heuristic with a build-script/
+# `links`-key audit over `cargo metadata`.
+
+[[package]]
+name = "libsqlite3-sys"
+kind = "bundled-c"
+note = "SQLite amalgamation via rusqlite `bundled` (spec §4.2 mandates bundling; public domain)"
+
+[[package]]
+name = "zstd-sys"
+kind = "bundled-c"
+note = "vendored libzstd (BSD-3-Clause/MIT) for verified catalog backups (spec §3.2)"
+
+[[package]]
+name = "core-foundation-sys"
+kind = "os-binding"
+note = "macOS CoreFoundation declarations (winit/wgpu)"
+
+[[package]]
+name = "jni-sys"
+kind = "os-binding"
+note = "JNI declarations (winit's android leg; never built for our targets)"
+
+[[package]]
+name = "js-sys"
+kind = "wasm-binding"
+note = "wasm-bindgen JS types (wgpu/winit wasm leg; never built for our targets)"
+
+[[package]]
+name = "linux-raw-sys"
+kind = "os-binding"
+note = "Linux syscall ABI constants (rustix); pure declarations"
+
+[[package]]
+name = "ndk-sys"
+kind = "os-binding"
+note = "Android NDK declarations (winit's android leg; never built for our targets)"
+
+[[package]]
+name = "objc-sys"
+kind = "os-binding"
+note = "Objective-C runtime declarations, macOS (winit)"
+
+[[package]]
+name = "renderdoc-sys"
+kind = "os-binding"
+note = "RenderDoc in-app API declarations (wgpu debug hook; dlopened only if RenderDoc is present)"
+
+[[package]]
+name = "wayland-sys"
+kind = "os-binding"
+note = "libwayland declarations, dlopened at runtime on Linux (winit)"
+
+[[package]]
+name = "web-sys"
+kind = "wasm-binding"
+note = "wasm-bindgen web API types (wgpu/winit wasm leg; never built for our targets)"
+
+[[package]]
+name = "windows-sys"
+kind = "os-binding"
+note = "Windows API declarations (winit/wgpu/rustix)"

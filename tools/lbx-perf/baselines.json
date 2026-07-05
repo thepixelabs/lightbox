@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "E01 T28 committed perf baselines. Recorded by `cargo run --release -p lbx-perf`",
+    "on the M0 exit-drill machine (see below); the nightly workflow compares every",
+    "run against these. Semantics (tools/lbx-perf/src/report.rs): exceeding a",
+    "`budgets` entry is a REGRESSION (files the tracked issue, non-blocking per",
+    "spec §8); exceeding 2x a `scenarios` value is an advisory `watch` marker only,",
+    "because these numbers are machine-relative and CI runners differ. Re-bless by",
+    "re-running lbx-perf on comparable hardware and pasting the numbers here.",
+    "The `reference` block records dev-machine numbers the comparator ignores",
+    "(I/O-bound wall times, and the grid-scroll capture from `lightbox",
+    "--perf-scroll 300`, which runs windowed and is published separately)."
+  ],
+  "recorded": "2026-07-05",
+  "machine": "Apple M5 Max, macOS aarch64, Metal (E01 T29 drill machine)",
+  "budgets": {
+    "page-query-100k.p95_ms": 100.0,
+    "nav-swap.p95_ms": 50.0
+  },
+  "scenarios": {
+    "import-1k": {
+      "wall_ms": 63.0,
+      "first_image_visible_ms": 40.4,
+      "progress_max_gap_ms": 58.0,
+      "files": 1000.0,
+      "imported": 1000.0,
+      "errors": 0.0
+    },
+    "page-query-100k": {
+      "rows": 100000.0,
+      "insert_wall_ms": 1578.5,
+      "queries": 200.0,
+      "p50_ms": 0.09,
+      "p95_ms": 0.22,
+      "p99_ms": 0.26
+    },
+    "nav-swap": {
+      "images": 8.0,
+      "steps": 32.0,
+      "p50_ms": 4.68,
+      "p95_ms": 7.5,
+      "max_ms": 7.68
+    }
+  },
+  "reference": {
+    "nav_swap_backend": "Gpu(Metal)",
+    "grid-scroll": {
+      "images": 360,
+      "frames": 300,
+      "frame_ms_p50": 8.31,
+      "frame_ms_p95": 9.2,
+      "frame_ms_max": 53.93,
+      "note": "120 Hz display; p50/p95 sit on the 8.3 ms vsync cadence"
+    }
+  }
+}

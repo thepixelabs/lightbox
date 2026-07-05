@@ -36,3 +36,10 @@ path = ["crates/*/goldens/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Lightbox contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Committed perf baselines (E01 T28): JSON cannot carry comments/headers.
+[[annotations]]
+path = ["tools/lbx-perf/baselines.json"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Lightbox contributors"
+SPDX-License-Identifier = "Apache-2.0"

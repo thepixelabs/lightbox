@@ -13,12 +13,11 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 twox-hash.workspace = true
 sha2.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

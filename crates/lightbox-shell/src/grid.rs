@@ -77,7 +77,10 @@ pub fn visible_indices(l: &GridLayout, total: usize, top: f32, bottom: f32) -> R
 
 /// Renders the grid; returns an action when the app should switch views.
 /// `visible_out` receives the ids materialized this frame (the thumbnail
-/// cache cancels everything else in `end_frame`).
+/// cache cancels everything else in `end_frame`). `forced_scroll_frac`
+/// (perf-scroll scripting, T28) pins the scroll offset to that fraction of
+/// the scrollable range this frame.
+#[allow(clippy::too_many_arguments)]
 pub fn grid_ui(
     ui: &mut egui::Ui,
     rows: &[ImageSummary],
@@ -85,6 +88,7 @@ pub fn grid_ui(
     thumbs: &mut ThumbCache,
     cell_size: f32,
     visible_out: &mut HashSet<ImageId>,
+    forced_scroll_frac: Option<f32>,
 ) -> Option<GridAction> {
     let mut action = None;
 
@@ -114,44 +118,52 @@ pub fn grid_ui(
     let ppp = ui.ctx().pixels_per_point();
     let bucket = bucket_for((cell_size * ppp).ceil() as u32);
 
-    egui::ScrollArea::vertical()
-        .auto_shrink(false)
-        .show_viewport(ui, |ui, viewport| {
-            let l = layout(ui.available_width(), cell_size, rows.len());
-            ui.set_height(l.total_h);
-            let origin = ui.min_rect().min;
+    let mut scroll_area = egui::ScrollArea::vertical().auto_shrink(false);
+    if let Some(frac) = forced_scroll_frac {
+        // Scripted scroll (perf capture): pin the offset to the requested
+        // fraction of the scrollable range, estimated from the outer size
+        // (the estimate only steers the sweep — virtualization arithmetic
+        // still runs off the real viewport inside).
+        let l = layout(ui.available_width(), cell_size, rows.len());
+        let range = (l.total_h - ui.available_height()).max(0.0);
+        scroll_area = scroll_area.vertical_scroll_offset(frac.clamp(0.0, 1.0) * range);
+    }
+    scroll_area.show_viewport(ui, |ui, viewport| {
+        let l = layout(ui.available_width(), cell_size, rows.len());
+        ui.set_height(l.total_h);
+        let origin = ui.min_rect().min;
 
-            let range = visible_indices(&l, rows.len(), viewport.min.y, viewport.max.y);
-            for idx in range {
-                let summary = &rows[idx];
-                visible_out.insert(summary.id);
-                thumbs.want(summary.id, bucket);
+        let range = visible_indices(&l, rows.len(), viewport.min.y, viewport.max.y);
+        for idx in range {
+            let summary = &rows[idx];
+            visible_out.insert(summary.id);
+            thumbs.want(summary.id, bucket);
 
-                let (row, col) = (idx / l.cols, idx % l.cols);
-                let cell_rect = egui::Rect::from_min_size(
-                    origin + egui::vec2(col as f32 * (l.cell + SPACING), row as f32 * l.row_h),
-                    egui::vec2(l.cell, l.cell + LABEL_H),
-                );
+            let (row, col) = (idx / l.cols, idx % l.cols);
+            let cell_rect = egui::Rect::from_min_size(
+                origin + egui::vec2(col as f32 * (l.cell + SPACING), row as f32 * l.row_h),
+                egui::vec2(l.cell, l.cell + LABEL_H),
+            );
 
-                let response = ui.interact(
-                    cell_rect,
-                    ui.id().with(("grid-cell", summary.id.0)),
-                    egui::Sense::click(),
-                );
-                if response.double_clicked() {
-                    selection.click(rows, idx, ClickMods::default());
-                    action = Some(GridAction::OpenLoupe(idx));
-                } else if response.clicked() {
-                    let mods = ui.ctx().input(|i| ClickMods {
-                        shift: i.modifiers.shift,
-                        command: i.modifiers.command,
-                    });
-                    selection.click(rows, idx, mods);
-                }
-
-                draw_cell(ui, cell_rect, summary, selection, thumbs, l.cell, &response);
+            let response = ui.interact(
+                cell_rect,
+                ui.id().with(("grid-cell", summary.id.0)),
+                egui::Sense::click(),
+            );
+            if response.double_clicked() {
+                selection.click(rows, idx, ClickMods::default());
+                action = Some(GridAction::OpenLoupe(idx));
+            } else if response.clicked() {
+                let mods = ui.ctx().input(|i| ClickMods {
+                    shift: i.modifiers.shift,
+                    command: i.modifiers.command,
+                });
+                selection.click(rows, idx, mods);
             }
-        });
+
+            draw_cell(ui, cell_rect, summary, selection, thumbs, l.cell, &response);
+        }
+    });
 
     action
 }

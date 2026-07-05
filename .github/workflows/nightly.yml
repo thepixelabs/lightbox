@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Lightbox contributors
 # SPDX-License-Identifier: Apache-2.0
 #
-# Nightly gates (E01 spec §5 T13, §6, DoD §8.3): the 1000-iteration kill -9
-# fault-injection run at 0 corruptions / 0 lost commits. The perf scenario
-# harness (T28) joins this workflow in E01 Phase 8.
+# Nightly gates (E01 spec §5 T13/T28, §6, DoD §8.3): the 1000-iteration
+# kill -9 fault-injection run at 0 corruptions / 0 lost commits, plus the
+# perf scenario harness — lbx-perf (import-1k, page-query @100k, nav-swap),
+# the scripted grid-scroll capture, and the criterion micro-benches.
+# Perf regressions are REPORTED (job summary + tracked issue), never
+# blocking (spec §8: "regression ⇒ tracked issue, non-blocking").
 
 name: Nightly
 
@@ -11,6 +14,10 @@ on:
   schedule:
     - cron: "0 3 * * *" # 03:00 UTC daily
   workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # perf-regression tracking issues (T28)
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,3 +49,123 @@ jobs:
           cargo test -p lightbox-catalog --test fault_injection --release --
           kill9_leaves_catalog_clean_and_committed_txns_present
           --exact --nocapture
+
+  # E01 Phase 8 (T28): the perf scenario harness. Publishes a per-OS table
+  # to the job summary; compares against the committed dev-machine baselines
+  # + the absolute §6/§7 budgets (page-query p95 < 100 ms @100 k, nav-swap
+  # p95 < 50 ms). Non-blocking: regressions file/refresh a tracked issue.
+  perf:
+    name: perf scenarios (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Mesa software Vulkan adapter (lavapipe)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
+          echo "VK_LOADER_DEBUG=error" >> "$GITHUB_ENV"
+
+      - name: Cache fixture corpus
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
+
+      - name: Fetch + verify pinned fixtures
+        run: cargo xtask fixtures
+
+      - name: Run scenario harness (import-1k, page-query @100k, nav-swap)
+        shell: bash
+        run: |
+          cargo run --release -p lbx-perf -- \
+            --out perf-results-${{ matrix.os }}.json \
+            --baseline tools/lbx-perf/baselines.json | tee perf-table.md
+          cat perf-table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Criterion micro-benches (images_page @100k, insert batch, hash throughput)
+        run: cargo bench -p lightbox-catalog -p lightbox-decode
+
+      - name: Upload perf artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ matrix.os }}
+          path: |
+            perf-results-${{ matrix.os }}.json
+            perf-table.md
+            target/criterion/**/estimates.json
+          if-no-files-found: warn
+
+      # Regression ⇒ tracked issue, non-blocking (spec §8). One issue per
+      # OS+day; duplicates are acceptable noise until E16 tooling.
+      - name: File tracked issue on regression
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if grep -q '^REGRESSION' perf-table.md; then
+            gh issue create \
+              --title "nightly perf regression: ${{ matrix.os }} $(date -u +%F)" \
+              --label performance \
+              --body-file perf-table.md || true
+          fi
+
+  # E01 Phase 8 (T28): scripted grid-scroll frame-time capture through the
+  # real shell (T25's p95 < 16 ms number, formally recorded). Windowed app
+  # on hosted runners — observational (continue-on-error) like the CI shell
+  # smoke until seen green across the fleet; the dev-machine numbers live
+  # in tools/lbx-perf/baselines.json.
+  grid-scroll:
+    name: grid-scroll capture (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Capture (Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxkbcommon-x11-0 mesa-vulkan-drivers libvulkan1
+          xvfb-run -a cargo run --release -p lightbox-shell --bin lightbox -- --perf-scroll 600 \
+            | tee grid-scroll.json
+      - name: Capture
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cargo run --release -p lightbox-shell --bin lightbox -- --perf-scroll 600 \
+            | tee grid-scroll.json
+
+      - name: Publish to summary
+        shell: bash
+        run: |
+          {
+            echo '### Grid-scroll frame times (${{ matrix.os }})'
+            echo '```json'
+            grep '"scenario":"grid-scroll"' grid-scroll.json || echo '(no capture)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

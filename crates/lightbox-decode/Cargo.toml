@@ -19,9 +19,16 @@ tracing.workspace = true
 twox-hash.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+fastrand.workspace = true
 serde = { workspace = true }
 tempfile.workspace = true
 toml.workspace = true
+
+# T28: hash-throughput micro-bench (nightly perf harness).
+[[bench]]
+name = "hash_throughput"
+harness = false
 
 [lints]
 workspace = true

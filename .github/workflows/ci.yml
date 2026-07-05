@@ -55,6 +55,14 @@ jobs:
       - name: migration registry lint (E01 T9)
         run: cargo xtask lint-migrations
 
+      # E01 Phase 8 (DoD 6): SBOM-inventory placeholder — every *-sys crate
+      # in Cargo.lock must be classified in native-inventory.toml; the
+      # bundled-C set stays exactly the two spec-mandated exceptions
+      # (SQLite amalgamation, vendored libzstd) until E02+ adds more via
+      # review. E16 owns the real SBOM (license surface 2).
+      - name: native-dependency inventory (SBOM surface-2 placeholder)
+        run: cargo xtask lint-native-deps
+
       - name: build
         run: cargo build --workspace
 

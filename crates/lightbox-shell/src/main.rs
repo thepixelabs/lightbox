@@ -8,6 +8,9 @@
 //! lightbox --smoke [FRAMES]           # CI smoke: throwaway catalog →
 //!                                     # import → grid → loupe; verify the
 //!                                     # zero-copy seam held, exit 0/1
+//! lightbox --perf-scroll [FRAMES]     # T28 nightly: scripted grid-scroll
+//!                                     # frame-time capture; prints one
+//!                                     # JSON summary line, exit 0/1
 //! ```
 
 use std::process::ExitCode;
@@ -15,7 +18,8 @@ use std::sync::atomic::Ordering;
 
 use lightbox_shell::ShellOptions;
 
-const USAGE: &str = "usage: lightbox [--catalog <dir>.lbdata] [--smoke [FRAMES]]";
+const USAGE: &str =
+    "usage: lightbox [--catalog <dir>.lbdata] [--smoke [FRAMES]] [--perf-scroll [FRAMES]]";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -40,6 +44,17 @@ fn main() -> ExitCode {
                 };
                 options.smoke_frames = Some(frames.max(1));
             }
+            "--perf-scroll" => {
+                // Optional FRAMES: consume the next arg only when numeric.
+                let frames = match args.peek().map(|v| v.parse::<u64>()) {
+                    Some(Ok(n)) => {
+                        args.next();
+                        n
+                    }
+                    _ => 600,
+                };
+                options.perf_scroll_frames = Some(frames.max(60));
+            }
             "--catalog" => {
                 let Some(path) = args.next() else {
                     eprintln!("--catalog requires a path\n{USAGE}");
@@ -58,12 +73,25 @@ fn main() -> ExitCode {
         }
     }
 
+    if options.smoke_frames.is_some() && options.perf_scroll_frames.is_some() {
+        eprintln!("--smoke and --perf-scroll are mutually exclusive\n{USAGE}");
+        return ExitCode::from(2);
+    }
+
     let smoke = options.smoke_frames.is_some();
+    let perf = options.perf_scroll_frames.is_some();
     match lightbox_shell::run(options) {
         Ok(outcome) => {
             let frames = outcome.frames.load(Ordering::Acquire);
             let swaps = outcome.texture_swaps.load(Ordering::Acquire);
             let proven = outcome.seam_proven.load(Ordering::Acquire);
+            if perf {
+                if !outcome.perf_ok.load(Ordering::Acquire) {
+                    eprintln!("FAIL: grid-scroll perf capture did not complete");
+                    return ExitCode::FAILURE;
+                }
+                return ExitCode::SUCCESS;
+            }
             if smoke {
                 println!(
                     "seam-2 smoke: frames={frames} texture_swaps={swaps} seam_proven={proven}"

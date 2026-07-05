@@ -1592,6 +1592,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lbx-perf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lightbox-catalog",
+ "lightbox-core",
+ "lightbox-edit",
+ "lightbox-render",
+ "lightbox-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1697,6 +1712,8 @@ dependencies = [
 name = "lightbox-decode"
 version = "0.1.0"
 dependencies = [
+ "criterion",
+ "fastrand",
  "kamadak-exif",
  "lightbox-jobs",
  "lightbox-types",
@@ -4492,6 +4509,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "toml",

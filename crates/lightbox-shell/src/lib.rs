@@ -27,6 +27,7 @@
 mod grid;
 mod loupe;
 mod model;
+mod perf;
 mod smoke;
 mod thumbs;
 
@@ -43,6 +44,7 @@ use lightbox_render::GpuContext;
 use crate::grid::GridAction;
 use crate::loupe::{LoupeAction, LoupeView};
 use crate::model::{ImageListModel, Selection};
+use crate::perf::{ScrollDriver, ScrollPhase};
 use crate::smoke::SmokeDriver;
 use crate::thumbs::ThumbCache;
 
@@ -52,8 +54,12 @@ pub struct ShellOptions {
     /// Smoke mode (CI): drive import→grid→loupe on a throwaway catalog,
     /// close after the seam is proven and this many frames painted.
     pub smoke_frames: Option<u64>,
+    /// Perf mode (nightly, T28): scripted grid-scroll frame-time capture
+    /// on a throwaway catalog for this many measured frames, then print a
+    /// JSON summary line and close. Mutually exclusive with smoke mode.
+    pub perf_scroll_frames: Option<u64>,
     /// The catalog to open (created when missing). Defaults to
-    /// `./lightbox.lbdata`. Ignored in smoke mode.
+    /// `./lightbox.lbdata`. Ignored in smoke/perf modes.
     pub catalog: Option<PathBuf>,
 }
 
@@ -68,6 +74,9 @@ pub struct ShellOutcome {
     /// True once an `Engine::submit`-produced texture was composited on the
     /// shared device (the seam-2 proof held at least once).
     pub seam_proven: AtomicBool,
+    /// True once a `--perf-scroll` capture completed and printed its
+    /// summary (false = wedged/expired ⇒ nonzero exit).
+    pub perf_ok: AtomicBool,
 }
 
 /// Boots the eframe shell and blocks until the window closes.
@@ -179,6 +188,7 @@ struct LightboxApp {
 
     outcome: Arc<ShellOutcome>,
     smoke: Option<SmokeDriver>,
+    perf: Option<ScrollDriver>,
 }
 
 impl LightboxApp {
@@ -205,11 +215,16 @@ impl LightboxApp {
             Some(frames) => Some(SmokeDriver::new(frames.max(1))?),
             None => None,
         };
+        let perf = match options.perf_scroll_frames {
+            Some(frames) if smoke.is_none() => Some(ScrollDriver::new(frames)?),
+            _ => None,
+        };
 
         let core = Core::start(CoreConfig::default())?;
-        let lbdata = match &smoke {
-            Some(smoke) => smoke.lbdata.clone(),
-            None => options
+        let lbdata = match (&smoke, &perf) {
+            (Some(smoke), _) => smoke.lbdata.clone(),
+            (None, Some(perf)) => perf.lbdata.clone(),
+            (None, None) => options
                 .catalog
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("lightbox.lbdata")),
@@ -256,6 +271,7 @@ impl LightboxApp {
             show_overlay: cfg!(debug_assertions),
             outcome,
             smoke,
+            perf,
         })
     }
 
@@ -436,6 +452,44 @@ impl LightboxApp {
         self.view = View::Grid;
     }
 
+    /// Perf scripting (T28 grid-scroll capture): submit the import once,
+    /// then drive a forced sawtooth scroll through the REAL grid path.
+    /// Returns the scroll fraction to force this frame, if any.
+    fn pump_perf(&mut self, ctx: &egui::Context) -> Option<f32> {
+        let perf = self.perf.as_mut()?;
+        if !perf.submitted {
+            perf.submitted = true;
+            let photos = perf.photos.clone();
+            self.session.submit(Command::ImportAddInPlace {
+                source_dir: photos,
+                recursive: false,
+            });
+        }
+        let stats = self.thumbs.stats();
+        match perf.pump(
+            self.model.rows().len(),
+            (stats.requested_total, stats.cancelled_total),
+        ) {
+            ScrollPhase::Warmup => None,
+            ScrollPhase::Scroll(frac) => Some(frac),
+            ScrollPhase::Done(json) => {
+                // The nightly workflow scrapes this line into the summary.
+                println!("{json}");
+                self.outcome.perf_ok.store(true, Ordering::Release);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                None
+            }
+            ScrollPhase::Expired => {
+                tracing::error!(
+                    target: "lightbox_shell",
+                    "perf-scroll run expired before the capture completed"
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                None
+            }
+        }
+    }
+
     /// Smoke scripting: submit the import once, hop into the loupe once a
     /// row exists, close when proven (or wedged — nonzero exit).
     fn pump_smoke(&mut self, ctx: &egui::Context) {
@@ -488,6 +542,7 @@ impl eframe::App for LightboxApp {
         egui::Panel::top(egui::Id::new("lightbox-top")).show(root, |ui| self.top_bar(ui));
         egui::Panel::bottom(egui::Id::new("lightbox-status")).show(root, |ui| self.status_bar(ui));
 
+        let forced_scroll = self.pump_perf(&ctx);
         let mut visible: HashSet<lightbox_types::ImageId> = HashSet::new();
         egui::CentralPanel::default().show(root, |ui| match self.view {
             View::Grid => {
@@ -498,6 +553,7 @@ impl eframe::App for LightboxApp {
                     &mut self.thumbs,
                     self.cell_size,
                     &mut visible,
+                    forced_scroll,
                 );
                 if let Some(GridAction::OpenLoupe(idx)) = action {
                     self.enter_loupe(idx);
@@ -543,7 +599,8 @@ impl eframe::App for LightboxApp {
             || self.thumbs.stats().inflight > 0
             || self.loupe.busy()
             || self.import_ui.active.is_some()
-            || self.smoke.is_some();
+            || self.smoke.is_some()
+            || self.perf.is_some();
         if busy {
             ctx.request_repaint();
         } else {
@@ -552,9 +609,9 @@ impl eframe::App for LightboxApp {
     }
 
     fn on_exit(&mut self) {
-        // Exit-time verified backup per policy (spec T15/OQ-6); smoke runs
-        // skip it (throwaway catalog).
-        let policy = if self.smoke.is_some() {
+        // Exit-time verified backup per policy (spec T15/OQ-6); smoke and
+        // perf runs skip it (throwaway catalogs).
+        let policy = if self.smoke.is_some() || self.perf.is_some() {
             ClosePolicy::Skip
         } else {
             ClosePolicy::Auto
