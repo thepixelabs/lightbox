@@ -1765,6 +1765,7 @@ dependencies = [
  "toml",
  "tracing",
  "twox-hash",
+ "zstd",
  "zune-jpeg",
 ]
 
@@ -1847,6 +1848,7 @@ dependencies = [
 name = "lightbox-rawproxy"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "ciborium",
  "libc",
  "lightbox-decode",

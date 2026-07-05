@@ -27,5 +27,19 @@ thiserror.workspace = true
 # deny.toml).
 libc.workspace = true
 
+[features]
+default = []
+# E02 Phase C (C2/C7): compiles src/libraw_shim.c and DYNAMIC-links LibRaw
+# (LGPL-2.1). OFF by default so `cargo build --workspace` stays green on
+# machines without LibRaw (spec §0). Enable in packaging with LibRaw present:
+# `cargo build -p lightbox-rawproxy --features libraw`.
+libraw = []
+
+# `cc` (MIT/Apache-2.0, already in the deny-approved graph via zstd-sys/lcms2-sys)
+# compiles the C shim under the `libraw` feature. Appended by Phase C — Phase A
+# did not declare a build-dependency. It is inert unless the feature is on.
+[build-dependencies]
+cc = "1"
+
 [lints]
 workspace = true

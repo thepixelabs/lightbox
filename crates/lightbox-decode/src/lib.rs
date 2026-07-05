@@ -47,10 +47,15 @@ mod raw;
 pub use camera::{normalize_camera, CameraId};
 pub use error::{CapKind, DecodeError};
 pub use raw::linearize::linearize;
-pub use raw::proxy::{LibrawParams, ProxyMeta, ProxyRequest, ProxyResponse, ShmRef, PROTO_VERSION};
+pub use raw::proxy::{
+    err_code as proxy_err, DemosaicedMeta, LibrawParams, MosaicMeta, ProxyMeta, ProxyPayloadKind,
+    ProxyRequest, ProxyResponse, ShmRef, PROTO_VERSION,
+};
+pub use raw::proxy_client::{ProxyClient, ProxyConfig, ProxySupervisor};
 pub use raw::state::{
-    decode_params_hash, DecodedRawStateHeader, LINEARIZE_IMPL_VERSION, MAGIC as RAW_STATE_MAGIC,
-    VERSION as RAW_STATE_VERSION,
+    decode_params_hash, f32_samples_to_le_bytes, le_bytes_to_f32_samples, le_bytes_to_u16_samples,
+    u16_samples_to_le_bytes, DecodedRawState, DecodedRawStateHeader, StateError,
+    LINEARIZE_IMPL_VERSION, MAGIC as RAW_STATE_MAGIC, VERSION as RAW_STATE_VERSION,
 };
 pub use raw::types::{
     BackendPolicy, BlackLevels, CfaColor, CfaPattern, DecodeBackend, DecodeOpts, Illuminant,
@@ -233,6 +238,20 @@ pub fn hash_file(path: &Path, cancel: &CancelToken) -> Result<ContentHash, Probe
 /// structured [`DecodeError::Unimplemented`], recorded in E02-deviations.md).
 pub fn decode_raw(path: &Path, opts: &DecodeOpts) -> Result<RawDecode, DecodeError> {
     panic::guard(|| raw::decode_raw_impl(path, opts))
+}
+
+/// The M1 develop-open decode (spec §5.1 step 3 / task C5): produces a
+/// develop-ready [`RawDecode::DemosaicedInterim`] — linear camera-native RGB via
+/// the LibRaw proxy's AHD path — for a CFA-mosaic raw (and, until A5's in-crate
+/// linear/mono fast path lands, any raw). `sup` is the warm proxy pool. A proxy
+/// crash / timeout is a structured [`DecodeError`], **never a panic** and never
+/// an in-process fallback (single mosaic backend by license necessity, R1).
+pub fn decode_for_develop(
+    sup: &ProxySupervisor,
+    path: &Path,
+    opts: &DecodeOpts,
+) -> Result<RawDecode, DecodeError> {
+    panic::guard(|| raw::decode_for_develop_impl(sup, path, opts))
 }
 
 /// Non-raw decode (JPEG/PNG/TIFF → [`SourceImage`], spec §3.1): normalized

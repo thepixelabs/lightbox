@@ -16,12 +16,13 @@
 //! solver reads these with zero friction.
 
 use lightbox_types::Orientation;
+use serde::{Deserialize, Serialize};
 
 /// A 3×3 matrix as a plain row-major array (see the module deviation note).
 pub type Mat3Array = [[f64; 3]; 3];
 
 /// One Bayer/X-Trans CFA color.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CfaColor {
     /// Red.
     R,
@@ -33,7 +34,7 @@ pub enum CfaColor {
 
 /// Color-filter-array layout (spec §3.1). Drives per-position black/white
 /// levels in [`linearize`](crate::linearize) and, later, demosaic (E11).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CfaPattern {
     /// A 2×2 Bayer tile in row-major order (e.g. `[R, G, G, B]` = RGGB).
     Bayer([CfaColor; 4]),
@@ -60,7 +61,7 @@ impl CfaPattern {
 
 /// Per-CFA-position black levels (spec §3.1). Index with
 /// [`CfaPattern::level_index`]; non-Bayer layouts use `levels[0]`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct BlackLevels {
     /// Black level per 2×2 CFA position.
     pub levels: [u32; 4],
@@ -74,7 +75,7 @@ impl BlackLevels {
 }
 
 /// An axis-aligned pixel rectangle (spec §3.1: `active_area`, `default_crop`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Rect {
     /// Left edge (pixels from origin).
     pub x: u32,
@@ -100,7 +101,7 @@ impl Rect {
 
 /// A CIE standard illuminant reference for a calibration matrix (spec §3.1).
 /// Values mirror the DNG `CalibrationIlluminant` tag semantics.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Illuminant {
     /// Standard illuminant A (tungsten, ~2856 K).
     StandardA,
@@ -125,7 +126,11 @@ pub enum Illuminant {
 /// (spec §3.1). Extracted in-crate from DNG tags (A5) or supplied by the
 /// LibRaw proxy for proprietary mosaics (Phase C). Matrices are row-major
 /// arrays (see the module deviation note).
-#[derive(Clone, Debug)]
+///
+/// `Serialize`/`Deserialize` are derived (Phase C) so this factual calibration
+/// block travels intact both over the proxy wire protocol (§3.2) and inside the
+/// `DecodedRawState` CBOR header (§4.2) — the E03 raw-cache contract.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RawColorimetry {
     /// As-shot neutral (camera-native), or derived from `cam_mul`.
     pub as_shot_neutral: Option<[f64; 3]>,
@@ -224,7 +229,7 @@ pub struct LinearMosaic {
 
 /// Which backend produced an accepted decode — the value written to the
 /// catalog `asset.decode_backend` column (spec §4.1).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum DecodeBackend {
     /// In-crate permissive walker / linearize path (linear-DNG, mono-DNG).
     InCrate,

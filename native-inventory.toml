@@ -21,6 +21,30 @@
 # naming convention are not auto-detected — they must be added here by the
 # PR that introduces them. E16 replaces this heuristic with a build-script/
 # `links`-key audit over `cargo metadata`.
+#
+# ---------------------------------------------------------------------------
+# SURFACE-2 SBOM ROW — LibRaw (E02 Phase C, task C7). Documented here as a
+# comment, NOT a `[[package]]` entry: the placeholder checker only models
+# `-sys` CRATES, and LibRaw is not a crate — it is a system library that
+# `lightbox-rawproxy`'s build script DYNAMIC-LINKS *only* under the (off-by-
+# default) `libraw` feature. It never enters the crate graph (deny.toml bans
+# rawler/dnglab; there is no libraw `-sys` crate) and never links into any app
+# binary — the app spawns `lightbox-rawproxy` as a subprocess.
+#
+#   library     : LibRaw
+#   version     : 0.22.x (build-machine: Homebrew 0.22.1)
+#   license     : LGPL-2.1  (dynamic-link + relink obligation satisfied; the
+#                 proxy links libraw.dylib/.so at runtime, never static)
+#   linkage     : dynamic, out-of-process (lightbox-rawproxy sandbox only)
+#   feature     : `libraw` (default OFF — default build links nothing native)
+#   transitive  : jpeg-turbo, libtiff, little-cms2 (LibRaw's own deps, dynamic)
+#   audit       : the default proxy binary carries ZERO LibRaw symbols — see
+#                 `no_libraw_symbols_in_default_proxy_binary`
+#                 (crates/lightbox-rawproxy/tests/proxy_integration.rs).
+#
+# E16 turns this comment into a real per-artifact SBOM entry once the inventory
+# model grows a "dynamic-external" kind. Until then this is the recorded row.
+# ---------------------------------------------------------------------------
 
 [[package]]
 name = "libsqlite3-sys"
