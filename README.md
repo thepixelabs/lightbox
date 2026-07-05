@@ -2,7 +2,17 @@
 
 An open-source, local-first photo library and raw editor — feature-comparable to Adobe Lightroom, with no subscription and no cloud lock-in.
 
-> **Status**: pre-alpha. Research and architecture phase — see [`docs/`](docs/).
+> **Status**: pre-alpha. Epic E01 (foundation) is implemented and verified: Cargo workspace, crash-proof SQLite catalog, zero-copy egui/wgpu render seam, jobs system, headless core façade, decode probe, first GPU RenderNode with golden-image tests, virtualized-grid shell, and CLI. See [`docs/plan/`](docs/plan/) for the approved v1 plan (16 epics) and [`docs/plan/epics/E01-handoff.md`](docs/plan/epics/E01-handoff.md) for the foundation handoff.
+
+## Building
+
+```sh
+cargo xtask fixtures   # fetch the hash-pinned CC0 test corpus (one-time)
+cargo build --workspace
+cargo test --workspace
+cargo run -p lightbox-shell        # the app shell
+cargo run -p lightbox-cli -- help  # headless CLI
+```
 
 ## What Lightbox aims to be
 
