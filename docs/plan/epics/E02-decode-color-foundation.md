@@ -16,14 +16,51 @@
 
 ---
 
+## 0. Execution disposition (2026-07-05)
+
+Reconciles the §6 phase order with parallel execution and with the build machine's license + tooling reality. The §6 task table stays authoritative for acceptance criteria; this section governs *sequencing* and *what ships now vs. later*.
+
+### Parallel wave plan
+
+Phases do not map 1:1 to the ideal parallel schedule; run them as waves.
+
+- **Wave 0 — A serial.** Scaffold every crate and module first: `lightbox-decode`, `lightbox-color`, the `lightbox-rawproxy` skeleton, the `tools/lightbox-profgen` skeleton, all module stubs + error taxonomies + workspace wiring. Nothing else starts until the scaffolds compile green (exit bar: `cargo build --workspace` + `cargo deny check`).
+- **Wave 1 — {C, B, D} in parallel.** C (LibRaw proxy + interim demosaic — the **primary mosaic path**), B (matrix-base + WB solver, anchored on in-crate-decodable linear-DNG + synthetic mosaics so it does not block on C), D (color management: LCMS2 / display / output). Full-corpus **mosaic** render-ref (B9) integrates once C2 lands.
+- **Wave 2 — {E, F} in parallel.** E (Lightbox default look family), F (DCP parser + evaluator). F5/F6 depend on B6 (HueSat LUT evaluator).
+- **Wave 3 — {G, H} in parallel.** G (curated content line — **tooling only** now, see DEFERRED), H (integration, hardening, seams).
+- **Wave 4 — verify.** Full exit bar on the 3-OS matrix: `cargo build --workspace` · `cargo test --workspace` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo fmt --all --check` · `cargo deny check`; golden gates green.
+
+Hard serializations preserved: A→{B, C, D}; B6→{E2, F5}; **C2→B9** (mosaic render-ref); F→G.
+
+### BUILDABLE-NOW vs DEFERRED
+
+| Task(s) | Status | Reason |
+|---|---|---|
+| A1–A7, A9 | BUILDABLE | in-crate permissive metadata/colorimetry, non-raw codecs, linear/mono-DNG decode, panic containment |
+| **A8** (HEIC via libheif) | **DEFERRED** | libheif absent on the build machine — HEIC lands behind an **off-by-default** feature; default build stays green |
+| B1–B9 | BUILDABLE | pure math + CPU reference evaluators; **ship ZERO bundled profiles** — B7 matrix-base renders the corpus correctly without them (tier-1 proof) |
+| C1–C7 | BUILDABLE | LibRaw via `brew install libraw`; if brew fails, **feature-gate the proxy** and keep the default build green |
+| D1–D7 | BUILDABLE | `lcms2` crate vendors little-cms2 (static); **fast_float GPL plugin asserted absent** (D1) |
+| E1–E4, E6, E7 | BUILDABLE | `.lblook` format, authoring harness, look goldens |
+| **E5** (≥2-human-reviewer perceptual sign-off) | **DEFERRED** (partial) | no human reviewers available — author **self-reviews** against the structured checklist and records the no-Adobe-data affidavit; the ≥2-reviewer perceptual gate + sign-off record is deferred |
+| F1–F5, F7 | BUILDABLE | DCP parser, evaluator, fuzz, resolve/fallback |
+| **F6** (dcamprof reference harness) | **DEFERRED** | dcamprof absent — §5.2 stage order pinned in the interim by hand-derived DNG-SDK-model fixtures; the dcamprof binding arbiter is wired when the tool is available. **No reference renders fabricated.** |
+| G1, G3, G4, G5, G7 | BUILDABLE | profgen skeleton, validation harness, packaging/provenance, auto-select policy, content-line runbook — all buildable without physical shots |
+| **G2, G6** (target-shot protocol content + first curated batch) | **DEFERRED** | require physical ColorChecker/IT8 capture sessions + dcamprof. **No profiles or reference renders faked.** |
+| H1–H7 | BUILDABLE | migration, CLI, benches, ASan/LSan, golden gate, seam docs, threat model |
+
+**Ship ZERO bundled profiles.** `assets/color/profiles/` is empty at ship. Tier-1 (matrix base) + tier-2 (Lightbox look) render every corpus body correctly with that tree absent — **B7** (`renders_correct_color_with_zero_bundled_profiles`) is the executable proof. Tier-3 curated DCP content (G2/G6) is deferred to physical capture sessions; nothing is fabricated to fill the gap.
+
+---
+
 ## 1. Scope
 
 ### 1.1 In scope (mapped to the §10.1 phase decomposition)
 
 **E02.1 — Decode + camera-matrix base color**
-- `probe()` for all supported formats: format identification, dimensions, normalized camera make/model, capture metadata, embedded-preview descriptor, CFA layout, decode-support classification (rawler / LibRaw-only / non-raw / unsupported).
-- Raw decode, primary path: **rawler** (MIT, static, memory-safe) → `MosaicImage` (mosaic data + black/white levels + linearization table + CFA + as-shot WB + `ColorMatrix1/2` / `ForwardMatrix1/2` / calibration illuminants).
-- Raw decode, coverage fallback + interim demosaic: **LibRaw** (LGPL-2.1, **dynamic-link, isolated in the `lightbox-rawproxy` sandbox subprocess** — §5.1). The proxy serves two roles: (a) decode formats rawler can't, (b) the **interim demosaic floor** (LibRaw AHD, §1.6) that M1 develop renders ride on until E11.1's clean-room demosaic replaces it at M2.
+- `probe()` for all supported formats: format identification, dimensions, normalized camera make/model, capture metadata, embedded-preview descriptor, CFA layout, decode-support classification (in-crate-linear / libraw-proxy-mosaic / non-raw / unsupported).
+- Raw **MOSAIC** decode, primary path: **out-of-process LibRaw proxy** (`lightbox-rawproxy`, §5.1 + Phase C) → `MosaicImage` (mosaic data + black/white levels + linearization table + CFA + as-shot WB + `ColorMatrix1/2` / `ForwardMatrix1/2` / calibration illuminants). LibRaw (LGPL-2.1) is **dynamic-linked and isolated in the sandbox subprocess** — it never links into the app. The proxy also produces the **interim demosaic floor** (LibRaw AHD, §1.6) that M1 develop renders ride on until E11.1's clean-room demosaic replaces it at M2. **rawler (LGPL-2.1) is BANNED from the crate graph (deny.toml) — never a crate dependency.**
+- Raw **metadata + colorimetry** and linear/monochrome decode, in-crate: **E01's permissive TIFF-IFD / EXIF walkers** (memory-safe Rust, MIT-family) extract `RawColorimetry` (levels, CFA, matrices, illuminants, as-shot neutral) for `probe()` and the tier-1 base, and decode linear-DNG / monochrome-DNG directly (no mosaic demosaic needed). Only the CFA-mosaic pixel decode is delegated to the proxy.
 - Linearization (CPU reference implementation + kernel spec for E05): per-channel black subtract, linearization-table application, white-level normalize to `[0,1]` f32, active-area crop, monochrome and linear-DNG passthrough.
 - Non-raw decode into the same pipeline: JPEG (zune-jpeg), PNG/TIFF (`png`/`tiff` crates), HEIC (libheif+libde265, dyn-link) → display-referred `LinearImage` with extracted ICC, converted to working space by `lightbox-color`.
 - The **license-clean colorimetric base** (§1.7 tier 1): dual-illuminant matrix interpolation, white-point iteration, ForwardMatrix/ColorMatrix paths, Bradford adaptation to D50, camera→ProPhoto-linear.
@@ -69,7 +106,7 @@
 | Import pipeline, checksum copy, preview builds | **E04/E03** (consume `probe()` and decode) |
 | Export encoders, sizing, watermark, soft proofing | **E15** (consumes `OutputTransform`); soft-proof transform primitive is a Should, deferred with LCMS2 headroom noted |
 | Recipe schema, history, XMP mapping, `crs:` import | **E09** (E02 defines `ProfileRef` resolution semantics only) |
-| DNG *writing*/conversion | E04/E16 Should-tier (dnglab); profgen uses rawler/dnglab internally for fixtures only |
+| DNG *writing*/conversion | E04/E16 Should-tier; profgen uses **dnglab as a subprocess** (never linked — rawler/dnglab are LGPL-2.1 and out of the crate graph) for fixtures only |
 | Creative LUT profiles (.cube/HaldCLUT), LUT amount UI | **E10.4** |
 | PSD decode | Not in §1.6's codec table — v1.x candidate, out of E02 |
 | Video probe/decode | FFmpeg territory, out of E02 (E04 seam) |
@@ -84,9 +121,11 @@
 crates/
   lightbox-decode/            NEW — owns E02.1/E02.2 parse side
     src/probe.rs              format id, metadata, normalized make/model, embedded-preview descriptor
-    src/raw/rawler_path.rs    primary decode → MosaicImage
+    src/raw/metadata.rs       in-crate permissive TIFF-IFD/EXIF walker (reuses E01) → RawColorimetry;
+                              linear-DNG + monochrome-DNG in-crate decode. NO rawler dependency.
     src/raw/linearize.rs      CPU reference linearization + kernel spec doc-comments
-    src/raw/proxy_client.rs   lightbox-rawproxy supervisor client (spawn/pool/timeout/restart)
+    src/raw/proxy_client.rs   lightbox-rawproxy supervisor client (spawn/pool/timeout/restart) —
+                              PRIMARY CFA-mosaic decode path (LibRaw, out-of-process)
     src/raw/state.rs          DecodedRawState (de)serialization + params hash  [E03 contract]
     src/image/                zune-jpeg / png / tiff / libheif → LinearImage (+ICC bytes)
     src/dcp/parser.rs         TIFF-IFD reader for .dcp  (untrusted input; fuzzed)
@@ -134,7 +173,7 @@ pub fn probe(path: &Path) -> Result<AssetProbe, DecodeError>;
 pub struct AssetProbe {
     pub format: FileFormat,                  // Cr2|Cr3|Nef|Arw|Raf|Orf|Rw2|Pef|Dng|Jpeg|Tiff|Png|Heic|…
     pub kind: AssetKind,                     // RawMosaic | RawLinear | RawMono | Image
-    pub decode_support: DecodeSupport,       // Rawler | LibrawOnly | NonRaw | Unsupported
+    pub decode_support: DecodeSupport,       // InCrateLinear | LibrawProxyMosaic | NonRaw | Unsupported
     pub width: u32, pub height: u32,
     pub camera: CameraId,                    // normalized make/model + raw strings (see 3.6)
     pub capture_time: Option<OffsetDateTime>,
@@ -144,16 +183,16 @@ pub struct AssetProbe {
 }
 
 pub struct DecodeOpts {
-    pub backend: BackendPolicy,              // Auto (rawler → proxy fallback) | ForceRawler | ForceProxy
+    pub backend: BackendPolicy,              // Auto (mosaic→proxy, linear/mono→in-crate) | ForceProxy | ForceInCrate
     pub interim_demosaic: bool,              // true ⇒ proxy returns demosaiced camera-RGB (M1 path)
     pub timeout: Duration,                   // proxy budget; default 30 s
 }
 
-/// Raw decode. Rawler primary; LibRaw sandbox fallback per policy. Never panics.
+/// Raw decode. CFA-mosaic → LibRaw proxy (primary); linear/mono → in-crate. Never panics.
 pub fn decode_raw(path: &Path, opts: &DecodeOpts) -> Result<RawDecode, DecodeError>;
 
 pub enum RawDecode {
-    Mosaic(MosaicImage),                     // rawler path (and proxy mosaic mode)
+    Mosaic(MosaicImage),                     // LibRaw proxy mosaic mode (primary CFA path)
     /// Interim M1 develop path: LibRaw AHD output, linear camera-native RGB,
     /// no WB / no output color / no gamma applied. Replaced by E11.1 at M2.
     DemosaicedInterim(SourceImage),
@@ -172,7 +211,8 @@ pub struct MosaicImage {
     pub orientation: Orientation,
 }
 
-/// Everything the §1.7 tier-1 matrix base needs — factual calibration data from the file/rawler DB.
+/// Everything the §1.7 tier-1 matrix base needs — factual calibration data from the file (in-crate
+/// permissive walker, DNG tags) or the LibRaw proxy's calibration tables (proprietary mosaics).
 pub struct RawColorimetry {
     pub as_shot_neutral: Option<[f64; 3]>,   // or derived from cam_mul
     pub illuminant1: Illuminant, pub illuminant2: Option<Illuminant>,
@@ -402,7 +442,7 @@ CREATE TABLE camera_profile (
 );
 CREATE INDEX idx_camera_profile_camera ON camera_profile (camera_make, camera_model);
 
--- Diagnostics: which backend produced the accepted decode (rawler | libraw_proxy | image codec id).
+-- Diagnostics: which backend produced the accepted decode (libraw_proxy | in_crate | image codec id).
 ALTER TABLE asset ADD COLUMN decode_backend TEXT;
 ```
 
@@ -447,7 +487,7 @@ Policy checker (CI, PR-blocking): every file under `assets/color/` has a manifes
 
 ### 5.1 Decode path selection
 
-1. `probe()` classifies `decode_support`. 2. `Auto` policy: rawler first; on `UnsupportedFormat`/`CorruptFile` from rawler, retry via `lightbox-rawproxy`; both fail → `asset.decode_error` + structured code, asset stays catalogued (§6). 3. M1 develop renders request `interim_demosaic = true` (LibRaw AHD via proxy for Bayer/X-Trans; rawler path directly for linear-DNG/mono). 4. A per-format quirk list (config, versioned in-repo) can force `ForceProxy` for bodies where rawler output is known-wrong; every quirk entry links an upstream issue.
+1. `probe()` classifies `decode_support` using E01's permissive metadata walkers (metadata-only, no pixel decode). 2. `Auto` policy: **CFA-mosaic raw (Bayer/X-Trans) decodes via `lightbox-rawproxy` (LibRaw, Phase C) — the PRIMARY and only mosaic path**; linear-DNG and monochrome decode **in-crate** via the permissive walker + `linearize`; non-raw via the image codecs. Proxy unavailable / crashes / times out on a mosaic file → `asset.decode_error` + structured code, asset stays catalogued (§6) — there is no in-process mosaic fallback (single mosaic backend by license necessity; see R1). 3. M1 develop renders request `interim_demosaic = true` → LibRaw AHD via proxy for mosaic; in-crate linear path for linear-DNG/mono. 4. A per-format quirk list (config, versioned in-repo) pins proxy decode params (`ForceProxy` variants) for bodies where LibRaw output is known-wrong; every quirk entry links an upstream issue. **rawler is never in the crate graph (LGPL-2.1, denied in `deny.toml`).**
 
 ### 5.2 Input-transform stage order (PV1)
 
@@ -467,15 +507,15 @@ E10's WB node applies per-channel gains **inside** the resolved matrix (the solv
 
 Every task ≤ 1 engineer-day. AC = acceptance criteria. Phases are ordered; tasks within a phase are ordered unless marked ∥ (parallelizable). Milestone tags: [M1] must land for M1 exit; [M2] may trail into early M2 per §9.
 
-### Phase A — decode spine (rawler primary) [M1]
+### Phase A — decode spine (in-crate metadata + non-raw + linear; mosaic decode is Phase C) [M1]
 
 | # | Task | Acceptance criteria |
 |---|---|---|
 | A1 | Scaffold `lightbox-decode` + `lightbox-color` crates: error taxonomies, feature flags, workspace wiring | Builds on macOS/Windows/Linux CI; cargo-deny green; `DecodeError::catalog_code()` unit-tested |
 | A2 | Test-corpus bootstrap: pinned CC0 raw set from raw.pixls.us (≥12 bodies: CR2, CR3, NEF, ARW, RAF/X-Trans, ORF, RW2, PEF, DNG, linear DNG, mono DNG, float DNG-reject case) + fetch script + hash manifest | `just fetch-corpus` reproducible offline-cached; every file's CC0 status recorded; corpus lives outside git |
-| A3 | `probe()` v1: rawler + kamadak-exif; format, dims, capture time, embedded-preview descriptors, CFA, `decode_support` classification | Correct fields for all corpus files (fixture-asserted); truncated/garbage file → structured error, no panic |
+| A3 | `probe()` v1: E01 permissive TIFF-IFD walkers + kamadak-exif; format, dims, capture time, embedded-preview descriptors, CFA, `decode_support` classification | Correct fields for all corpus files (fixture-asserted); truncated/garbage file → structured error, no panic; no rawler in the crate graph |
 | A4 | Camera identity normalization: `normalize_camera` + alias table (initial ~30 aliases across the corpus makers) | Corpus bodies normalize to expected keys; alias table is data (TOML), unit-tested; doc for E11/lensfun reuse |
-| A5 | `decode_raw` rawler path → `MosaicImage` with levels, CFA, `RawColorimetry` fully populated | All rawler-supported corpus raws decode; colorimetry fields spot-checked vs exiftool/dcraw reference dumps |
+| A5 | In-crate raw metadata + colorimetry via E01's permissive TIFF-IFD/EXIF walker → `RawColorimetry` fully populated (levels, CFA, matrices, illuminants, as-shot neutral); linear-DNG + monochrome-DNG in-crate decode → `RawDecode::Linear`. **CFA-mosaic pixel decode itself is Phase C (C2, LibRaw proxy).** | Colorimetry fields for all corpus raws spot-checked vs exiftool/dcraw reference dumps; linear-DNG + mono-DNG decode in-crate; cargo-deny asserts no rawler in the crate graph |
 | A6 | `linearize()` CPU reference: black subtract (per-CFA-position), linearization table, white normalize, active-area crop; kernel-spec doc-comment for E05 | Synthetic mosaic fixtures (known levels/table → exact expected f32); 12/14/16-bit inputs covered; mono + linear-DNG passthrough |
 | A7 ∥ | Non-raw decode: JPEG (zune-jpeg), PNG, TIFF (8/16-bit) → `SourceImage` with ICC bytes + EXIF orientation | Fixtures with embedded ICC round-trip the profile bytes; 16-bit TIFF precision preserved; orientation matrix applied |
 | A8 ∥ | HEIC decode via libheif (dyn-link) behind feature flag; surface-2 SBOM rows (libheif LGPL-3 + libde265, x265 ban assert) | HEIC fixture decodes; SBOM policy check green; main-binary symbol audit shows dyn-link only |
@@ -500,12 +540,12 @@ Every task ≤ 1 engineer-day. AC = acceptance criteria. Phases are ordered; tas
 | # | Task | Acceptance criteria |
 |---|---|---|
 | C1 | `lightbox-rawproxy` binary skeleton: CBOR-frame protocol, version handshake, shm payload handoff | Probe round-trip integration test; protocol doc committed; payload cap enforced both sides |
-| C2 | LibRaw FFI inside the proxy: `DecodeMosaic` + `DecodeDemosaiced` (AHD, linear 16-bit camera-RGB, no WB/gamma/output-color) | Corpus raws decode via proxy; metadata parity with rawler path on shared fields; LibRaw version reported in provenance |
-| C3 | Supervisor client: warm pooled child, timeout, kill+restart, `Auto` fallback policy (rawler → proxy → decode_error) | Injected SIGKILL and hang in child → parent returns `ProxyCrashed`/`ProxyTimeout` within budget; next request succeeds on a fresh child |
+| C2 | LibRaw FFI inside the proxy: `DecodeMosaic` (primary CFA path) + `DecodeDemosaiced` (AHD, linear 16-bit camera-RGB, no WB/gamma/output-color) | Corpus mosaic raws decode via proxy; metadata parity with the in-crate permissive walker on shared colorimetry fields; LibRaw version reported in provenance |
+| C3 | Supervisor client: warm pooled child, timeout, kill+restart, `Auto` routing (mosaic → proxy; proxy crash/timeout → `decode_error`, no in-process retry path exists) | Injected SIGKILL and hang in child → parent returns `ProxyCrashed`/`ProxyTimeout` within budget; next request succeeds on a fresh child |
 | C4 | Resource limits & hygiene: rlimits (POSIX) / JobObject (Windows), temp cleanup, dims/memory caps, no-network assertion | Crafted memory-bomb fixture rejected by cap; parent RSS unaffected; lsof/handle audit shows no leaked temp files after 100 cycles |
-| C5 | `decode_for_develop` wiring: interim-demosaic `SourceImage` via proxy (Bayer/X-Trans) or rawler (linear/mono); provenance flags set | `render-ref` end-to-end uses it; X-Trans corpus file renders; `interim_demosaic` bit present in provenance + cache hash |
+| C5 | `decode_for_develop` wiring: interim-demosaic `SourceImage` via proxy (Bayer/X-Trans) or in-crate decode (linear-DNG/mono); provenance flags set | `render-ref` end-to-end uses it; X-Trans corpus file renders; `interim_demosaic` bit present in provenance + cache hash |
 | C6 | `DecodedRawState` v1 (de)serialization + `decode_params_hash` (E03 contract) | Round-trip identity test; version byte honored; hash stable across platforms (cross-CI assertion) |
-| C7 | License wiring: LibRaw dyn-linked to the proxy **only**; surface-2 SBOM rows; main-app symbol audit | CI asserts no LibRaw dependency in app binaries; SBOM row carries LGPL-2.1 + relink note; cargo-deny unaffected |
+| C7 | License wiring: LibRaw dyn-linked to the proxy **only**; surface-2 SBOM rows; main-app symbol audit; **`deny.toml` bans the rawler crate graph-wide** | CI asserts no LibRaw dependency in app binaries; `cargo deny check` fails if rawler (or any LGPL crate) enters the graph; SBOM row carries LGPL-2.1 + relink note |
 
 ### Phase D — color management: working / display / output (E02.3) [M1]
 
@@ -535,7 +575,7 @@ Every task ≤ 1 engineer-day. AC = acceptance criteria. Phases are ordered; tas
 
 | # | Task | Acceptance criteria |
 |---|---|---|
-| F1 | TIFF-IFD reader for `.dcp` containers (own minimal reader; may reuse rawler TIFF infra) | Parses dcamprof- and dcptool-produced profiles; unknown tags skipped with warning; IFD-loop/overlap guards |
+| F1 | TIFF-IFD reader for `.dcp` containers (own minimal reader; reuses E01's permissive TIFF-IFD infra) | Parses dcamprof- and dcptool-produced profiles; unknown tags skipped with warning; IFD-loop/overlap guards |
 | F2 | `CameraProfile` from DCP: all §3.4 fields incl. HueSatMap dims/data/encoding, LookTable, tone-curve spline | Field-level equality vs `dcptool -d` XML dumps for 3 reference profiles |
 | F3 | Parser hardening: cargo-fuzz target + adversarial fixtures (truncated, dims overflow, NaN floats, giant tables) | 1 M+ iterations zero panics/OOM; dims×size caps enforced; fuzz job wired into CI (nightly) |
 | F4 | Profile tone-curve evaluation: monotone cubic spline → `Curve1D[4096]` | Matches dcamprof's rendering of the same curve within 1e-3; endpoint/degenerate-control-point tests |
@@ -565,11 +605,11 @@ Every task ≤ 1 engineer-day. AC = acceptance criteria. Phases are ordered; tas
 | H4 | ASan/LSan CI job over decode + FFI surfaces (LCMS2 wrapper, proxy client, libheif path) | Green on the full corpus + adversarial fixtures |
 | H5 | Golden gate per process version: E02 CPU-reference goldens keyed `(pv=1)`, PR-blocking, ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB | Gate wired; PV-immutability guard documented (post-M1, any §5.2 change requires a new PV entry, §4.5) |
 | H6 | Seam handoff docs (rustdoc-level): `ResolvedInputTransform`/`DisplayTransform` node-param contract + WGSL porting notes (E05/E10), `DecodedRawState` (E03), `probe` (E04), `OutputTransform` (E15), `ProfileRef` (E09) | E05 planner sign-off recorded on the transform-spec contract; each consumer doc names invariants + failure modes |
-| H7 | Threat-model notes for the §12 security review: decode surface (rawler panics, proxy caps), DCP/ICC untrusted parse, fuzz coverage summary | Notes committed alongside the crates; open risks enumerated for the security-engineer phase |
+| H7 | Threat-model notes for the §12 security review: decode surface (in-crate permissive-walker robustness, proxy caps + sandbox), DCP/ICC untrusted parse, fuzz coverage summary | Notes committed alongside the crates; open risks enumerated for the security-engineer phase |
 
 **Task count: 60** (A:9, B:9, C:7, D:7, E:7, F:7, G:7, H:7), each ≤1 day ⇒ ~60 engineer-days ≈ 12 pw — inside the XL 9–14 pw band with the content batch (G6) explicitly elastic.
 
-**Suggested parallelization (2 engineers):** Eng-1: A → B → F → G; Eng-2: C ∥ D → E → H. The only hard serializations are A→{B,C}, B6→{E2,F5}, F→G.
+**Suggested parallelization (2 engineers):** Eng-1: A → B → F → G; Eng-2: C ∥ D → E → H. The hard serializations are A→{B,C,D}, B6→{E2,F5}, **C2→B9** (full-corpus mosaic render-ref needs the proxy; B's tier-1 math anchors on in-crate-decodable linear-DNG + synthetic mosaics until C2 lands), F→G. See §0 for the wave schedule.
 
 ---
 
@@ -604,7 +644,7 @@ Every task ≤ 1 engineer-day. AC = acceptance criteria. Phases are ordered; tas
 | Metric | Budget | Ties to |
 |---|---|---|
 | `probe()` p50 | ≤ 5 ms | E04 import throughput |
-| rawler decode+linearize, 24 MP / 45 MP (single core, M-series base) | ≤ 500 ms / ≤ 900 ms | §7 develop-open (background, parallel per-core) |
+| proxy mosaic decode + in-crate linearize, 24 MP / 45 MP (single core, M-series base, incl. warm-proxy overhead) | ≤ 500 ms / ≤ 900 ms | §7 develop-open (background, parallel per-core) |
 | Proxy overhead (warm child, excl. LibRaw decode) | ≤ 30 ms | interim path viability |
 | Proxy cold spawn + handshake | ≤ 150 ms | first-use latency |
 | `resolve_input_transform` | ≤ 1 ms | WB slider inside the <100 ms §7 budget |
@@ -613,7 +653,7 @@ Every task ≤ 1 engineer-day. AC = acceptance criteria. Phases are ordered; tas
 | `DecodedRawState` serialize 45 MP | ≤ 250 ms (zstd level tuned) | E03 raw-cache write |
 
 ### 7.6 License gates (PR- and release-blocking)
-- Surface 1: cargo-deny (rawler MIT, lcms2 MIT, zune-jpeg MIT, …); LGPL crates resolve dynamically.
+- Surface 1: cargo-deny (lcms2 MIT vendored-static, zune-jpeg MIT, png/tiff MIT/Apache, …); **rawler (LGPL-2.1) explicitly denied — never in the crate graph**; the only LGPL code (LibRaw) lives out-of-process in the proxy, dynamic-linked.
 - Surface 2: SBOM rows for LibRaw (dyn, proxy-only, relink note), libheif+libde265 (x265 ban), LCMS2 (static MIT, **fast_float absent**); main-binary symbol audits.
 - Surface 3: `assets/MANIFEST.toml` policy checker — every color asset has cleared provenance; **Adobe-authored content check fails the build**; dcamprof appears nowhere in shipped artifacts.
 
@@ -625,13 +665,13 @@ Every task ≤ 1 engineer-day. AC = acceptance criteria. Phases are ordered; tas
 
 | # | Risk | Mitigation in this epic |
 |---|---|---|
-| R1 | **rawler coverage gaps / wrong output for specific bodies** (Risk 3 of the catalog: camera treadmill) | LibRaw proxy fallback is always available; per-format quirk list (§5.1) forces proxy per body; `decode_backend` telemetry column quantifies the fallback share so coverage work is data-driven |
+| R1 | **LibRaw coverage gaps / wrong output for specific bodies** (Risk 3 of the catalog: camera treadmill) — and, because rawler is license-banned, the proxy is the **single** mosaic backend with no in-process second try | LibRaw's body coverage is broad and updates with the vendored version; per-format quirk list (§5.1) pins proxy decode params per body; `decode_backend` + `decode_error` telemetry quantifies failure share so coverage work is data-driven; loss of dual-backend redundancy is accepted as a license consequence (blast radius = per-file decode failure, asset stays catalogued) |
 | R2 | **LCMS2 fast_float trap:** the research report suggests the fast-float plugin, but it is **GPL-3** — linking it would violate the license mandate | Explicitly forbidden (D1 assert + SBOM). Perf need is met by baking display LUTs once and applying them on GPU; exact LCMS2 runs only at bake/export time |
 | R3 | **DCP stage-order/encoding subtleties** (HueSatMap sRGB encoding, LookTable order, hue-wrap): getting these silently wrong ships wrong color for curated profiles | The dcamprof patch-render harness (F6) is the binding arbiter and an executable spec; §5.2 is amendable **only before** PV1 freezes |
 | R4 | **Content line unstaffed** (§12 escalation): without an owner + target-shot budget, tier 3 doesn't exist | Degradation is graceful *by design* (§1.7): every body still gets correct color via tier 1 + tier 2; G7 forces the ownership decision to be explicit, never a silent default |
 | R5 | **Interim demosaic quality** sets first impressions at M1 (LibRaw AHD is below the E11.1 clean-room bar) | Accepted per §1.6 ("interim floor"); cache-key segregation (§4.2) guarantees a clean swap at M2; expectation noted in M1 demo script |
 | R6 | **Default-look taste risk:** an original look that reads "off" hurts credibility more than a neutral one | Two-reviewer perceptual gate (E5), neutral fallback ships alongside; look is amount-scalable and swappable content, not code |
-| R7 | **Untrusted-input surfaces** (raw containers, user DCP, user ICC) | rawler is memory-safe; LibRaw is sandboxed out-of-process with caps; DCP/ICC parsers fuzzed + capped; threat-model notes handed to the §12 security review |
+| R7 | **Untrusted-input surfaces** (raw containers, user DCP, user ICC) | in-crate container parsing uses memory-safe Rust permissive walkers; the memory-unsafe LibRaw mosaic decoder is sandboxed out-of-process with rlimit/JobObject caps; DCP/ICC parsers fuzzed + capped; threat-model notes handed to the §12 security review |
 | R8 | **Per-monitor ICC on Linux/Wayland is immature** | Best-effort behind a feature flag with sRGB fallback + surfaced event; mandate requires mac/win at v1, Linux not architecturally excluded — this honors exactly that |
 
 ### Open questions (owners named; none block Phase A start)

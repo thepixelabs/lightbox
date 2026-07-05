@@ -72,6 +72,10 @@ Mandate amended to **v2.1**: (1) AI Looks (image-adaptive cinematic grading) pro
 2. Tighten two §10.1 sub-phase bullets to match the §2.4 table: E02.2 also owns the per-channel camera-calibration *evaluator* (distinct from DCP eval); E10.3 also owns the calibration *panel*.
 3. Retire the E17 AI-Looks panel feature flag once the panel ships and stabilizes (staged-rollout hygiene, not a permanent config surface).
 
+### E02 Phase 0 reconciliation (2026-07-05)
+
+- E02 decode-spine reconciled: **LibRaw-proxy-primary, rawler crate-banned; parallel-wave execution.** See `epics/E02-decode-color-foundation.md` §0 + §5.1 and `epics/E02-deviations.md`.
+
 ## 8. Approval status board
 
 | Milestone/change | Approver | Verdict | Date |
