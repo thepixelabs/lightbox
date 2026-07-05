@@ -12,7 +12,24 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Seam 1 (spec §3.10/T27): everything goes through lightbox-core. The render
+# types (RenderRequest/GpuContext) and Recipe::identity are the same frozen
+# §3.4/§3.9 surfaces the shell consumes — NEVER lightbox-shell/egui/winit
+# (asserted in CI via `cargo tree`).
 lightbox-core.workspace = true
+lightbox-edit.workspace = true
+lightbox-render.workspace = true
+lightbox-types.workspace = true
+# PNG encoding for `render --out` (the workspace `png` codec, wrapped by the
+# golden harness's Rgba8Image — no new third-party dependency).
+lbx-image-compare.workspace = true
+serde_json.workspace = true
+# `sync` only: Session::events() hands out a tokio broadcast Receiver (the
+# frozen §3.8 surface); draining it needs the broadcast error types.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

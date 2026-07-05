@@ -1658,7 +1658,14 @@ name = "lightbox-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "lbx-image-compare",
  "lightbox-core",
+ "lightbox-edit",
+ "lightbox-render",
+ "lightbox-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -1789,10 +1796,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "eframe",
+ "lightbox-core",
  "lightbox-edit",
  "lightbox-jobs",
+ "lightbox-preview",
  "lightbox-render",
  "lightbox-types",
+ "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "wgpu",

@@ -15,12 +15,19 @@ name = "lightbox"
 path = "src/main.rs"
 
 [dependencies]
-lightbox-types.workspace = true
+lightbox-core.workspace = true
 lightbox-edit.workspace = true
 lightbox-jobs.workspace = true
+lightbox-preview.workspace = true
 lightbox-render.workspace = true
+lightbox-types.workspace = true
 eframe.workspace = true
 wgpu.workspace = true
+# `sync` only: Session::events() hands out a tokio broadcast Receiver (the
+# frozen §3.8 surface); the frame pump drains it with try_recv.
+tokio = { workspace = true, features = ["sync"] }
+# Smoke mode stages its throwaway catalog + import source in a temp dir.
+tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true

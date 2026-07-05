@@ -449,3 +449,78 @@ Each entry names the spec point, the deviation, and why.
   `target/tmp/golden-failures/` where the harness writes
   actual/heatmap/golden PNGs) — the "failure artifact uploaded in CI" half
   of the T22 AC.
+
+## Phase 7 — Shell & CLI
+
+- **CLI argument parsing is hand-rolled** (six fixed subcommands, a tiny
+  flag cursor) — no `clap`/`pico-args` dependency added, keeping the
+  license/dependency surface untouched. Exit codes are documented in
+  `--help` and asserted by the E2E test: `0` success, `1` failure,
+  `2` usage error, `3` catalog corrupt/refused (the spec asks only that
+  `check` "distinguishes ok/corrupt" via exit code).
+- **Additive `lightbox-core` surface for the CLI (not in the frozen §3.8
+  sketch):** `lightbox_core::check_catalog(lbdata) -> CatalogCheck
+  { schema_version, integrity }` (backs `lightbox-cli check` without giving
+  the CLI a `lightbox-catalog` dependency — no SQL crosses seam 1),
+  `Session::schema_version()`, and re-exports of the plain-data
+  `CatalogError`/`IntegrityStatus` types so callers can classify corrupt
+  opens. All additive; no frozen signature changed.
+- **`lightbox-cli render` writes PNGs through `lbx-image-compare`'s
+  `Rgba8Image`** (the workspace `png` codec) instead of adding an image
+  crate; the CLI E2E's golden compare rides the same harness with a
+  committed golden at `crates/lightbox-cli/goldens/cli.render/pv1/`
+  (blessed from the CPU path; the E2E requires the fixture corpus, which CI
+  fetches before `cargo test`). The T24 "byte-stable across two runs" AC is
+  asserted by rendering twice and comparing files byte-for-byte.
+- **`render` without `--cpu` uses `GpuContext::headless()`**, which
+  degrades to CPU-only when no adapter exists — so the "GPU if an adapter
+  exists" spec wording holds without a flag on CI software runners.
+- **CI `cargo tree` assertion implemented as a dedicated ci.yml step**
+  (`cargo tree -p lightbox-cli -e normal` must not contain
+  egui/eframe/winit; `-e normal` scopes the ban to the shipped binary, not
+  dev-dependencies). wgpu itself IS in the CLI tree via `lightbox-render` —
+  the spec bans UI/windowing crates, not the headless GPU stack.
+- **Shell smoke mode (`lightbox --smoke [FRAMES]`) upgraded from the
+  Phase-2 tracer to the real pipeline:** it now creates a throwaway temp
+  catalog, imports an embedded copy of the pinned self-made CC0 JPEG
+  (`tools/xtask/assets/lightbox-tiny.jpg`, `include_bytes!` so a bare
+  offline checkout works), waits for the grid model, opens the loupe, and
+  requires an `Engine::submit` texture composited on the shared device.
+  FRAMES became a *minimum* (close = seam proven AND ≥ FRAMES painted)
+  with a hard frame/90 s cap that turns a wedged pipeline into exit 1 —
+  a fixed frame count could elapse before the import lands on slow runners.
+- **Shell catalog selection:** `lightbox [--catalog <dir>.lbdata]`,
+  defaulting to `./lightbox.lbdata`, created on first run if missing. The
+  spec's M0 shell has no catalog-picker UX (E08 owns real UX); a flag +
+  deterministic default keeps the skeleton scriptable.
+- **Import UX is a path text field + recursive checkbox** in the top bar —
+  no native file-dialog dependency (rfd) at M0. Progress (done/discovered/
+  current file) renders from the throttled `ImportProgress` events; the
+  grid refreshes during import via a 500 ms-throttled model reload
+  (M0 exit: grid browsable during import).
+- **Grid "unsupported" badge is derived, not schema'd:** `ImageSummary`
+  (frozen §3.2 DTO) carries no `format` column, so cells badge from
+  `decode_error`, `missing`, `width==height==0` (the UNSUPPORTED shape),
+  and preview failures (`NoEmbedded` → "no preview" placeholder + hover
+  reason) rather than extending the frozen DTO.
+- **Grid virtualization windows the in-memory summary list, not the SQL
+  cursor:** the model double-buffers a full `ImageSummary` list fetched via
+  keyset pages (≤ 1 page query per frame, 512 rows/page; ~100 B/row keeps
+  100 k ≈ 10 MB); only *visible* cells materialize thumbnails/textures,
+  which is what T25's "only visible rows queried/materialized" is
+  protecting (preview decode + texture memory). True cursor-windowed row
+  fetch needs random-access pagination the §3.2 keyset API deliberately
+  lacks (OQ-5 territory; E08 owns the 100 k-grid profiling call).
+- **Thumbnail sizes snap to buckets {128, 256, 512, 1024}** so the
+  cell-size slider reuses decodes instead of issuing one request per pixel
+  of drag; upgrade-in-place keeps the coarser texture until the finer one
+  lands. Texture memory is capped by count (`3 × visible`, floor 64) —
+  a count cap on bucket-bounded thumbs is byte-bounded; the provider's own
+  LRU enforces the 256 MiB byte cap from §3.6.
+- **Loupe nav-swap latency probe** (T26 AC: < 50 ms p95) is measured
+  in-app (navigation keypress → texture swap) and displayed in the F1
+  debug overlay next to the frame-time p95 (T25 AC probe); formal capture
+  belongs to the Phase-8 perf harness (T28).
+- **Frame-path invariant grep:** `map_async` appears in `lightbox-shell`
+  only inside doc comments; the sole readback in the workspace remains the
+  engine's `RenderTarget::CpuBuffer` path (CLI/tests).

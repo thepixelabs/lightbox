@@ -280,6 +280,13 @@ impl Session {
         Arc::clone(&self.inner.engine)
     }
 
+    /// The catalog's schema version (all pending migrations were applied at
+    /// open). Additive to the frozen §3.8 surface — surfaced for the CLI
+    /// (`create`/`check` report it) and diagnostics overlays.
+    pub fn schema_version(&self) -> u32 {
+        self.inner.catalog.schema_version()
+    }
+
     /// Closes this handle: cancels session-scoped work, drains in-flight
     /// command jobs (bounded by `CoreConfig::close_wait`), runs the
     /// exit-time verified backup per `opts` (spec §3.8).

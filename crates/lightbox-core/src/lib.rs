@@ -19,6 +19,7 @@
 //! `<catalog>.lbdata/logs/`) and the panic hook. Error taxonomy convention:
 //! `thiserror` per crate, `anyhow` only in binaries.
 
+mod check;
 mod command;
 mod config;
 mod error;
@@ -29,6 +30,7 @@ mod queries;
 mod render_source;
 mod session;
 
+pub use check::{check_catalog, CatalogCheck};
 pub use command::{Command, CommandTicket};
 pub use config::CoreConfig;
 pub use error::{CoreError, Result};
@@ -38,9 +40,11 @@ pub use session::{CloseOpts, ClosePolicy, CloseReport, Core, Session};
 
 // Reader DTOs (spec §3.8: "the reader types simply re-exported") and the
 // report/option types shared with the import pipeline. No SQL, no rusqlite
-// types — plain data.
+// types — plain data. `CatalogError`/`IntegrityStatus` are re-exported so
+// headless callers (the CLI's `check`) can classify open failures without a
+// `lightbox-catalog` dependency of their own.
 pub use lightbox_catalog::{
-    BackupReport, CatalogCounts, FolderNode, ImageDetail, ImageQuery, ImageSummary, Page,
-    PageCursor, SortOrder,
+    BackupReport, CatalogCounts, CatalogError, FolderNode, ImageDetail, ImageQuery, ImageSummary,
+    IntegrityStatus, Page, PageCursor, SortOrder,
 };
 pub use lightbox_ingest::{ImportOptions, ImportReport};

@@ -3,53 +3,58 @@
 
 //! `lightbox-shell` — the thin, replaceable egui/eframe UI shell.
 //!
-//! E01 Phase 2 (T5 + T7): the **zero-copy seam tracer bullet**. The eframe
-//! app shares one `wgpu::Device` with the render engine (architecture §2.3
-//! seam 2); a `solid.color` render produced by `Engine::submit` is composited
-//! into the egui frame by registering the engine's output texture with
-//! `egui_wgpu::Renderer::register_native_texture` and drawing it with
-//! `ui.image` — re-registered on every texture swap.
+//! E01 Phase 7 (T25/T26): the walking-skeleton Library — an eframe app that
+//! opens a real catalog through the headless [`lightbox_core::Session`]
+//! (seam 1), imports a folder via the command bus, shows a **virtualized
+//! grid** of demand-driven, cancel-on-scroll-out thumbnails, and a **loupe
+//! whose every pixel is produced by `Engine::submit`** and composited
+//! zero-copy on the ONE `wgpu::Device` the shell shares with the engine
+//! (architecture §2.3 seam 2; spec §9 M0 verbatim requirement).
 //!
-//! **Zero-copy invariants (code-review checklist, spec T7):**
-//! * NO `map_async` / CPU readback anywhere in the frame path — this crate
-//!   never maps GPU memory (grep it).
+//! **Zero-copy invariants (code-review checklist, spec T7/T26):**
+//! * NO `map_async`/CPU readback anywhere in the frame path — this crate
+//!   never maps GPU memory (grep it). Thumbnails are CPU-decoded pixels
+//!   (spec §3.6) uploaded once as egui textures; the loupe is the engine's
+//!   texture registered via `register_native_texture`.
 //! * The engine receives the *shell's* device: asserted by `Arc` identity in
-//!   a debug assertion, and enforced at runtime by wgpu itself — registering
-//!   a texture created on a different device would fail validation.
+//!   a debug assertion, and enforced at runtime by wgpu itself (registering
+//!   a texture created on another device fails validation).
 //!
-//! `PaintCallback` is the documented E05/E08 upgrade path when the loupe
-//! needs tiling/gizmos drawn inside the egui paint graph; `ui.image` over a
-//! registered native texture is sufficient (and simpler) for M0.
-//!
-//! Phase 7 (T25–T26) replaces the tracer scene with the real grid + loupe.
-//! **E08** owns the full Library/Develop UX.
+//! `PaintCallback` remains the documented E05/E08 upgrade path for
+//! tiling/gizmos inside the paint graph. **E08** owns the real Library UX
+//! (culling grammar, filmstrip, compare/survey, panels, keymap).
 
+mod grid;
+mod loupe;
+mod model;
+mod smoke;
+mod thumbs;
+
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
-use lightbox_edit::Recipe;
-use lightbox_render::nodes::solid_color::{SolidColorNode, SolidColorPlanner};
-use lightbox_render::{
-    Engine, GpuContext, NodeRegistry, NullSourceResolver, RenderOutput, RenderRequest, RenderScale,
-    RenderState, RenderTarget, RenderTicket, Roi, ViewportId,
-};
-use lightbox_types::{ImageId, PV_M0};
+use lightbox_core::{ClosePolicy, Command, Core, CoreConfig, Event, Session};
+use lightbox_render::GpuContext;
 
-/// The tracer bullet's single viewport (the loupe's ancestor).
-const TRACER_VIEWPORT: ViewportId = ViewportId(1);
-
-/// Color animation rate: distinct hue steps per second. Each step submits a
-/// fresh render — deliberately faster than the engine "needs", to exercise
-/// latest-wins coalescing under a live UI.
-const HUE_STEPS_PER_SEC: f64 = 12.0;
+use crate::grid::GridAction;
+use crate::loupe::{LoupeAction, LoupeView};
+use crate::model::{ImageListModel, Selection};
+use crate::smoke::SmokeDriver;
+use crate::thumbs::ThumbCache;
 
 /// Options for [`run`].
 #[derive(Debug, Clone, Default)]
 pub struct ShellOptions {
-    /// Smoke mode: run this many frames, assert the seam invariants held,
-    /// then close (used by `lightbox --smoke N` and CI).
+    /// Smoke mode (CI): drive import→grid→loupe on a throwaway catalog,
+    /// close after the seam is proven and this many frames painted.
     pub smoke_frames: Option<u64>,
+    /// The catalog to open (created when missing). Defaults to
+    /// `./lightbox.lbdata`. Ignored in smoke mode.
+    pub catalog: Option<PathBuf>,
 }
 
 /// What the app observed, for smoke-mode verdicts (shared with [`run`]'s
@@ -58,7 +63,7 @@ pub struct ShellOptions {
 pub struct ShellOutcome {
     /// Frames painted.
     pub frames: AtomicU64,
-    /// Engine textures registered with egui (texture swaps).
+    /// Engine textures registered with egui (loupe texture swaps).
     pub texture_swaps: AtomicU64,
     /// True once an `Engine::submit`-produced texture was composited on the
     /// shared device (the seam-2 proof held at least once).
@@ -76,8 +81,8 @@ pub fn run(options: ShellOptions) -> Result<Arc<ShellOutcome>, eframe::Error> {
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_title("Lightbox — zero-copy seam tracer (E01 Phase 2)")
-            .with_inner_size([960.0, 640.0]),
+            .with_title("Lightbox")
+            .with_inner_size([1100.0, 720.0]),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
                 // T5: the shared device is created with the SAME descriptor
@@ -100,29 +105,80 @@ pub fn run(options: ShellOptions) -> Result<Arc<ShellOutcome>, eframe::Error> {
     Ok(outcome)
 }
 
-/// The engine texture currently composited into the egui frame.
-struct Displayed {
-    /// The egui-side handle (`register_native_texture`).
-    texture_id: egui::TextureId,
-    /// Keeps the wgpu texture alive: the pool only recycles unreferenced
-    /// textures, so holding this is what makes swaps flicker-free.
-    _tex: Arc<wgpu::Texture>,
-    /// Size in physical pixels.
-    size: [u32; 2],
+/// Which top-level view is showing (G/E toggle — spec T26).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum View {
+    Grid,
+    Loupe,
+}
+
+/// Import-bar state (M0: a path field, no native file dialog).
+#[derive(Default)]
+struct ImportUi {
+    path: String,
+    recursive: bool,
+    /// `(done, discovered, current file)` while an import runs.
+    active: Option<(u64, u64, String)>,
+}
+
+/// Rolling frame-time probe backing the debug overlay (T25 AC: p95 < 16 ms
+/// measured here on a dev laptop).
+struct FrameStats {
+    last: Option<Instant>,
+    samples_ms: Vec<f32>,
+}
+
+impl FrameStats {
+    fn new() -> FrameStats {
+        FrameStats {
+            last: None,
+            samples_ms: Vec::with_capacity(240),
+        }
+    }
+
+    fn tick(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.last.replace(now) {
+            let ms = now.duration_since(last).as_secs_f32() * 1000.0;
+            if self.samples_ms.len() >= 240 {
+                self.samples_ms.remove(0);
+            }
+            self.samples_ms.push(ms);
+        }
+    }
+}
+
+/// Nearest-rank percentile over a small sample buffer.
+fn percentile(samples: &[f32], p: f32) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f32> = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = ((p * sorted.len() as f32).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
 }
 
 struct LightboxApp {
-    engine: Engine,
-    planner: Arc<SolidColorPlanner>,
+    session: Session,
+    _core: Core,
+    events: tokio::sync::broadcast::Receiver<Event>,
     gpu: GpuContext,
-    render_state: eframe::egui_wgpu::RenderState,
-    ticket: Option<RenderTicket>,
-    displayed: Option<Displayed>,
-    last_size: [u32; 2],
-    last_hue_step: Option<u64>,
-    last_error: Option<String>,
-    options: ShellOptions,
+
+    view: View,
+    model: ImageListModel,
+    selection: Selection,
+    thumbs: ThumbCache,
+    loupe: LoupeView,
+    import_ui: ImportUi,
+    cell_size: f32,
+    status: String,
+
+    stats: FrameStats,
+    show_overlay: bool,
+
     outcome: Arc<ShellOutcome>,
+    smoke: Option<SmokeDriver>,
 }
 
 impl LightboxApp {
@@ -145,90 +201,274 @@ impl LightboxApp {
             render_state.adapter.get_info(),
         );
 
-        let node = Arc::new(SolidColorNode::new());
-        let mut registry = NodeRegistry::new();
-        registry.register(PV_M0, node);
+        let smoke = match options.smoke_frames {
+            Some(frames) => Some(SmokeDriver::new(frames.max(1))?),
+            None => None,
+        };
 
-        let engine = Engine::new(Some(gpu.clone()), registry, Arc::new(NullSourceResolver))
-            .map_err(|e| format!("engine start failed: {e}"))?;
-        let planner = Arc::new(SolidColorPlanner::new(hue_color(0)));
-        engine.set_planner(planner.clone());
+        let core = Core::start(CoreConfig::default())?;
+        let lbdata = match &smoke {
+            Some(smoke) => smoke.lbdata.clone(),
+            None => options
+                .catalog
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("lightbox.lbdata")),
+        };
+        let session = if lbdata.join("catalog.sqlite").is_file() {
+            core.open_catalog(&lbdata, Some(gpu.clone()))?
+        } else {
+            core.create_catalog(&lbdata, Some(gpu.clone()))?
+        };
+        let events = session.events();
 
-        // T7 debug assertion: the engine's device IS the shell's device.
-        // (Runtime enforcement exists too: registering the engine's texture
-        // with egui would fail wgpu validation across devices.)
+        // T7/T26 debug assertion: the engine's device IS the shell's device.
         debug_assert!(
-            Arc::ptr_eq(&engine.gpu().expect("gpu engine").device, &gpu.device),
+            session
+                .engine()
+                .gpu()
+                .is_some_and(|g| Arc::ptr_eq(&g.device, &gpu.device)),
             "engine must render on the shell's wgpu device (seam 2)"
         );
 
-        tracing::info!(target: "lightbox_shell", "shell up, {}", gpu.adapter_report());
+        tracing::info!(
+            target: "lightbox_shell",
+            catalog = %lbdata.display(),
+            "shell up, {}",
+            gpu.adapter_report()
+        );
 
+        let thumbs = ThumbCache::new(session.previews());
+        let loupe = LoupeView::new(render_state, Arc::clone(&outcome));
         Ok(LightboxApp {
-            engine,
-            planner,
+            session,
+            _core: core,
+            events,
             gpu,
-            render_state,
-            ticket: None,
-            displayed: None,
-            last_size: [0, 0],
-            last_hue_step: None,
-            last_error: None,
-            options,
+            view: View::Grid,
+            model: ImageListModel::new(),
+            selection: Selection::default(),
+            thumbs,
+            loupe,
+            import_ui: ImportUi::default(),
+            cell_size: 144.0,
+            status: String::new(),
+            stats: FrameStats::new(),
+            show_overlay: cfg!(debug_assertions),
             outcome,
+            smoke,
         })
     }
 
-    /// Registers a finished engine texture with egui, releasing the previous
-    /// one. This is the "re-register on texture swap" path of spec T7.
-    fn swap_displayed(
-        &mut self,
-        tex: Arc<wgpu::Texture>,
-        view: &wgpu::TextureView,
-        size: [u32; 2],
-    ) {
-        let mut renderer = self.render_state.renderer.write();
-        let texture_id = renderer.register_native_texture(
-            &self.render_state.device,
-            view,
-            wgpu::FilterMode::Linear,
-        );
-        if let Some(old) = self.displayed.replace(Displayed {
-            texture_id,
-            _tex: tex,
-            size,
-        }) {
-            renderer.free_texture(&old.texture_id);
-            // Dropping `old._tex` lets the pool recycle it for the next frame.
+    /// Drains the event broadcast once per frame (spec §5.1 threading
+    /// contract). Slow frames lag — they never wedge the writer.
+    fn drain_events(&mut self) {
+        use tokio::sync::broadcast::error::TryRecvError;
+        loop {
+            match self.events.try_recv() {
+                Ok(Event::CatalogChanged { .. }) => {
+                    self.model.mark_dirty();
+                    self.thumbs.clear_failures();
+                }
+                Ok(Event::ImportStarted { .. }) => {
+                    self.import_ui.active = Some((0, 0, String::new()));
+                }
+                Ok(Event::ImportProgress {
+                    done,
+                    discovered,
+                    current,
+                    ..
+                }) => {
+                    self.import_ui.active = Some((
+                        done,
+                        discovered,
+                        current
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                    ));
+                    // Keep the grid growing during the import (M0 exit:
+                    // browsable during import) without re-querying at event
+                    // rate.
+                    self.model.mark_dirty_throttled(Duration::from_millis(500));
+                }
+                Ok(Event::ImportFinished { report, .. }) => {
+                    self.import_ui.active = None;
+                    self.status = format!(
+                        "imported {} (skipped {} duplicates, {} errors) in {:.1}s",
+                        report.imported,
+                        report.skipped_duplicates,
+                        report.errors.len(),
+                        report.took.as_secs_f64(),
+                    );
+                    self.model.mark_dirty();
+                }
+                Ok(Event::CommandFailed { error, .. }) => {
+                    self.status = format!("command failed: {error}");
+                    self.import_ui.active = None;
+                }
+                Ok(Event::BackupFinished { report }) => {
+                    self.status = format!("backup written: {}", report.path.display());
+                }
+                Ok(Event::DeviceDegraded { reason }) => {
+                    self.status = format!("GPU device degraded: {reason}");
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Lagged(_)) => {
+                    // Missed events: any of them could have been a
+                    // CatalogChanged.
+                    self.model.mark_dirty();
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+            }
         }
-        self.outcome.texture_swaps.fetch_add(1, Ordering::AcqRel);
-        self.outcome.seam_proven.store(true, Ordering::Release);
     }
 
-    fn poll_engine(&mut self) {
-        let Some(ticket) = self.ticket.clone() else {
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            match self.view {
+                View::Grid => {
+                    ui.label("Import folder:");
+                    let width = (ui.available_width() - 420.0).clamp(120.0, 420.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.import_ui.path)
+                            .hint_text("/path/to/photos")
+                            .desired_width(width),
+                    );
+                    ui.checkbox(&mut self.import_ui.recursive, "recursive");
+                    let importing = self.import_ui.active.is_some();
+                    let import_clicked = ui
+                        .add_enabled(
+                            !importing && !self.import_ui.path.trim().is_empty(),
+                            egui::Button::new("Import"),
+                        )
+                        .clicked();
+                    if import_clicked {
+                        self.session.submit(Command::ImportAddInPlace {
+                            source_dir: PathBuf::from(self.import_ui.path.trim()),
+                            recursive: self.import_ui.recursive,
+                        });
+                        self.status = format!("importing {}…", self.import_ui.path.trim());
+                    }
+                    ui.separator();
+                    ui.label("Size:");
+                    ui.add(egui::Slider::new(&mut self.cell_size, 64.0..=320.0).show_value(false));
+                }
+                View::Loupe => {
+                    if ui.button("◀ Grid (G)").clicked() {
+                        self.exit_loupe();
+                    }
+                    ui.label("←/→ navigate · Z/Space/double-click zoom · fit ↔ 100%");
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some((done, discovered, current)) = &self.import_ui.active {
+                    ui.label(format!("importing {done}/{discovered} — {current}"));
+                    ui.spinner();
+                }
+            });
+        });
+    }
+
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let selected = if self.selection.is_empty() {
+                String::new()
+            } else {
+                format!(" · {} selected", self.selection.len())
+            };
+            ui.label(format!("{} images{selected}", self.model.rows().len()));
+            ui.separator();
+            ui.label(&self.status);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!(
+                    "schema v{} · {:?} · F1 stats",
+                    self.session.schema_version(),
+                    self.gpu.backend,
+                ));
+            });
+        });
+    }
+
+    fn overlay(&self, ctx: &egui::Context) {
+        let thumb_stats = self.thumbs.stats();
+        let frame_p95 = percentile(&self.stats.samples_ms, 0.95);
+        let frame_max = self.stats.samples_ms.iter().copied().fold(0.0f32, f32::max);
+        let nav_p95 = percentile(&self.loupe.nav_swap_ms, 0.95);
+        egui::Window::new("frame stats")
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 32.0))
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.monospace(format!(
+                    "frame ms   p95 {frame_p95:6.2}  max {frame_max:6.2} (n={})",
+                    self.stats.samples_ms.len()
+                ));
+                ui.monospace(format!(
+                    "thumbs     cached {} inflight {} failed {}",
+                    thumb_stats.cached, thumb_stats.inflight, thumb_stats.failed
+                ));
+                ui.monospace(format!(
+                    "requests   issued {} cancelled {}",
+                    thumb_stats.requested_total, thumb_stats.cancelled_total
+                ));
+                ui.monospace(format!(
+                    "nav swap   p95 {nav_p95:6.2} ms (n={})",
+                    self.loupe.nav_swap_ms.len()
+                ));
+                ui.monospace(format!("images     {}", self.model.rows().len()));
+                ui.monospace(format!(
+                    "swaps      {}",
+                    self.outcome.texture_swaps.load(Ordering::Acquire)
+                ));
+            });
+    }
+
+    fn enter_loupe(&mut self, idx: usize) {
+        if let Some(summary) = self.model.rows().get(idx) {
+            self.selection.set_focus(summary.id);
+            self.loupe.enter();
+            self.view = View::Loupe;
+        }
+    }
+
+    fn exit_loupe(&mut self) {
+        self.loupe.exit(&self.session.engine());
+        self.view = View::Grid;
+    }
+
+    /// Smoke scripting: submit the import once, hop into the loupe once a
+    /// row exists, close when proven (or wedged — nonzero exit).
+    fn pump_smoke(&mut self, ctx: &egui::Context) {
+        let Some(smoke) = &mut self.smoke else {
             return;
         };
-        match self.engine.poll(&ticket) {
-            RenderState::Pending | RenderState::Running => {}
-            RenderState::Ready(RenderOutput::Texture { tex, view, size }) => {
-                self.swap_displayed(tex, &view, size);
-                self.last_error = None;
-                self.ticket = None;
-            }
-            RenderState::Ready(RenderOutput::Cpu(_)) => {
-                // Unreachable: the shell only submits RenderTarget::Texture.
-                tracing::error!(target: "lightbox_shell", "unexpected CPU output in frame path");
-                self.ticket = None;
-            }
-            RenderState::Failed(err) => {
-                tracing::error!(target: "lightbox_shell", %err, "render failed");
-                self.last_error = Some(err.to_string());
-                self.ticket = None;
-            }
-            RenderState::Cancelled | RenderState::Superseded => {
-                self.ticket = None;
-            }
+        if !smoke.submitted {
+            let photos = smoke.photos.clone();
+            smoke.submitted = true;
+            self.session.submit(Command::ImportAddInPlace {
+                source_dir: photos,
+                recursive: false,
+            });
+        }
+        let want_loupe = !smoke.opened_loupe && !self.model.rows().is_empty();
+        if want_loupe {
+            self.smoke.as_mut().expect("smoke mode").opened_loupe = true;
+            self.enter_loupe(0);
+        }
+
+        let smoke = self.smoke.as_ref().expect("smoke mode");
+        let frames = self.outcome.frames.load(Ordering::Acquire);
+        let proven = self.outcome.seam_proven.load(Ordering::Acquire);
+        if smoke.done(frames, proven) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if smoke.expired(frames) {
+            tracing::error!(
+                target: "lightbox_shell",
+                frames,
+                proven,
+                "smoke run expired before the seam was proven"
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 }
@@ -236,99 +476,104 @@ impl LightboxApp {
 impl eframe::App for LightboxApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
-        let pixels_per_point = ctx.pixels_per_point();
+        self.stats.tick();
+        self.drain_events();
+        self.model.pump(&self.session);
+        self.thumbs.pump(&ctx);
 
-        egui::Panel::top(egui::Id::new("tracer-info")).show(root, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!(
-                    "zero-copy seam tracer — {} | swaps: {} | {}",
-                    self.gpu.adapter_report(),
-                    self.outcome.texture_swaps.load(Ordering::Acquire),
-                    match &self.last_error {
-                        Some(e) => format!("last error: {e}"),
-                        None => "engine ok".to_owned(),
-                    },
-                ));
-            });
-        });
-
-        egui::CentralPanel::default().show(root, |ui| {
-            // Desired output size in physical pixels (DPI-aware: logical
-            // points × pixels_per_point — spec T7 "window resize + DPI").
-            let avail = ui.available_size();
-            let max_dim = self.gpu.limits.max_texture_dimension_2d;
-            let want = [
-                ((avail.x * pixels_per_point).round() as u32).clamp(1, max_dim),
-                ((avail.y * pixels_per_point).round() as u32).clamp(1, max_dim),
-            ];
-
-            // Animate the color; resubmit on any change (size or step).
-            // Latest-wins coalescing supersedes stale in-flight requests.
-            let hue_step = (ctx.input(|i| i.time) * HUE_STEPS_PER_SEC) as u64;
-            if want != self.last_size || Some(hue_step) != self.last_hue_step {
-                self.planner.set_color(hue_color(hue_step));
-                let ticket = self.engine.submit(RenderRequest {
-                    image: ImageId(0),
-                    recipe: Recipe::identity(PV_M0),
-                    pv: PV_M0,
-                    roi: Roi::Full,
-                    scale: RenderScale::FitWithin {
-                        w: want[0],
-                        h: want[1],
-                    },
-                    target: RenderTarget::Texture,
-                    viewport: TRACER_VIEWPORT,
-                });
-                self.ticket = Some(ticket);
-                self.last_size = want;
-                self.last_hue_step = Some(hue_step);
-            }
-
-            self.poll_engine();
-
-            // Flicker-free: keep compositing the previous texture until the
-            // newer ticket lands.
-            if let Some(displayed) = &self.displayed {
-                let logical = egui::vec2(
-                    displayed.size[0] as f32 / pixels_per_point,
-                    displayed.size[1] as f32 / pixels_per_point,
-                );
-                ui.image(egui::load::SizedTexture::new(displayed.texture_id, logical));
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("waiting for the first engine texture…");
-                });
-            }
-        });
-
-        let frames = self.outcome.frames.fetch_add(1, Ordering::AcqRel) + 1;
-        if let Some(limit) = self.options.smoke_frames {
-            if frames >= limit {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.show_overlay = !self.show_overlay;
         }
 
-        // Keep animating (and keep polling in-flight tickets).
-        ctx.request_repaint();
-    }
-}
+        egui::Panel::top(egui::Id::new("lightbox-top")).show(root, |ui| self.top_bar(ui));
+        egui::Panel::bottom(egui::Id::new("lightbox-status")).show(root, |ui| self.status_bar(ui));
 
-/// A pleasant sRGB color from a hue step (tiny HSV→RGB, s/v fixed).
-fn hue_color(step: u64) -> [f32; 4] {
-    let h = ((step * 7) % 360) as f32; // degrees
-    let (s, v) = (0.55_f32, 0.85_f32);
-    let c = v * s;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-    let (r, g, b) = match (h / 60.0) as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    [r + m, g + m, b + m, 1.0]
+        let mut visible: HashSet<lightbox_types::ImageId> = HashSet::new();
+        egui::CentralPanel::default().show(root, |ui| match self.view {
+            View::Grid => {
+                let action = grid::grid_ui(
+                    ui,
+                    self.model.rows(),
+                    &mut self.selection,
+                    &mut self.thumbs,
+                    self.cell_size,
+                    &mut visible,
+                );
+                if let Some(GridAction::OpenLoupe(idx)) = action {
+                    self.enter_loupe(idx);
+                }
+            }
+            View::Loupe => {
+                let engine = self.session.engine();
+                let idx = self
+                    .selection
+                    .focus()
+                    .and_then(|id| self.model.index_of(id));
+                match idx {
+                    Some(idx) => match self.loupe.ui(ui, &engine, self.model.rows(), idx) {
+                        Some(LoupeAction::ExitToGrid) => self.exit_loupe(),
+                        Some(LoupeAction::Navigate(next)) => {
+                            if let Some(s) = self.model.rows().get(next) {
+                                self.selection.set_focus(s.id);
+                            }
+                        }
+                        None => {}
+                    },
+                    // The focused image vanished (undo-import): back to grid.
+                    None => self.exit_loupe(),
+                }
+            }
+        });
+
+        // Cancel-on-scroll-out + O(visible) texture memory (T25). The cap
+        // keeps a small navigation cushion above the visible set.
+        let cap = (visible.len() * 3).max(64);
+        self.thumbs.end_frame(&visible, cap);
+
+        if self.show_overlay {
+            self.overlay(&ctx);
+        }
+
+        self.outcome.frames.fetch_add(1, Ordering::AcqRel);
+        self.pump_smoke(&ctx);
+
+        // Repaint policy: run hot while anything is in flight; otherwise a
+        // slow idle poll keeps the event pump alive without burning a core.
+        let busy = self.model.loading()
+            || self.thumbs.stats().inflight > 0
+            || self.loupe.busy()
+            || self.import_ui.active.is_some()
+            || self.smoke.is_some();
+        if busy {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+    }
+
+    fn on_exit(&mut self) {
+        // Exit-time verified backup per policy (spec T15/OQ-6); smoke runs
+        // skip it (throwaway catalog).
+        let policy = if self.smoke.is_some() {
+            ClosePolicy::Skip
+        } else {
+            ClosePolicy::Auto
+        };
+        match self.session.clone().close(policy.into()) {
+            Ok(report) => {
+                if let Some(backup) = report.backup {
+                    tracing::info!(
+                        target: "lightbox_shell",
+                        path = %backup.path.display(),
+                        "exit-time verified backup written"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::error!(target: "lightbox_shell", %err, "session close failed");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -336,18 +581,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hue_color_stays_in_unit_range_with_full_alpha() {
-        for step in 0..=720 {
-            let [r, g, b, a] = hue_color(step);
-            for c in [r, g, b] {
-                assert!((0.0..=1.0).contains(&c), "step {step}: {c} out of range");
-            }
-            assert_eq!(a, 1.0);
-        }
+    fn percentile_is_nearest_rank() {
+        assert_eq!(percentile(&[], 0.95), 0.0);
+        assert_eq!(percentile(&[5.0], 0.95), 5.0);
+        let v: Vec<f32> = (1..=100).map(|i| i as f32).collect();
+        assert_eq!(percentile(&v, 0.95), 95.0);
+        assert_eq!(percentile(&v, 0.5), 50.0);
+        // Unsorted input is handled.
+        assert_eq!(percentile(&[3.0, 1.0, 2.0], 1.0), 3.0);
     }
 
     #[test]
-    fn hue_color_actually_animates() {
-        assert_ne!(hue_color(0), hue_color(1));
+    fn frame_stats_buffer_is_bounded() {
+        let mut stats = FrameStats::new();
+        for _ in 0..500 {
+            stats.tick();
+        }
+        assert!(stats.samples_ms.len() <= 240);
     }
 }

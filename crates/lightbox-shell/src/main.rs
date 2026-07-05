@@ -1,18 +1,21 @@
 // SPDX-FileCopyrightText: 2026 Lightbox contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lightbox` — the desktop app binary (E01 Phase 2: seam tracer bullet).
+//! `lightbox` — the desktop app binary (E01 Phase 7: grid + loupe shell).
 //!
 //! ```text
-//! lightbox                    # run the shell
-//! lightbox --smoke [FRAMES]   # run FRAMES (default 60) frames, verify the
-//!                             # zero-copy seam held, exit 0/1 (CI smoke)
+//! lightbox [--catalog <dir>.lbdata]   # open (or create) a catalog
+//! lightbox --smoke [FRAMES]           # CI smoke: throwaway catalog →
+//!                                     # import → grid → loupe; verify the
+//!                                     # zero-copy seam held, exit 0/1
 //! ```
 
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
 use lightbox_shell::ShellOptions;
+
+const USAGE: &str = "usage: lightbox [--catalog <dir>.lbdata] [--smoke [FRAMES]]";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -22,28 +25,34 @@ fn main() -> ExitCode {
         )
         .init();
 
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     let mut options = ShellOptions::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--smoke" => {
-                let frames = args
-                    .next()
-                    .map(|v| v.parse::<u64>())
-                    .transpose()
-                    .unwrap_or_else(|e| {
-                        eprintln!("--smoke FRAMES must be a number: {e}");
-                        std::process::exit(2);
-                    })
-                    .unwrap_or(60);
+                // Optional FRAMES: consume the next arg only when numeric.
+                let frames = match args.peek().map(|v| v.parse::<u64>()) {
+                    Some(Ok(n)) => {
+                        args.next();
+                        n
+                    }
+                    _ => 60,
+                };
                 options.smoke_frames = Some(frames.max(1));
             }
+            "--catalog" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--catalog requires a path\n{USAGE}");
+                    return ExitCode::from(2);
+                };
+                options.catalog = Some(path.into());
+            }
             "--help" | "-h" => {
-                println!("usage: lightbox [--smoke [FRAMES]]");
+                println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
             other => {
-                eprintln!("unknown argument: {other}\nusage: lightbox [--smoke [FRAMES]]");
+                eprintln!("unknown argument: {other}\n{USAGE}");
                 return ExitCode::from(2);
             }
         }
@@ -65,7 +74,10 @@ fn main() -> ExitCode {
                     );
                     return ExitCode::FAILURE;
                 }
-                println!("OK: engine texture composited zero-copy on the shared wgpu device");
+                println!(
+                    "OK: import → grid → loupe drove an engine texture zero-copy \
+                     on the shared wgpu device"
+                );
             }
             ExitCode::SUCCESS
         }
