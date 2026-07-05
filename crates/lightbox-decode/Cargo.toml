@@ -26,6 +26,10 @@ tiff.workspace = true
 serde = { workspace = true }
 toml.workspace = true
 ciborium.workspace = true
+# E02 Phase C (C6): the DecodedRawState v1 pixel frame is a zstd frame (§4.2).
+# Appended by Phase C (Phase A did not declare it for lightbox-decode); already
+# in the crate graph via lightbox-catalog, deny-approved (BSD-3-Clause/MIT).
+zstd.workspace = true
 
 [features]
 default = []

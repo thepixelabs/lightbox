@@ -125,3 +125,78 @@ manifest; `deny.toml` now bans rawler + dnglab graph-wide. Exit bar green.
   `transform`(B), `cms`(D), `display`(D), `output`(D), `look`(E), `dcp`(F), `profile`(F), `error`(A).
   Every §3.3–§3.6 public type is a real definition; phase-owned fn bodies are `unimplemented!("<task>")`.
 - New members: `crates/lightbox-rawproxy` (bin, C), `tools/lightbox-profgen` (bin, G).
+
+## 2026-07-05 — Phase C: LibRaw out-of-process proxy (staff engineer)
+
+Delivered C1–C7. `lightbox-rawproxy` now: applies a resource sandbox at startup, speaks the
+v1 CBOR protocol with an out-of-band payload handoff, and — under the `libraw` feature — links
+LibRaw via a C shim and decodes mosaic + interim-AHD-demosaiced. `lightbox-decode` gained the
+supervisor client (`ProxySupervisor`/`ProxyClient`), `decode_for_develop`, and the full
+`DecodedRawState` (de)serialize. Default + `--features libraw` builds, clippy, fmt, deny all green.
+
+### Deviations
+
+- **LibRaw is feature-gated OFF by default (`lightbox-rawproxy` `libraw` feature).** The default
+  `cargo build --workspace` links no LibRaw and the proxy answers decode requests with a structured
+  `no_libraw` `Err` (client → `DecodeError::Unimplemented`). This is the spec §0 sanctioned fallback
+  ("if brew fails, feature-gate the proxy and keep the default build green"), applied unconditionally
+  so CI / the merge machine / the 3-OS matrix stay green without LibRaw. **Consequence:** production
+  packaging must build the proxy with `--features libraw` (LibRaw present); the build script emits an
+  actionable error if the feature is on but LibRaw is absent. On this build machine both builds are
+  proven green (LibRaw 0.22.1 via Homebrew; the FFI links and the handshake reports the real version).
+- **Payload handoff is a temp file, not `memfd`/`CreateFileMapping` (§3.2).** `lightbox-decode` denies
+  `unsafe` workspace-wide, so it cannot `mmap` a shared segment; a plain temp file (path in
+  `ShmRef.name`) is portable across the 3 OSes with the identical hygiene contract (client deletes
+  after read; proxy cleans up on error). Proven leak-free over 100 cycles + client always-delete
+  (even on cap rejection). Blast radius: one extra file write+read per decode vs. zero-copy mmap;
+  E11/E16 may revisit for the zero-copy path.
+- **Proxy wire protocol enriched (additive).** `ProxyMeta` gained `payload: ProxyPayloadKind`
+  (`None`/`Mosaic(MosaicMeta)`/`Demosaiced(DemosaicedMeta)`) so the client reconstructs
+  `MosaicImage`/`SourceImage` from out-of-band `u16` bytes + metadata. `#[derive(Serialize,
+  Deserialize)]` added to `CfaColor`/`CfaPattern`/`BlackLevels`/`Rect`/`Illuminant`/`RawColorimetry`/
+  `DecodeBackend` (and `PartialEq` to `RawColorimetry`) — additive, no field/shape change to the
+  Phase-A cross-phase contract; needed so calibration travels the wire AND the `DecodedRawState`
+  CBOR header.
+- **`DecodedRawState` v1 adds a `u32 header_len`** between the fixed prefix and the CBOR header so the
+  reader finds the zstd frame boundary without a streaming CBOR probe; the rest matches §4.2. `zstd`
+  appended to `lightbox-decode`'s `[dependencies]` (Phase A omitted it; already deny-approved via
+  `lightbox-catalog`).
+- **LibRaw FFI via a hand-written C shim (`src/libraw_shim.c`), not a Rust mirror of `libraw_data_t`.**
+  The shim exposes a small flat `lbx_lr_*` C API we control; the Rust `extern "C"` block declares only
+  those, so the FFI is stable across LibRaw releases (the giant `libraw_data_t` struct never appears in
+  Rust). Compiled by `cc` (appended as a `[build-dependencies]` of `lightbox-rawproxy`; MIT/Apache,
+  already in the deny-approved graph via `zstd-sys`/`lcms2-sys`; inert unless the feature is on).
+- **rlimits: `RLIMIT_AS` is unsupported on macOS** (setrlimit → EINVAL) → use `RLIMIT_DATA` there,
+  `RLIMIT_AS` on Linux; plus `RLIMIT_CPU`/`RLIMIT_CORE`/`RLIMIT_FSIZE` everywhere POSIX.
+- **Surface-2 SBOM row for LibRaw is a documented comment in `native-inventory.toml`, not a
+  `[[package]]` entry.** The placeholder checker (`cargo xtask lint-native-deps`) only models `-sys`
+  CRATES and flags any inventoried name absent from `Cargo.lock` as stale; LibRaw is a dynamically
+  linked *library* (no crate), so a real entry would break the check. The comment block records the
+  full row (library, version, LGPL-2.1, dynamic/out-of-process, feature, transitive deps, audit test).
+  E16 formalizes it when the inventory model grows a "dynamic-external" kind.
+- **`raw/proxy_client.rs` (supervisor) is new alongside `raw/proxy.rs` (wire types).** The §2 module
+  map named the supervisor `proxy_client.rs`; Phase A had created `proxy.rs` for the protocol types.
+  Both coexist (disjoint). `raw/mod.rs` gained `pub mod proxy_client;` + `decode_for_develop_impl`
+  (a module file, not a crate `lib.rs` — within Phase C's surface).
+
+### DEFERRED (with reason — nothing faked)
+
+- **C2 full-corpus decode PARITY + X-Trans render:** requires the **A2 CC0 raw corpus**, which is
+  deferred (A2 is not in any executed phase) and could not be fetched on this bare machine (the
+  `cargo xtask fixtures` download timed out — network-bound). The FFI decode path is proven to
+  **compile, link, and run** (the `Hello` handshake reports the real linked LibRaw 0.22.1, proving
+  LibRaw is callable). A real end-to-end pixel decode is exercised by the env-gated integration test
+  `real_raw_decodes_via_the_proxy_when_a_sample_is_provided` (`LIGHTBOX_TEST_RAW=<raw file>`), which
+  **skips honestly** when no sample is supplied. **No corpus, metadata parity, or decode output is
+  fabricated.** When A2 lands, that test + a metadata-parity assertion against the in-crate walker
+  become PR-gating.
+- **C4 Windows `JobObject` sandbox:** the build machine is macOS. POSIX rlimits are implemented; the
+  Windows Job Object (parent-applied `JOB_OBJECT_LIMIT_PROCESS_MEMORY`/`JOB_OBJECT_LIMIT_JOB_TIME`) is
+  a documented follow-up. In the interim the parent-side payload cap + kill-on-timeout supervisor bound
+  the child there. **No fake sandbox claimed.**
+- **C4 hard no-network sandbox (seccomp / seatbelt / AppContainer):** scoped to the §12
+  security-engineer review (threat-model note, task H7). The proxy opens no sockets; egress is not
+  hard-blocked at the kernel level yet. Stated honestly, not oversold.
+- **`decode_for_develop` in-crate linear/mono-DNG fast path:** depends on **A5** (not in Phase C's
+  task set). In the interim `decode_for_develop` routes every raw through the proxy's AHD path; once A5
+  lands, linear-DNG/mono decode in-crate and only CFA-mosaic goes to the proxy.
