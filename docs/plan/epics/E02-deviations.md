@@ -200,3 +200,75 @@ supervisor client (`ProxySupervisor`/`ProxyClient`), `decode_for_develop`, and t
 - **`decode_for_develop` in-crate linear/mono-DNG fast path:** depends on **A5** (not in Phase C's
   task set). In the interim `decode_for_develop` routes every raw through the proxy's AHD path; once A5
   lands, linear-DNG/mono decode in-crate and only CFA-mosaic goes to the proxy.
+
+## 2026-07-05 — Phase B: camera-matrix base + WB solver + first failing test (staff engineer)
+
+Delivered B1–B8 in full and the color core of B9. Exit bar green (`cargo build/test/clippy
+--all-targets -D warnings/fmt --check/deny check`). No `Cargo.toml` or `lib.rs` edits — all deps
+(`twox-hash`, `serde`, `ciborium`) were already declared by Phase A.
+
+### Deviations
+
+- **Edited `profile.rs` to fill the B-tagged bodies (nominally F in the scaffold owner map).** The
+  Phase-A owner map lists `profile` under Phase F, but `camera_matrix_base` (B7) and
+  `ColorimetricSolver::{white_point, neutral_from_temp_tint, temp_tint_from_neutral, cam_to_xyz_d50}`
+  (B3/B4/B5) are **Phase B tasks** and are tagged **Phase B** in their own scaffold doc comments —
+  and B7's first-failing test cannot exist without `camera_matrix_base`. B filled **only** those
+  B-tagged function bodies + the private solver helpers; **`resolve_profile_ref` (F7) is left
+  `unimplemented!()`** and `dcp.rs` untouched, so B and F still touch **disjoint** function bodies.
+  Merge note for the integrator: B/F edits to `profile.rs` do not overlap. Blast radius: a textual
+  merge on `profile.rs` (function-disjoint). Rollback: none needed.
+- **Implemented `Spline1D::eval` (nominally F4) in `matrix.rs`.** `Spline1D` lives in the B-owned
+  `matrix` module and B8's `resolve_input_transform` samples profile/look tone curves through it, so
+  a stubbed `eval` would panic B8. Implemented as **monotone cubic (Fritsch–Carlson)** — the DNG-SDK
+  reference model F4 also calls for. Serves E (look curve) and F (profile tone curve) unchanged.
+- **Implemented `spaces::companion_encode` (nominally D2) in `matrix.rs`.** It physically lives in
+  the B-owned `matrix` module and is a pure per-channel sRGB OETF over ProPhoto-linear values;
+  implementing it here keeps `matrix.rs` self-contained and spares Phase D from having to edit a
+  B-owned file (avoids a merge conflict). D2's rustdoc-pinned "encode-only, never a processing space"
+  semantics are preserved.
+- **WB preset tints are all `0` (sourced CCTs only).** `wb_presets()` commits **published CIE
+  standard-illuminant CCTs** (Std A 2856 K, D55 5503 K, D65-class 6504 K, D75 7504 K, F2 4230 K,
+  flash≈D55 5503 K) per Open Question 3, with **tint 0** for every row (the locus point at that CCT).
+  Fluorescent F2's true off-locus green tint needs its spectral power distribution, which is out of
+  Phase B scope; E10 may refine per body. **No tint values invented.**
+- **CCT tint of daylight points is ~10, not ~0 — by design.** The `cct` module uses the DNG SDK's
+  Robertson 31-point **Planckian** locus (the "DNG-compatible locus"). CIE D-series daylight
+  chromaticities sit slightly above the Planckian locus, so a faithful solve yields a small non-zero
+  tint (~10 for D50/D65). This matches `dng_temperature` behaviour; documented in the `cct`/`profile`
+  tests (thresholds set accordingly). Not a defect.
+
+### DEFERRED (with reason — nothing faked)
+
+- **B9 — full `lightbox-cli render-ref` corpus harness is DEFERRED to merge/Phase H.** The color
+  core of the CPU reference render is delivered and tested: `ResolvedInputTransform::eval_cpu`
+  (§5.2 stage order) → `render_reference_srgb8` / `working_linear_to_srgb8` (working→sRGB with
+  Bradford D50→D65 ⊕ sRGB OETF). The end-to-end CLI subcommand (decode → linearize → interim
+  demosaic → this → PNG contact sheet, full corpus, `--bless` goldens) needs the **Phase C LibRaw
+  proxy** and the **A2 CC0 corpus**, neither of which is on this branch, and lives in the
+  E01/other-phase-owned `lightbox-cli/main.rs` (outside B's five modules). Handed to the integrator/H.
+- **B7 golden uses a synthetic self-consistent decoded-raw fixture, not a real corpus raw + PNG
+  golden.** Per the phase brief ("use a committed decoded-raw fixture or synthetic mosaic if the C
+  proxy isn't on your branch"), `renders_correct_color_with_zero_bundled_profiles` renders an
+  8-patch neutral→saturated set through a synthetic camera whose native space is linear sRGB (exact
+  ColorMatrix/ForwardMatrix), gated at **ΔE2000 ≤ 1.0**. Because the camera is colorimetrically
+  self-consistent, any error in the matrix base, WB solve, working space, or Bradford adaptation
+  breaks the round-trip and fails the gate — it is a genuine end-to-end colorimetric proof with
+  **zero bundled profile assets** (`camera_matrix_base` reads only in-memory `RawColorimetry`). The
+  **real-corpus goldens + `--bless` workflow (§7.2) are deferred** to merge/H once the C proxy +
+  corpus land. No reference renders fabricated.
+
+### What Phase B delivered (files owned: `matrix`, `cct`, `wb`, `lut`, `transform`; + B-tagged
+### bodies in `profile`)
+
+- `matrix` (B1): `Mat3` inverse (singular-rejecting), Bradford CAT, xy⇄XYZ, primaries→matrix
+  derivation, ProPhoto-linear-D50 working space + sRGB constants (matched to Lindbloom refs 1e-4),
+  `Spline1D` monotone-cubic eval, `spaces::companion_encode`.
+- `cct` (B2): DNG-compatible Robertson locus `xy⇄(CCT,tint)` (A/D50/D65 within ±15 K, round-trip).
+- `wb` (B5): `WbMode`/`WhitePoint`/`WbPreset` vocab + sourced preset table.
+- `lut` (B6): trilinear hue-wrapped HueSat evaluator, Linear/sRGB encodings, val-dims==1 fast path.
+- `profile` (B3/B4/B7): `camera_matrix_base`, `ColorimetricSolver` (dual-illuminant interpolation,
+  white-point iteration, `cam_to_xyz_d50` ForwardMatrix + inverse-CM/Bradford paths).
+- `transform` (B8/B9-core): `resolve_input_transform` + `eval_cpu` (§5.2) + xxh3-64 content key +
+  the working→sRGB reference-render helpers.
+- 33 unit/property tests (incl. the first-failing test + a `proptest` WB round-trip) all green.
