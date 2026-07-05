@@ -22,6 +22,7 @@ lightbox-catalog = { path = "crates/lightbox-catalog" }
 lightbox-core = { path = "crates/lightbox-core" }
 lightbox-jobs = { path = "crates/lightbox-jobs" }
 lightbox-decode = { path = "crates/lightbox-decode" }
+lightbox-color = { path = "crates/lightbox-color" }
 lightbox-preview = { path = "crates/lightbox-preview" }
 lightbox-render = { path = "crates/lightbox-render" }
 lightbox-edit = { path = "crates/lightbox-edit" }
@@ -69,6 +70,19 @@ sha2 = "0.11"
 # lightbox-decode's own permissive walkers instead (E01-deviations.md, Phase 5).
 kamadak-exif = "0.6"
 zune-jpeg = "0.5"
+# Non-raw codecs for E02 Phase A decode (all permissive: MIT/Apache-2.0).
+# `tiff` covers 8/16-bit TIFF sources (float-TIFF is 8/16-bit-scoped at M1 per
+# E02 Open Question 6). `png` (below) is the image-rs PNG codec.
+tiff = "0.11"
+# E02 Phase D color-management engine: the `lcms2` crate vendors Little-CMS2
+# and builds it STATIC (MIT). The GPL-3 `fast_float` plugin feature is NEVER
+# enabled (E02 §Risks R2, D1 assert). Declared at the workspace level so
+# Phase D fills bodies without touching the manifest.
+lcms2 = "6"
+# libc: POSIX rlimit/shm plumbing for the out-of-process LibRaw proxy
+# (E02 Phase C). Declared now so Phase C fills the sandbox without editing
+# the manifest.
+libc = "0.2"
 fast_image_resize = "6"
 # Golden-image harness (spec §5 T22): committed goldens + failure heatmaps
 # are PNGs; `png` is the image-rs codec (MIT/Apache-2.0).

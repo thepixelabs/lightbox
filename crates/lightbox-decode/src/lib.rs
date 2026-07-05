@@ -10,12 +10,17 @@
 //! **implemented by E02** — E01 takes zero dependency on raw decode
 //! (architecture §9 M0).
 //!
-//! **Status: Phase-5 (T19/T20).** [`probe`] is real: content-sniffed
-//! dispatch into bounded, never-panicking container walkers — an in-crate
-//! TIFF/IFD walker for CR2/NEF/ARW/ORF/DNG/TIFF, an ISO-BMFF walker for CR3,
-//! the RAF fixed header, JPEG SOF scan + `kamadak-exif`, PNG IHDR.
-//! [`read_embedded`] does the ranged read of a probed preview. `decode_raw`
-//! / `decode_image` are declared (E02 implements).
+//! **Status: E02 Phase A.** [`probe`] is real: content-sniffed dispatch into
+//! bounded, never-panicking container walkers — an in-crate TIFF/IFD walker for
+//! CR2/NEF/ARW/ORF/DNG/TIFF, an ISO-BMFF walker for CR3, the RAF fixed header,
+//! JPEG SOF scan + `kamadak-exif`, PNG IHDR. [`read_embedded`] does the ranged
+//! read of a probed preview. E02 Phase A adds: [`normalize_camera`] (A4),
+//! [`linearize`] (A6), [`decode_image`] for JPEG/PNG/TIFF → [`SourceImage`]
+//! (A7), the [`DecodeError`] taxonomy + `catalog_code` (A1), and `catch_unwind`
+//! panic containment at every decode entry point (A9). [`decode_raw`]'s body is
+//! a scaffold — mosaic decode is the Phase-C LibRaw proxy, in-crate linear/mono
+//! decode is A5 (see `raw::types` for the shared contract types those phases
+//! fill).
 //!
 //! **Deviation (recorded in E01-deviations.md):** the spec suggests rawler
 //! for raw metadata, but rawler is LGPL-2.1 and the crate graph's license
@@ -31,6 +36,27 @@ use lightbox_jobs::CancelToken;
 use lightbox_types::{ContentHash, Orientation};
 
 mod probe;
+
+// E02 Phase A surface (extends the E01 probe surface above).
+mod camera;
+mod error;
+mod image;
+mod panic;
+mod raw;
+
+pub use camera::{normalize_camera, CameraId};
+pub use error::{CapKind, DecodeError};
+pub use raw::linearize::linearize;
+pub use raw::proxy::{LibrawParams, ProxyMeta, ProxyRequest, ProxyResponse, ShmRef, PROTO_VERSION};
+pub use raw::state::{
+    decode_params_hash, DecodedRawStateHeader, LINEARIZE_IMPL_VERSION, MAGIC as RAW_STATE_MAGIC,
+    VERSION as RAW_STATE_VERSION,
+};
+pub use raw::types::{
+    BackendPolicy, BlackLevels, CfaColor, CfaPattern, DecodeBackend, DecodeOpts, Illuminant,
+    LinearMosaic, Mat3Array, MosaicBuffer, MosaicImage, RawColorimetry, RawDecode, Rect,
+    SourceColor, SourceImage, SourceProvenance,
+};
 
 /// What kind of file a probe found (spec §3.7, frozen).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -194,48 +220,27 @@ pub fn hash_file(path: &Path, cancel: &CancelToken) -> Result<ContentHash, Probe
 }
 
 // ---------------------------------------------------------------------------
-// Declared now, implemented by E02 (spec §3.7 / §1.1: the E02 seam). Only
-// the *signatures* are frozen; the option/image types below are placeholders
-// whose real bodies E02 designs — `#[non_exhaustive]` keeps callers honest.
+// E02 decode surface (spec §3.1). Every entry point runs its worker inside
+// `panic::guard` so no unwind crosses the boundary (A9): malformed input is
+// always a structured `DecodeError`, never a panic.
 // ---------------------------------------------------------------------------
 
-/// Options for raw decode (E02 designs the real fields).
-#[non_exhaustive]
-#[derive(Clone, Debug, Default)]
-pub struct DecodeOpts {}
-
-/// A mosaic (pre-demosaic) raw image. E02 designs the real body.
-#[non_exhaustive]
-#[derive(Debug)]
-pub struct MosaicImage {}
-
-/// A linear-light decoded image (non-raw originals). E02 designs the real body.
-#[non_exhaustive]
-#[derive(Debug)]
-pub struct LinearImage {}
-
-/// Errors from the (E02) decode surface.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum DecodeError {
-    /// E01 ships probe + embedded previews only (architecture §9 M0: zero
-    /// dependency on raw decode); E02 replaces this with the real pipeline.
-    #[error("raw/image decode is not implemented until E02")]
-    Unimplemented,
+/// Raw decode (spec §3.1). CFA-mosaic → LibRaw proxy (primary, Phase C);
+/// linear/mono-DNG → in-crate (A5). **Never panics.**
+///
+/// Phase A ships the frozen signature + panic containment; the mosaic and
+/// in-crate-linear bodies land in Phases C/A5 (until then this returns a
+/// structured [`DecodeError::Unimplemented`], recorded in E02-deviations.md).
+pub fn decode_raw(path: &Path, opts: &DecodeOpts) -> Result<RawDecode, DecodeError> {
+    panic::guard(|| raw::decode_raw_impl(path, opts))
 }
 
-/// Decodes a raw file to its mosaic image. **E02 implements** (spec §2.2);
-/// E01 only freezes the signature.
-pub fn decode_raw(path: &Path, opts: DecodeOpts) -> Result<MosaicImage, DecodeError> {
-    let _ = (path, opts);
-    Err(DecodeError::Unimplemented)
-}
-
-/// Decodes a non-raw image (JPEG/TIFF/PNG) to linear light. **E02
-/// implements**; E01 only freezes the signature.
-pub fn decode_image(path: &Path) -> Result<LinearImage, DecodeError> {
-    let _ = path;
-    Err(DecodeError::Unimplemented)
+/// Non-raw decode (JPEG/PNG/TIFF → [`SourceImage`], spec §3.1): normalized
+/// display-referred `f32`, embedded ICC carried as [`SourceColor::Tagged`]
+/// (untagged ⇒ [`SourceColor::AssumedSrgb`]), EXIF orientation baked in.
+/// **Never panics.**
+pub fn decode_image(path: &Path) -> Result<SourceImage, DecodeError> {
+    panic::guard(|| image::decode_image_impl(path))
 }
 
 #[cfg(test)]
@@ -344,15 +349,19 @@ mod tests {
     }
 
     #[test]
-    fn e02_decode_surface_is_declared_but_unimplemented() {
-        assert!(matches!(
-            decode_raw(Path::new("x.cr3"), DecodeOpts::default()),
-            Err(DecodeError::Unimplemented)
-        ));
-        assert!(matches!(
-            decode_image(Path::new("x.png")),
-            Err(DecodeError::Unimplemented)
-        ));
+    fn decode_raw_missing_file_is_io_not_panic() {
+        // decode_raw's mosaic/linear bodies are Phase C/A5; the panic guard
+        // still turns real I/O failures into structured errors.
+        let dir = tempfile::tempdir().unwrap();
+        let out = decode_raw(&dir.path().join("gone.cr3"), &DecodeOpts::default());
+        assert!(matches!(out, Err(DecodeError::Io(_))), "{out:?}");
+    }
+
+    #[test]
+    fn decode_image_missing_file_is_io_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = decode_image(&dir.path().join("gone.png"));
+        assert!(matches!(out, Err(DecodeError::Io(_))), "{out:?}");
     }
 
     #[test]

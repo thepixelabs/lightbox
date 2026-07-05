@@ -10,5 +10,25 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+# Camera colorimetry + identity flow FROM the decode crate (RawColorimetry,
+# CameraId). This direction (color → decode) is deliberate; RawColorimetry
+# stores plain arrays precisely so decode need not depend on this crate's Mat3
+# (see lightbox-decode raw/types.rs deviation note).
+lightbox-decode.workspace = true
+thiserror.workspace = true
+serde = { workspace = true }
+# .lblook / .dcp resolved-state and ProfileId hashing.
+ciborium.workspace = true
+twox-hash.workspace = true
+# E02 Phase D color-management engine. Little-CMS2, vendored + STATIC (MIT).
+# The GPL-3 `fast_float` plugin feature is NEVER enabled (D1 assert, R2).
+# Declared now as a SUPERSET dependency so Phase D fills icc/display/output
+# bodies without touching this manifest.
+lcms2 = { workspace = true }
+
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

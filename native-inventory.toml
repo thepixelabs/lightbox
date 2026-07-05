@@ -33,6 +33,11 @@ kind = "bundled-c"
 note = "vendored libzstd (BSD-3-Clause/MIT) for verified catalog backups (spec §3.2)"
 
 [[package]]
+name = "lcms2-sys"
+kind = "bundled-c"
+note = "vendored Little-CMS2 (MIT), STATIC, for E02 color management (working/display/output transforms). The GPL-3 fast_float plugin is NEVER enabled (E02 §Risks R2 / D1 assert). LibRaw stays out-of-process in lightbox-rawproxy — never a -sys crate."
+
+[[package]]
 name = "core-foundation-sys"
 kind = "os-binding"
 note = "macOS CoreFoundation declarations (winit/wgpu)"

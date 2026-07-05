@@ -17,13 +17,29 @@ kamadak-exif.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 twox-hash.workspace = true
+# E02 Phase A non-raw decode (permissive codecs).
+zune-jpeg.workspace = true
+png.workspace = true
+tiff.workspace = true
+# Camera-alias table (A4) is TOML data compiled in; DecodedRawState (E03
+# contract, C6) is CBOR — both parsed at runtime by these.
+serde = { workspace = true }
+toml.workspace = true
+ciborium.workspace = true
+
+[features]
+default = []
+# A8: HEIC decode via libheif (LGPL-3, dyn-link) is OFF by default — libheif
+# is absent on the build machine (E02 §0: A8 DEFERRED). Enabling this feature
+# is a Phase-C/later task that adds the libheif binding; the default build
+# never links it and stays green.
+heic = []
 
 [dev-dependencies]
 criterion.workspace = true
 fastrand.workspace = true
-serde = { workspace = true }
 tempfile.workspace = true
-toml.workspace = true
+proptest.workspace = true
 
 # T28: hash-throughput micro-bench (nightly perf harness).
 [[bench]]

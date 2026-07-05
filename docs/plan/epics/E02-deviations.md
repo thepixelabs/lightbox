@@ -57,3 +57,71 @@ Each entry records: what changed, why, and the blast radius / rollback.
 - **Exit bar (all green):** `cargo build --workspace` · `cargo test --workspace` ·
   `cargo clippy --workspace --all-targets -- -D warnings` · `cargo fmt --all --check` ·
   `cargo deny check`.
+
+## 2026-07-05 — Phase A: decode spine + full crate/module scaffold (staff engineer)
+
+Delivered A1, A3, A4, A6, A7, A9 in full; scaffolded `lightbox-color` (all §3 module surface),
+`lightbox-rawproxy` (bin), `tools/lightbox-profgen` (bin); wired both new members into the root
+manifest; `deny.toml` now bans rawler + dnglab graph-wide. Exit bar green.
+
+### Deviations
+
+- **`RawColorimetry` matrices are `[[f64; 3]; 3]` arrays, not `Mat3` (§3.1).** `lightbox-color`
+  depends on `lightbox-decode` for `RawColorimetry`/`CameraId`; storing `lightbox_color::Mat3` in
+  `RawColorimetry` would invert that and create a crate **cycle**. `Mat3` implements
+  `From<[[f64; 3]; 3]>` (= `lightbox_decode::Mat3Array`) so the B-phase solver reads them with
+  zero friction. Blast radius: none (type-internal). Rollback: move `Mat3` to a lower crate.
+- **`parse_dcp` lives in `lightbox-color::dcp`, not `lightbox-decode` (§3.1/§2 module map).** Its
+  output `CameraProfile` is a `lightbox-color` type; hosting the parser in `lightbox-decode` would
+  make decode depend on color (cycle). `.dcp` is still untrusted input — F3 fuzz/caps apply
+  wherever it lives. Owner map unchanged (F owns `dcp`, `profile`).
+- **`probe()`/`AssetProbe` keep their E01 shape; the §3.1 field enrichment is deferred.** The
+  richer §3.1 `AssetProbe` (`kind`, `decode_support`, `camera: CameraId`, `cfa`) was **not**
+  retrofitted onto the existing struct, because `lightbox-preview` consumes E01's `AssetProbe` and
+  changing it would break that build. A3 is satisfied by **reusing the E01 permissive walkers**
+  (no rawler in the graph) and exposing `normalize_camera`/`CameraId` (A4) for callers that need
+  the normalized identity. Adding the classification fields (`DecodeSupport`/`AssetKind`/CFA) to
+  the probe output is a small later reconciliation (E04 seam), tracked here. Blast radius: E04
+  ingest reads classification via a helper rather than a struct field for now.
+- **`lcms2` default features** (`dynamic` + `static-fallback` + `parallel`) are used; on this bare
+  machine (no system lcms2) it built the **vendored static** lib via `static-fallback`. **No
+  `fast_float` feature is enabled** (verified via `cargo tree -e features`) — the GPL-3 plugin is
+  absent (R2). D1 owns the CI symbol/grep assert and may pin to force-static so a system lcms2 can
+  never shadow the vendored one. `lcms2-sys` is recorded in `native-inventory.toml` (surface-2).
+- **Superset dependencies declared now, unused in Phase A** (per the parallel-scaffold mandate, so
+  Wave-1..3 phases need not edit manifests): `lcms2` in `lightbox-color`; `libc` in
+  `lightbox-rawproxy`; `lightbox-color`/`lightbox-decode`/`anyhow` in `lightbox-profgen`. These
+  compile clean (no default unused-dep lint) and are consumed when the owning phase lands.
+
+### DEFERRED (with reason — nothing faked)
+
+- **`decode_raw` body is a scaffold.** Its mosaic path is the Phase-C LibRaw proxy and its
+  in-crate linear/mono-DNG path is **A5** (not in this phase's task set). The frozen §3.1 signature
+  + panic containment (A9) ship now; the body returns a structured `DecodeError::Unimplemented`
+  (never a panic; E04 treats it like any decode error). No decode is faked.
+- **A5 — in-crate raw metadata/colorimetry extraction + linear/mono-DNG pixel decode:** not in the
+  Phase-A task list (A1/A3/A4/A6/A7/A9). The **types** it populates (`RawColorimetry`,
+  `MosaicImage`, `LinearMosaic`, `RawDecode`) are defined in full so B/C build against them;
+  populating them from real DNG tags is A5.
+- **A2 — test-corpus bootstrap:** the pinned CC0 raw corpus fetch is out of this phase's task set;
+  A6/A7 are proven with **synthetic fixtures and hermetic in-memory encode/decode** instead
+  (linearize synthetic mosaics; PNG-ICC + 16-bit-TIFF round-trips), so no network corpus is needed
+  to gate Phase A.
+- **`lightbox-rawproxy` / `lightbox-profgen` bodies are skeletons** (Phase C / Phase G own them):
+  the proxy ships a real CBOR frame loop + `Hello`/`Shutdown` handshake and answers decode
+  requests with a structured `Err` frame; profgen is a CLI skeleton that names the deferred
+  pipeline stages. LibRaw FFI, shm handoff, sandbox (C2–C4) and dcamprof orchestration (G) are not
+  implemented — nothing is fabricated.
+
+### Scaffold surface delivered (so Wave-1..3 touch disjoint files)
+
+- `lightbox-decode` (extended): `error` (DecodeError taxonomy + `catalog_code`, A1/A9), `camera`
+  (`CameraId` + `normalize_camera` + `camera_aliases.toml`, A4), `raw::types` (all §3.1 shared
+  types), `raw::linearize` (A6, tested), `raw::proxy` (v1 protocol types), `raw::state`
+  (`DecodedRawState` magic/version + `decode_params_hash`, E03 contract), `image` (A7: jpeg/png/tiff
+  → `SourceImage` + orientation + ICC), `panic` (A9 `catch_unwind` boundary). `decode_raw`/
+  `decode_image` are panic-guarded at the API boundary.
+- `lightbox-color` (new full surface): modules `matrix`(B), `cct`(B), `wb`(B), `lut`(B),
+  `transform`(B), `cms`(D), `display`(D), `output`(D), `look`(E), `dcp`(F), `profile`(F), `error`(A).
+  Every §3.3–§3.6 public type is a real definition; phase-owned fn bodies are `unimplemented!("<task>")`.
+- New members: `crates/lightbox-rawproxy` (bin, C), `tools/lightbox-profgen` (bin, G).

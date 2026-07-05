@@ -59,6 +59,14 @@ allow-wildcard-paths = true
 # Known-bad crates named explicitly (belt over the license suspenders).
 deny = [
   { crate = "openssl", reason = "native TLS not wanted; use rustls if TLS is ever needed" },
+  # E02 §1.1 / §5.1 / R1: rawler (and dnglab) are LGPL-2.1. The ONLY LGPL code
+  # the product may touch is LibRaw, dynamic-linked and isolated in the
+  # out-of-process lightbox-rawproxy sandbox (surface 2) — never a crate
+  # dependency. rawler is banned graph-wide so it can never link into any app
+  # binary; raw mosaic decode is the LibRaw proxy, raw metadata is
+  # lightbox-decode's own permissive TIFF-IFD/EXIF walkers.
+  { crate = "rawler", reason = "LGPL-2.1 copyleft; raw mosaic decode is the out-of-process LibRaw proxy (E02 §1.1/§5.1/R1)" },
+  { crate = "dnglab", reason = "LGPL-2.1 copyleft; DNG conversion (if ever needed) runs as a subprocess, never linked (E02 §1.2)" },
 ]
 
 [sources]

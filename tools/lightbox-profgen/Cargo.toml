@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lightbox-profgen"
+description = "Internal curated-profile generator (NOT shipped): orchestrates dcamprof as a GPL-3 subprocess — owned by E02 Phase G."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lightbox-profgen"
+path = "src/main.rs"
+
+[dependencies]
+# SUPERSET deps for Phase G so it fills the content-line tooling without
+# editing this manifest. dcamprof is invoked as a SUBPROCESS only (GPL-3, never
+# linked, never shipped — spec §1.1/§7.6); no dcamprof crate exists or is
+# wanted. Our own F-phase parser (lightbox-color) validates the output.
+anyhow.workspace = true
+serde = { workspace = true }
+toml.workspace = true
+lightbox-color.workspace = true
+lightbox-decode.workspace = true
+
+[lints]
+workspace = true

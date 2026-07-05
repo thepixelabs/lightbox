@@ -693,6 +693,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "ecolor"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1607,6 +1613,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcms2"
+version = "6.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b75877b724685dd49310bdbadbf973fc69b1d01992a6d4a861b928fc3943f87b"
+dependencies = [
+ "bytemuck",
+ "foreign-types",
+ "lcms2-sys",
+]
+
+[[package]]
+name = "lcms2-sys"
+version = "4.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "264db0b78119c5a37d78bb41fb355daab29b3b29430b53cd92e3da51f0ab06cc"
+dependencies = [
+ "cc",
+ "dunce",
+ "libc",
+ "pkg-config",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1686,6 +1715,15 @@ dependencies = [
 [[package]]
 name = "lightbox-color"
 version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "lcms2",
+ "lightbox-decode",
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+ "twox-hash",
+]
 
 [[package]]
 name = "lightbox-core"
@@ -1712,17 +1750,22 @@ dependencies = [
 name = "lightbox-decode"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "criterion",
  "fastrand",
  "kamadak-exif",
  "lightbox-jobs",
  "lightbox-types",
+ "png",
+ "proptest",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
+ "tiff",
  "toml",
  "tracing",
  "twox-hash",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -1787,6 +1830,28 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "zune-jpeg",
+]
+
+[[package]]
+name = "lightbox-profgen"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lightbox-color",
+ "lightbox-decode",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "lightbox-rawproxy"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "libc",
+ "lightbox-decode",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
