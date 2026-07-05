@@ -15,7 +15,7 @@ _Last updated 2026-07-05. This document lets any fresh session (any model) resum
 | Research (352 features, 10 domains) | ✅ `../research/` |
 | Architecture v2.0 (editing-first) | ✅ CTO-approved; `01-architecture.md` |
 | Governance record | ✅ `02-approval.md` (v1.x trail; v2.0 approved CTO round 1) |
-| **v2.1 addendum** (AI Looks epic + complete-raw-surface contract) | ⏳ was in flight via subagents when this handoff was written — **verify before executing E10-adjacent work**: `01-architecture.md` must contain an AI Looks epic (likely E17) and §2.4 must bind the complete raw parameter surface; `epics/E17-ai-looks.md` must exist. If missing, re-run that cycle (see §5). |
+| **v2.1 addendum** (AI Looks epic + complete-raw-surface contract) | ✅ **LANDED & CTO-approved** (2026-07-05). E17 in `01-architecture.md` + §2.4 raw-surface binding; `epics/E17-ai-looks.md` (28 tasks). Recorded in `02-approval.md` §7. **One follow-up gates E10/E11 planning** (not E02): extend §3.2 recipe schema to persist raw-only params — see `02-approval.md` §7 follow-up #1. |
 | **E01 Foundation** | ✅ **BUILT & independently verified** (~23k LOC, commits `4ff768f…57039a0`) |
 | E02–E17 | 📋 Specced, not built (see §3) |
 
@@ -81,7 +81,8 @@ The pipeline that produced everything so far — reuse it per epic:
 
 ## 7. Open items beyond the epic board
 
-- v2.1 addendum verification (§2 above) — first thing to check.
+- ✅ v2.1 addendum verified & committed (2026-07-05).
+- **Before E10/E11 phase planning**: close CTO follow-up #1 (`02-approval.md` §7) — extend §3.2 CBOR recipe schema + XMP mapping for raw-only params. Editorial (architect), bounded. Does NOT block E02.
 - Smoke-mode UX: window closing after N frames reads as a crash to users; proposed fix (verdict banner or stay-open) offered, not yet approved/implemented.
 - `docs/plan/licensing.md`: add the scoped cargo-deny exceptions from E01 Phase 2 (BSL-1.0 clipboard-win/error-code via arboard; OFL/Ubuntu-font epaint fonts).
 - Promote shell-smoke + grid-scroll CI legs to blocking once observed green on hosted runners.

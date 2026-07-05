@@ -1,6 +1,6 @@
 # Lightbox — v2 System Architecture
 
-_Author: system-architect. Input: `00-mandate.md` (**v2.0**), `00-feature-catalog.md`, and the 10 domain research reports. This document is decision-complete: epic planners spec implementation from it without re-litigating stack, seams, data model, or budgets. Where a choice is reversible, the reversal trigger is named; where irreversible, it is flagged for CTO/CEO sign-off._
+_Author: system-architect. Input: `00-mandate.md` (**v2.1**), `00-feature-catalog.md`, and the 10 domain research reports. This document is decision-complete: epic planners spec implementation from it without re-litigating stack, seams, data model, or budgets. Where a choice is reversible, the reversal trigger is named; where irreversible, it is flagged for CTO/CEO sign-off._
 
 ---
 
@@ -17,6 +17,12 @@ _Author: system-architect. Input: `00-mandate.md` (**v2.0**), `00-feature-catalo
 > - **DAM-scale budgets and risks** (import 10k, filter 100k, cull-at-keyboard, catalog-interactive-at-100k, ANN index) are **superseded** — see the v2.0 notes in §7 and §11. The **crash-safety** bar is retained, rescoped to the edit store.
 >
 > Sections not touched by this banner retain their v1.x text as the enduring technical record; where a v1.x paragraph asserts a DAM-scale claim, the v2.0 note in its section governs.
+
+---
+
+> ## v2.1 SCOPE STRENGTHENING (2026-07-05, system-architect, tracking mandate v2.1)
+>
+> **Two Core-scope additions, no technology or seam change.** The stack, engine, data model, and CI gates all **stand**. (1) **Complete raw parameter surface** — opening a raw exposes *everything the pipeline can vary*, not a curated subset; the raw-only parameter groups are enumerated and bound to their delivering epics in the **§2.4** develop-surface contract (a panel-population guarantee, not new pipeline work — the node-graph already varies these parameters). (2) **AI Looks — image-adaptive cinematic grading** — a new leaf epic **E17** (`lightbox-looks`, §2.1/§2.2/§10) that analyzes the opened image's palette/tone and proposes varied cinematic grades *fitted to its actual colors*, each materializing as an ordinary fully-editable develop recipe merged via E09 — never a baked filter. Deltas: differentiators (§0), crate map (§2.1/§2.2), §2.4 raw-surface binding, epic table + effort + streams (§10.1-preamble), E17 decomposition (§10.1), milestone M3 (§9). E17 rides the E09 recipe + E10 color foundation and the optional E13 inference host — it adds **~6–8 pw off the pixel-engine critical path**, so the wall-clock driver is unchanged.
 
 ---
 
@@ -673,7 +679,7 @@ XMP `.xmp`/`crs:` **read interop** (open a file, honor an existing sidecar recip
 
 ---
 
-## 10. Epic breakdown (v2.0 — editing-first Must + core Should)
+## 10. Epic breakdown (v2.0 editing-first + v2.1 — Must + core Should)
 
 ### 10.0 E01 disposition audit (what the built code becomes — no deletion planned)
 
@@ -773,7 +779,7 @@ These epics are **not** 1–4-week units and must not be spec'd as such. The fou
 - **E17.4 Proposal preview + apply (the E09 layering contract, made).** Proposals are previewed as **thumbnails rendered through the normal E05 `Engine`** — each thumbnail evaluates *the current recipe merged with the proposal's `RecipePatch`* at thumbnail resolution, so the preview is exactly what applying will produce (no separate look renderer). Applying is **`Recipe::apply_patch(&RecipePatch)` in E09 (E17.4 depends on the E09 contract, §2.2 / epic table)**: the patch merges onto the user's current edit as **one undoable history step**; afterward it is an ordinary recipe — the user can open the color-grade/curve/HSL panels and adjust every value the look set. **A look is never a baked filter and never an opaque layer** — this is the mandate's hard requirement and the acceptance test: after applying a look, editing any color-grade wheel it touched behaves identically to having set that wheel by hand, and one undo removes the whole look.
 - **E17.5 Optional ML hook (via E13, NOT a hard dependency).** A small palette/mood classifier (ONNX, ships as an optional model pack) can *bias family selection and weighting* toward the image's content (e.g. bias film-stock families for portraits, teal-orange for landscapes) through `propose_ml(stats, infer, seed, n)` calling the standard `InferenceClient` (§2.2). **If `lightbox-inferd` is absent, the model pack is not installed, or VRAM-gated off, E17 falls back to classical family selection with no feature loss** — the ML hook only *reorders/weights* proposals, it never gates the feature. This keeps E17's hard dependencies at E09 + E10; E13 is an optional enhancer, honoring "models only where they earn their footprint." Test: with inferd unavailable, `propose()` still returns a full, coherent proposal set.
 
-**Deployment/rollback story for E17.** `lightbox-looks` is a new leaf crate wired behind a **feature flag** on the develop UI (an "AI Looks" panel/action in E08). Ship it additively over M2's completed E09+E10; roll back by reverting the E17 crate + the panel wiring and **dropping no migrations** — look proposals are transient until the user applies one, and an *applied* look is just an ordinary recipe patch already persisted by E09's normal path, so there is no E17-owned schema to unwind. Blast radius: the develop UI's new panel only; the recipe format, engine, and edit store are untouched (E17 emits the *existing* `RecipePatch` shape).
+**Deployment/rollback story for E17.** `lightbox-looks` is a new leaf crate; E17 also adds the **"AI Looks" develop panel** (proposal grid + shuffle button) **using E08's existing develop-panel framework** (E08 shipped at M1 — E17 consumes that chrome; E08 does **not** depend on E17, so milestone order is preserved) behind a **feature flag**. Ship it additively over M2's completed E09+E10 (and the E05 engine already live for thumbnail renders); roll back by reverting the E17 crate + the panel wiring and **dropping no migrations** — look proposals are transient until the user applies one, and an *applied* look is just an ordinary recipe patch already persisted by E09's normal path, so there is no E17-owned schema to unwind. Blast radius: the develop UI's new panel only; the recipe format, engine, and edit store are untouched (E17 emits the *existing* `RecipePatch` shape).
 
 **Deferred to v1.x (design headroom preserved, no v1 engineering):** neural raw denoise, super-resolution, HDR edit/merge + gain-map export, soft proofing, publish-services framework, tethered capture, video trim/grade, map/geotag module, People body-part parsing, generative (diffusion) remove, plugin SDK, depth masks.
 
