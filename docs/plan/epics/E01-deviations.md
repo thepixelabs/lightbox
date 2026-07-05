@@ -605,3 +605,25 @@ Each entry names the spec point, the deviation, and why.
   core stalls every run) — it now fails only when the budget is exceeded
   on all three fresh-catalog attempts. Assertion intents (T16/T17 ACs)
   unchanged.
+
+## Verification pass (independent, post-Phase 8)
+
+- **`cargo deny check` (full run, incl. advisories) was red on two new
+  RUSTSEC advisories against `quick-xml 0.39.4`** (RUSTSEC-2026-0194
+  quadratic attribute check, RUSTSEC-2026-0195 unbounded namespace
+  allocation — both DoS-class), published after Phase 8 landed. The
+  configured CI gate (`cargo deny check licenses bans sources`, license
+  surface 1) was unaffected and stayed green. `quick-xml` enters the graph
+  only as a build-time dependency of the `wayland-scanner` proc-macro
+  (Linux windowing codegen over the trusted Wayland protocol XML shipped
+  in the wayland-protocols crates) — never runtime, never untrusted
+  input — and the latest `wayland-scanner` (0.31.10) pins `quick-xml 0.39`
+  while the fix requires >= 0.41, so no compatible upgrade exists.
+  Resolution: both ids added to `deny.toml [advisories] ignore` with the
+  justification inline and a removal trigger (wayland-scanner bumping its
+  quick-xml requirement). All other gates (build debug+release, test,
+  clippy -D warnings, fmt --check) verified green with no changes; the
+  scripted exit drill, CLI round-trip (create → import → list → render
+  CPU+GPU → check → backup, corrupt-catalog refusal exit 3, CPU
+  determinism byte-compare) and the shell seam smoke re-run PASS on
+  macOS/Metal.
