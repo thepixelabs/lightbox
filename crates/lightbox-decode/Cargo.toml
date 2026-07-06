@@ -50,5 +50,10 @@ proptest.workspace = true
 name = "hash_throughput"
 harness = false
 
+# E02 Phase H (H3): probe latency (§7.5 ≤ 5 ms p50) + linearize throughput.
+[[bench]]
+name = "decode_pipeline"
+harness = false
+
 [lints]
 workspace = true

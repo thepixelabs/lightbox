@@ -95,8 +95,10 @@ jobs:
             --baseline tools/lbx-perf/baselines.json | tee perf-table.md
           cat perf-table.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Criterion micro-benches (images_page @100k, insert batch, hash throughput)
-        run: cargo bench -p lightbox-catalog -p lightbox-decode
+      # E02 Phase H (H3): + the color/decode pipeline benches (resolve transform,
+      # eval_cpu, display bake, probe, linearize) against the §7.5 budgets.
+      - name: Criterion micro-benches (catalog + E02 decode/color pipeline)
+        run: cargo bench -p lightbox-catalog -p lightbox-decode -p lightbox-color
 
       - name: Upload perf artifacts
         uses: actions/upload-artifact@v4
@@ -169,3 +171,48 @@ jobs:
             grep '"scenario":"grid-scroll"' grid-scroll.json || echo '(no capture)'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # E02 Phase H (H4): AddressSanitizer + LeakSanitizer over the decode + FFI
+  # surfaces — the in-crate permissive walkers, the LCMS2 wrapper
+  # (lightbox-color), and the proxy client (and the libheif path when the `heic`
+  # feature is enabled). Runs the full corpus + adversarial fixtures under ASan;
+  # LSan is on via ASAN_OPTIONS. Needs a nightly toolchain + `-Zbuild-std` so the
+  # std allocator is instrumented too. Non-blocking (nightly); a real UB/leak
+  # fails the job. NOTE: this recipe is committed but UNVERIFIED on the E02 build
+  # machine (macOS, no nightly ASan runner) — see E02-deviations.md (H4).
+  sanitizers:
+    name: ASan/LSan (decode + FFI surfaces)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: "-Zsanitizer=address"
+      RUSTDOCFLAGS: "-Zsanitizer=address"
+      # LSan is bundled into ASan on Linux; keep leak detection explicit.
+      ASAN_OPTIONS: "detect_leaks=1:detect_stack_use_after_return=1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly with rust-src (build-std)
+        run: |
+          rustup toolchain install nightly --component rust-src --profile minimal
+          rustup default nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache fixture corpus
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
+
+      - name: Fetch + verify pinned fixtures
+        run: cargo run -p xtask -- fixtures
+
+      # Instrument std too (-Zbuild-std) so allocations across the FFI boundary
+      # are tracked. lightbox-decode owns the raw/DCP/ICC parse surfaces and the
+      # proxy client; lightbox-color owns the LCMS2 wrapper.
+      - name: ASan/LSan over decode + color
+        run: >
+          cargo +nightly test -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          -p lightbox-decode -p lightbox-color

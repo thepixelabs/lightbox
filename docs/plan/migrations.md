@@ -18,9 +18,10 @@ Rules (linted by `cargo xtask lint-migrations`, a CI gate):
   owning epic;
 - rows are never deleted or renumbered once merged.
 
-| number | epic | name  | status |
-|--------|------|-------|--------|
-| 0001   | E01  | spine | shipped (E01 Phase 3, T9) |
+| number | epic | name      | status |
+|--------|------|-----------|--------|
+| 0001   | E01  | spine     | shipped (E01 Phase 3, T9) |
+| 0002   | E02  | e02_color | shipped (E02 Phase H, H1) |
 
 Expected future reservations (from the architecture §3.1 entity map — the
 owning epics reserve the actual numbers when their specs land): `preview`

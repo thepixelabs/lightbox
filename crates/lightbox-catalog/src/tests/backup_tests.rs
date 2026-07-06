@@ -50,7 +50,10 @@ fn backup_report_and_restore_round_trip() {
 
     let restored = restore(&report.path, dir.path());
     assert_eq!(restored.reader().counts().unwrap().assets, 25);
-    assert_eq!(restored.schema_version(), 1);
+    assert_eq!(
+        restored.schema_version(),
+        crate::migrate::supported_version(crate::migrate::MIGRATIONS)
+    );
 }
 
 #[test]

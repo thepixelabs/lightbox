@@ -20,7 +20,7 @@ fn create_then_open_is_idempotent_and_migrates_once() {
     let lbdata = dir.path().join("cat.lbdata");
 
     let catalog = Catalog::create(&lbdata).unwrap();
-    assert_eq!(catalog.schema_version(), 1);
+    assert_eq!(catalog.schema_version(), MIGRATIONS.len() as u32);
     assert!(lbdata.join("catalog.sqlite").is_file());
     assert!(lbdata.join("backups").is_dir());
     assert_eq!(catalog.integrity(), IntegrityStatus::Ok);
@@ -28,7 +28,7 @@ fn create_then_open_is_idempotent_and_migrates_once() {
 
     // Reopen: no re-application, same version, quick_check clean.
     let catalog = Catalog::open(&lbdata).unwrap();
-    assert_eq!(catalog.schema_version(), 1);
+    assert_eq!(catalog.schema_version(), MIGRATIONS.len() as u32);
     let applied: i64 = catalog
         .writer()
         .with_txn(|txn| {
@@ -38,7 +38,11 @@ fn create_then_open_is_idempotent_and_migrates_once() {
                 .unwrap())
         })
         .unwrap();
-    assert_eq!(applied, 1, "migration must be recorded exactly once");
+    assert_eq!(
+        applied,
+        MIGRATIONS.len() as i64,
+        "every shipped migration recorded exactly once"
+    );
     drop(catalog);
 
     // create() refuses to clobber an existing catalog.
@@ -109,7 +113,7 @@ fn newer_schema_version_is_refused() {
     match Catalog::open(&lbdata) {
         Err(CatalogError::SchemaTooNew { found, supported }) => {
             assert_eq!(found, 999);
-            assert_eq!(supported, 1);
+            assert_eq!(supported, MIGRATIONS.len() as u32);
         }
         other => panic!("expected SchemaTooNew, got {other:?}"),
     }
@@ -135,7 +139,10 @@ fn synthetic_0002_upgrade_writes_pre_upgrade_copy() {
     let dir = TempDir::new().unwrap();
     let lbdata = dir.path().join("cat.lbdata");
     {
-        let catalog = Catalog::create(&lbdata).unwrap();
+        // Start at v1 explicitly: a real 0002 now ships (E02 e02_color), so this
+        // synthetic-0002 upgrade drill must build its own pre-upgrade v1 state
+        // rather than rely on `create()` stopping at v1.
+        let catalog = Catalog::create_with_migrations(&lbdata, &MIGRATIONS[..1]).unwrap();
         assert_eq!(catalog.schema_version(), 1);
         let (_r, folder) = seed_folder(&catalog, dir.path());
         seed_assets(&catalog, folder, "v1", 5, 0, &[]);
@@ -175,8 +182,9 @@ fn synthetic_0002_upgrade_writes_pre_upgrade_copy() {
     assert!(!has_synth, "copy must be the PRE-upgrade state");
     drop(catalog);
 
-    // A build without 0002 now refuses this catalog.
-    match Catalog::open(&lbdata) {
+    // A build without 0002 refuses this catalog. (The real workspace now ships
+    // its own 0002, so simulate the older build with a 0001-only migration set.)
+    match Catalog::open_with_migrations(&lbdata, &MIGRATIONS[..1]) {
         Err(CatalogError::SchemaTooNew { found, supported }) => {
             assert_eq!((found, supported), (2, 1));
         }

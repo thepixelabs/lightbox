@@ -39,6 +39,9 @@ mod dao;
 mod error;
 mod migrate;
 mod pages;
+// E02 Phase H (H1): the `camera_profile` registry — bundled-asset sync-on-open
+// + install/query DAOs (migration 0002_e02_color).
+mod profile_sync;
 mod reader;
 mod writer;
 
@@ -49,6 +52,9 @@ pub use catalog::{Catalog, IntegrityStatus};
 pub use dao::{InsertOutcome, NewAsset, RemovedCounts};
 pub use error::{CatalogError, Result};
 pub use pages::{ImageQuery, ImageSummary, Page, PageCursor, SortOrder};
+pub use profile_sync::{
+    BundledProfile, InstalledProfile, ProfileKind, ProfileSource, ProfileUpsert, SyncReport,
+};
 pub use reader::{CatalogCounts, FolderNode, ImageDetail, ReaderHandle};
 pub use writer::{CatalogTxn, WriterHandle};
 

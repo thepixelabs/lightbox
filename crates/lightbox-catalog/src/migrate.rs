@@ -33,11 +33,21 @@ pub(crate) struct Migration {
 
 /// Every migration this build ships, ordered. Later epics append here under
 /// numbers they reserved in the registry.
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    number: 1,
-    name: "spine",
-    sql: include_str!("../migrations/0001_spine.sql"),
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        number: 1,
+        name: "spine",
+        sql: include_str!("../migrations/0001_spine.sql"),
+    },
+    // E02 Phase H (H1): the color-foundation schema — the `camera_profile`
+    // registry of installed looks/DCPs (synced on open, see profile_sync.rs)
+    // and the `asset.decode_backend` diagnostics column.
+    Migration {
+        number: 2,
+        name: "e02_color",
+        sql: include_str!("../migrations/0002_e02_color.sql"),
+    },
+];
 
 /// Highest schema version a migration set supports.
 pub(crate) fn supported_version(migrations: &[Migration]) -> u32 {
