@@ -522,3 +522,78 @@ crate graph and `deny.toml` are untouched.
   additive; full exit bar green on `main` after the fix (build/test/clippy -D warnings/fmt
   --check/deny check). Phase F's merge note had predicted E used `HueSatLut` not the resolved
   table; the resolver does build the resolved table, hence the reconciliation.
+
+## 2026-07-06 — Phase G: curated camera-profile content line — TOOLING ONLY (staff engineer)
+
+Delivered G1, G3, G4, G5, G7 (+ G2 doc) as buildable/tested tooling in
+`tools/lightbox-profgen`; **G6 real content DEFERRED, ZERO profiles ship** (spec §0). Owns only
+`tools/lightbox-profgen` + its `docs/`. Exit bar green in the worktree
+(build/test/clippy -D warnings/fmt --check/deny check), both default and `--features dcamprof`.
+
+### What landed (files owned: `tools/lightbox-profgen/**`)
+
+- **G1 session schema (`session.rs`)** — `SessionMeta`/`Session`: session dir + metadata
+  (body, chart, illuminants, raws) → normalized `CameraId`; structural schema checks (non-empty id,
+  ≥1 illuminant/raw, every raw references a declared illuminant, patch-count bound).
+- **G1 dcamprof wiring (`dcamprof.rs`)** — argv builders for the two-stage `dcamprof make-target →
+  make-profile` pipeline (pure, unit-tested with no dcamprof present) + binary discovery
+  (`$DCAMPROF_BIN`/PATH) + the gated `run`. dcamprof is a **subprocess only** (GPL-3, never linked,
+  never a crate dep, tool excluded from app packaging).
+- **G3 validation harness (`validate.rs`)** — parse `.dcp` via the F-phase engine
+  (`lightbox_color::dcp::parse_dcp`), render each reference patch through
+  `resolve_input_transform` + `render_reference_srgb8`, measure CIEDE2000 via the shared
+  `lbx-image-compare`, apply the F5 reject gates (mean ΔE ≤ 0.5, max ≤ 1.5). Sample profile passes;
+  corrupted bytes and out-of-tolerance references are **rejected with a report** (G3 AC).
+- **G4 packaging (`package.rs`)** — `plan_package` → dest path `color/profiles/<make>/<model>.dcp`,
+  xxh3-128 `file_hash`, surface-3 `ManifestEntry` (`provenance = profgen:<session_id>`, project
+  license), and the `CatalogSyncRow` the catalog inserts on open. `check_provenance` enforces the
+  Adobe-authorship ban at the producer.
+- **G5 auto-selection (`select.rs`)** — `CuratedCatalog::select`: per-image override wins, else the
+  curated DCP for the (normalized) body, else the matrix base. Alias-table matching tested
+  (`NIKON CORPORATION / NIKON Z 6` → curated `Nikon/Z6`).
+- **G2 capture protocol (`docs/capture-protocol.md`)** — dual-illuminant (StdA + daylight) procedure,
+  exposure/flat-field gates, session schema, printable checklist.
+- **G7 runbook (`docs/runbook.md`)** — per-body cost, cadence, raw retention, ownership; **restates
+  the architecture §12 escalation** and records the unstaffed content-line status.
+
+### Deviations
+
+- **`tools/lightbox-profgen/Cargo.toml` — appended deps + a `[features]` block + a lib target.**
+  (a) `thiserror` (dcamprof error taxonomy), `lbx-image-compare` (G3 CIEDE2000 patch-ΔE — the same
+  metric the golden gates use), `twox-hash` (G4 file hash) appended at the END of `[dependencies]`;
+  all three are already deny-approved workspace members/deps. (b) An **off-by-default `dcamprof`
+  cargo feature** gates only the actual `Command::spawn` of dcamprof; the default build never
+  attempts to exec the absent tool (spec §0 "feature-gate … keep the default build green").
+  (c) Added **`src/lib.rs`** (auto-detected lib target) so the tooling modules are a testable library
+  the thin `main` binary drives — this makes the pub surface reachable so `-D warnings` dead-code
+  analysis does not fire on helpers exercised only by tests. Phase A scaffolded the crate bin-only;
+  no other crate's `Cargo.toml`/`lib.rs` touched.
+- **Session metadata is TOML (`session.toml`), not YAML (spec §6 G1 wording).** Matches the repo-wide
+  manifest convention (`assets/MANIFEST.toml`, `*.review.toml`, `scene-corpus.toml`, the camera alias
+  table) and avoids adding an unvetted YAML crate to the license graph. Schema-equivalent (body,
+  chart, illuminants, raws). Blast radius: the format string in `session.rs`; trivially swappable.
+- **G4 "catalog sync-on-open" — profgen owns the PRODUCER side only.** The `camera_profile` table +
+  migration + the actual sync-on-open live in `lightbox-catalog` (task **H1**), which this phase does
+  not own. profgen emits the cleared `.dcp`, the manifest entry, and the `CatalogSyncRow` descriptor
+  the catalog reads; the DB insert is H1. The `CatalogSyncRow` is the contract between them.
+- **G5 complements, not duplicates, `resolve_profile_ref` (F7).** `resolve_profile_ref` is the
+  render-time resolver (in `lightbox-color`); `CuratedCatalog::select` is the content-line/browser
+  auto-selection policy over the packaged catalog. Both implement the same Risk-10 fallback order
+  (override → curated → matrix base); documented for E10's profile browser.
+
+### DEFERRED (with reason — nothing faked)
+
+- **G6 — first curated content batch (≥5 bodies): DEFERRED.** `dcamprof` (GPL-3) is absent on the
+  build machine and no physical ColorChecker/IT8 capture sessions exist (spec §0). **ZERO profiles
+  ship** — `assets/color/profiles/` stays empty. No profiles, no reference renders, no ΔE numbers are
+  fabricated. Every body renders correctly via tier-1 matrix base + tier-2 look (spec §1.7 / R10). The
+  tooling runs the line unchanged the moment a session + dcamprof are available; the validation
+  harness is proven on synthetic (matrix-base) fixtures, so no dcamprof patch-ΔE is claimed.
+- **G2 content-line-owner review: ESCALATED, not obtained.** The capture protocol is written but not
+  reviewed by a named owner because the content line is **unstaffed** (Open Question #2 / R4 /
+  architecture §12). Recorded as an explicit CTO/operator escalation in `docs/runbook.md`
+  §Escalation, per the G2/G7 acceptance criteria's "or escalation recorded" clause.
+- **G7 named owner: NONE — unstaffed state explicitly escalated to CTO/operator.** Per architecture
+  §12 item (2), naming an owner + funding the capture rig/body access are headcount/ops decisions
+  outside the engineering seat. The runbook makes the zero-curated-profile state a deliberate,
+  explicit product choice (not a silent default), which is exactly what §12 requires.
