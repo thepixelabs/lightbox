@@ -164,6 +164,41 @@ impl Catalog {
         self.schema_version
     }
 
+    /// Idempotently re-registers the bundled color assets (E02 spec §4.1, task
+    /// H1). Runs every open in the real app so the `camera_profile` registry
+    /// tracks the shipped `.lblook` / `.dcp` set; content drift rewrites in
+    /// place, nothing is duplicated. The caller (`lightbox-cli` / the app)
+    /// parses each file to derive its [`BundledProfile`] record — this crate
+    /// stores identity + provenance only, never blobs. Idempotent: the second
+    /// call over an unchanged set reports all-`unchanged`.
+    pub fn sync_bundled_profiles(
+        &self,
+        profiles: &[crate::profile_sync::BundledProfile],
+    ) -> Result<crate::profile_sync::SyncReport> {
+        let profiles = profiles.to_vec();
+        self.writer().with_txn(move |txn| {
+            let mut report = crate::profile_sync::SyncReport::default();
+            for p in &profiles {
+                match txn.upsert_camera_profile(p)? {
+                    crate::profile_sync::ProfileUpsert::Inserted => report.inserted += 1,
+                    crate::profile_sync::ProfileUpsert::Updated => report.updated += 1,
+                    crate::profile_sync::ProfileUpsert::Unchanged => report.unchanged += 1,
+                }
+            }
+            Ok(report)
+        })
+    }
+
+    /// Test-support constructor: creates a catalog with only the first `upto`
+    /// migrations applied, so the migration-fault harness can build a pre-0002
+    /// catalog and then exercise a real upgrade under `kill -9`
+    /// (`tests/migration_0002_fault_injection.rs`). Not a shipping API.
+    #[doc(hidden)]
+    pub fn create_at_schema_version_for_tests(lbdata_dir: &Path, upto: usize) -> Result<Catalog> {
+        let prefix = &MIGRATIONS[..upto.min(MIGRATIONS.len())];
+        Self::create_with_migrations(lbdata_dir, prefix)
+    }
+
     /// When the newest *verified* backup was taken (UTC, parsed from its
     /// dated directory name under `backups/`), or `None` when no verified
     /// backup exists. `lightbox-core`'s exit-time backup policy ("on close,

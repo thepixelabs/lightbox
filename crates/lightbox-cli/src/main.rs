@@ -44,13 +44,19 @@ use lightbox_render::{
 };
 use lightbox_types::{FolderId, ImageId, PV_M0};
 
+// E02 Phase H (H2): the decode → color → look reference subcommands.
+mod e02;
+// E02 Phase H (H6/H7): the seam-handoff contract + threat-model notes, as
+// rustdoc committed alongside the crates (no separate report .md).
+mod seams;
+
 /// Exit code for usage errors (bad flags, missing arguments).
 const EXIT_USAGE: u8 = 2;
 /// Exit code when the catalog is corrupt or refused (`check` — T27 AC).
 const EXIT_CORRUPT: u8 = 3;
 
 const USAGE: &str = "\
-lightbox-cli — headless Lightbox driver (E01 spec §3.10)
+lightbox-cli — headless Lightbox driver (E01 spec §3.10 + E02 spec §1.1)
 
 USAGE:
   lightbox-cli create --catalog <dir>.lbdata
@@ -60,6 +66,15 @@ USAGE:
   lightbox-cli backup --catalog <dir>
   lightbox-cli check  --catalog <dir>
   lightbox-cli look-dev --look <file.lblook> --out <dir> [--amount <f>]
+
+  E02 decode → color → look reference path (headless):
+  lightbox-cli probe      --file <path> [--json]
+  lightbox-cli decode     --file <path> [--json]
+  lightbox-cli render-ref --file <path> --out <out.png> [--look <file.lblook>] [--amount <f>]
+  lightbox-cli profile inspect --file <path.dcp|.lblook> [--json]
+  lightbox-cli profile install --catalog <dir> --file <path.dcp|.lblook>
+  lightbox-cli profile list    --catalog <dir> [--json]
+  lightbox-cli look inspect    --file <path.lblook> [--json]
 
 EXIT CODES:
   0 success | 1 failure | 2 usage error | 3 catalog corrupt/refused
@@ -123,6 +138,12 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
         "backup" => cmd_backup(rest),
         "check" => cmd_check(rest),
         "look-dev" => cmd_look_dev(rest),
+        // E02 Phase H (H2): the decode → color → look reference path.
+        "probe" => e02::cmd_probe(rest),
+        "decode" => e02::cmd_decode(rest),
+        "render-ref" => e02::cmd_render_ref(rest),
+        "profile" => e02::cmd_profile(rest),
+        "look" => e02::cmd_look(rest),
         "--help" | "-h" | "help" => {
             print!("{USAGE}");
             Ok(0)
@@ -140,13 +161,13 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
 
 /// Tiny flag cursor: `take_value("--flag")` / `take_switch("--flag")`,
 /// then `finish()` rejects leftovers. Usage errors are [`UsageError`].
-struct Flags {
+pub(crate) struct Flags {
     args: Vec<Option<String>>,
 }
 
 /// Marker for usage errors so `run`'s caller maps them to exit code 2.
 #[derive(Debug)]
-struct UsageError(String);
+pub(crate) struct UsageError(pub(crate) String);
 
 impl std::fmt::Display for UsageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,14 +178,14 @@ impl std::fmt::Display for UsageError {
 impl std::error::Error for UsageError {}
 
 impl Flags {
-    fn new(args: &[String]) -> Flags {
+    pub(crate) fn new(args: &[String]) -> Flags {
         Flags {
             args: args.iter().cloned().map(Some).collect(),
         }
     }
 
     /// Consumes `--name <value>`; `None` when the flag is absent.
-    fn take_value(&mut self, name: &str) -> Result<Option<String>, UsageError> {
+    pub(crate) fn take_value(&mut self, name: &str) -> Result<Option<String>, UsageError> {
         for i in 0..self.args.len() {
             if self.args[i].as_deref() == Some(name) {
                 let value = self
@@ -183,7 +204,7 @@ impl Flags {
     }
 
     /// Consumes `--name` as a boolean switch.
-    fn take_switch(&mut self, name: &str) -> bool {
+    pub(crate) fn take_switch(&mut self, name: &str) -> bool {
         for slot in &mut self.args {
             if slot.as_deref() == Some(name) {
                 *slot = None;
@@ -194,7 +215,7 @@ impl Flags {
     }
 
     /// Errors on any argument no subcommand consumed.
-    fn finish(self) -> Result<(), UsageError> {
+    pub(crate) fn finish(self) -> Result<(), UsageError> {
         let leftover: Vec<String> = self.args.into_iter().flatten().collect();
         if leftover.is_empty() {
             Ok(())
@@ -208,20 +229,20 @@ impl Flags {
 }
 
 /// `--catalog` is required by every subcommand.
-fn required_catalog(flags: &mut Flags) -> Result<PathBuf, UsageError> {
+pub(crate) fn required_catalog(flags: &mut Flags) -> Result<PathBuf, UsageError> {
     flags
         .take_value("--catalog")?
         .map(PathBuf::from)
         .ok_or_else(|| UsageError("--catalog <dir>.lbdata is required".to_owned()))
 }
 
-fn parse_num<T: std::str::FromStr>(name: &str, v: &str) -> Result<T, UsageError> {
+pub(crate) fn parse_num<T: std::str::FromStr>(name: &str, v: &str) -> Result<T, UsageError> {
     v.parse()
         .map_err(|_| UsageError(format!("{name} expects a number, got {v:?}")))
 }
 
 /// Runs a subcommand body, mapping [`UsageError`] to exit code 2.
-fn with_usage(f: impl FnOnce() -> anyhow::Result<u8>) -> anyhow::Result<u8> {
+pub(crate) fn with_usage(f: impl FnOnce() -> anyhow::Result<u8>) -> anyhow::Result<u8> {
     match f() {
         Err(e) if e.is::<UsageError>() => {
             eprintln!("error: {e}");

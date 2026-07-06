@@ -40,6 +40,10 @@ lcms2-sys = "4"
 
 [dev-dependencies]
 proptest.workspace = true
+# E02 Phase H (H3): the color perf bench suite (resolve_input_transform,
+# eval_cpu, display-transform bake) against the §7.5 budgets. Test-only.
+# (Appended dev-dep; see E02-deviations.md.)
+criterion.workspace = true
 # Phase E (E7 look golden): the shared golden-image harness (PNG IO + the
 # LIGHTBOX_BLESS workflow) so the look golden lives alongside every other pixel
 # epic's goldens. Test-only; leaf tool crate (png + thiserror), no cycle back to
@@ -49,6 +53,11 @@ lbx-image-compare.workspace = true
 # surface-3 assets/MANIFEST.toml and the committed scene-corpus manifest.
 # Test-only. (Appended dev-dep; see E02-deviations.md.)
 toml.workspace = true
+
+# E02 Phase H (H3): color pipeline perf benches (§7.5 budgets).
+[[bench]]
+name = "color_pipeline"
+harness = false
 
 [lints]
 workspace = true

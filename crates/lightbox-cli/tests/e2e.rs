@@ -116,7 +116,7 @@ fn create_import_list_render_check_backup_flow() {
     let out = cli(&["create", "--catalog", cat]);
     assert_exit(&out, 0);
     assert!(
-        stdout(&out).contains("schema version 1"),
+        stdout(&out).contains("schema version 2"),
         "{}",
         stdout(&out)
     );
@@ -258,7 +258,7 @@ fn create_import_list_render_check_backup_flow() {
     // --- check (clean) ---
     let out = cli(&["check", "--catalog", cat]);
     assert_exit(&out, 0);
-    assert!(stdout(&out).contains("ok: schema version 1"));
+    assert!(stdout(&out).contains("ok: schema version 2"));
 
     // --- backup ---
     let out = cli(&["backup", "--catalog", cat]);

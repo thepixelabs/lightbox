@@ -24,6 +24,18 @@ lightbox-types.workspace = true
 # the synthetic scene corpus to a base-vs-look contact sheet. (Appended dep; see
 # E02-deviations.md.)
 lightbox-color.workspace = true
+# E02 Phase H (H2): the `probe`/`decode`/`render-ref`/`profile`/`look`
+# subcommands wire the decode→color→look reference path headlessly. `decode`
+# uses the decode crate directly (probe, decode_image, decode_for_develop via
+# the LibRaw proxy supervisor); `profile install`/`list` register color assets
+# in the `camera_profile` registry (migration 0002). (Appended deps; see
+# E02-deviations.md.)
+lightbox-decode.workspace = true
+lightbox-catalog.workspace = true
+# `profile install` hashes the profile file with the canonical streaming
+# xxh3-128 (lightbox_decode::hash_file needs a CancelToken). (Appended dep; see
+# E02-deviations.md.)
+lightbox-jobs.workspace = true
 # PNG encoding for `render --out` (the workspace `png` codec, wrapped by the
 # golden harness's Rgba8Image — no new third-party dependency).
 lbx-image-compare.workspace = true

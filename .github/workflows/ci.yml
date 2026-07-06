@@ -89,6 +89,13 @@ jobs:
       - name: Fetch + verify pinned fixtures
         run: cargo xtask fixtures
 
+      # `cargo test --workspace` is PR-blocking and carries the per-process-
+      # version golden gates keyed `pv=1` (E02 Phase H, H5): the E02 CPU-reference
+      # golden (lightbox-color `reference/pv1/matrix_base_srgb`), the default-look
+      # golden (`look/pv1`), and the CLI render golden (`cli.render/pv1`), each at
+      # max ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB. `LIGHTBOX_BLESS` is refused in CI, so a
+      # PR can never silently rewrite a frozen pv1 reference; a §5.2 stage-order
+      # change is a NEW process version, never a re-bless (PV-immutability guard).
       - name: test
         run: cargo test --workspace
 

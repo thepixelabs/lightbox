@@ -522,3 +522,70 @@ crate graph and `deny.toml` are untouched.
   additive; full exit bar green on `main` after the fix (build/test/clippy -D warnings/fmt
   --check/deny check). Phase F's merge note had predicted E used `HueSatLut` not the resolved
   table; the resolver does build the resolved table, hence the reconciliation.
+
+## 2026-07-06 — Phase H (integration, hardening, seams)
+
+### Migration registry edit (unavoidable exit-bar dependency)
+- **`docs/plan/migrations.md` — added one row `| 0002 | E02 | e02_color | shipped |`.** The phase
+  brief says "do not edit docs/ except this deviations file", but `cargo xtask lint-migrations`
+  has an in-gate unit test (`migrations_lint::tests::real_workspace_registry_is_clean`, part of
+  `cargo test --workspace`) that fails if a shipped migration file lacks a matching registry row.
+  Shipping migration 0002 (the explicitly-assigned H1 task) is therefore impossible without this
+  single-row registry edit — the registry is a build-coordination file, not prose. The edit is
+  surgical (one row) and flagged here for the reviewer/merge agent. 0002 was free (the prior
+  registry only listed 0001; the "expected E03 preview" line was prose, not a reservation).
+
+### Schema-version bump 1 → 2 (consequence of migration 0002)
+- Tests that asserted the current schema version is 1 were updated to reflect the new current
+  version (2): `crates/lightbox-cli/tests/e2e.rs` (create + check output strings), and in
+  `crates/lightbox-catalog/src/tests/`: `open_create_tests.rs` (now `MIGRATIONS.len()` /
+  `supported_version(MIGRATIONS)` where practical, future-proofing the next migration) and
+  `backup_tests.rs`. `synthetic_0002_upgrade_writes_pre_upgrade_copy` and
+  `newer_schema_version_is_refused` were adjusted to build their pre-upgrade state via
+  `create_with_migrations(&MIGRATIONS[..1])` / simulate an "older build" via
+  `open_with_migrations(&MIGRATIONS[..1])`, since a real 0002 now ships. All E01 test *intent*
+  preserved.
+
+### Appended dependencies (Phase A did not declare; merge agent reconciles)
+- `crates/lightbox-cli/Cargo.toml`: `lightbox-decode`, `lightbox-catalog`, `lightbox-jobs`
+  (the H2 `probe`/`decode`/`render-ref`/`profile`/`look` subcommands + file hashing for
+  `profile install`). CI's UI-free `cargo tree` assertion for `lightbox-cli` still holds
+  (none are UI crates).
+- `crates/lightbox-color/Cargo.toml`: `criterion` (dev-dep) + `[[bench]] color_pipeline` (H3).
+- `crates/lightbox-decode/Cargo.toml`: `[[bench]] decode_pipeline` (H3; criterion already a dev-dep).
+- `crates/lightbox-catalog`: added `mod profile_sync;` + a `#[doc(hidden)]`
+  `Catalog::create_at_schema_version_for_tests` test-support constructor + a `MIGRATIONS[1]` entry
+  in `migrate.rs`. These are H1-owned migration/registry work, not B/D/E/F module internals.
+
+### DEFERRED
+- **H2 full-corpus mosaic `render-ref` golden (B9 landing).** The raw decode→color→look reference
+  path is wired end-to-end and **verified locally** on this machine (CR3, ARW Bayer, X-Trans RAF
+  all render via the LibRaw proxy built with `--features libraw` — see the report). But the
+  default (license-clean) build and CI runners ship the proxy **without** libraw, so mosaic
+  `render-ref` cannot produce pixels there. Its committed golden gate is therefore DEFERRED to a
+  libraw-enabled runner. The portable PV1 gate that DOES run everywhere is the H5 CPU-reference
+  golden below (matrix base, no proxy). `render-ref`/`decode` on a mosaic raw without libraw fail
+  with a structured, non-crashing error (asserted in `tests/e02_e2e.rs`). (Environment:
+  license-clean default build has no in-process mosaic backend, R1.)
+- **H4 ASan/LSan job — config committed, run UNVERIFIED on this machine.** The nightly
+  `sanitizers` job (`.github/workflows/nightly.yml`) runs `cargo +nightly test -Zbuild-std
+  -Zsanitizer=address` over `lightbox-decode` + `lightbox-color` with LSan on. It cannot be
+  exercised on the E02 build machine (macOS, no nightly ASan runner configured), so the recipe is
+  committed but not yet observed green — flagged for first-nightly validation. (Environment:
+  nightly + Linux sanitizer runner.)
+
+### H-task notes (BUILDABLE, landed)
+- **H1** — migration `0002_e02_color` (camera_profile + asset.decode_backend) + the
+  `profile_sync` bundled-asset sync (idempotent, content-drift-aware, NULL-key `IS` matching) +
+  `tests/migration_0002_fault_injection.rs` (kill -9 mid-0002 → integrity-clean, fully upgraded,
+  no data loss, copy-on-write `pre-upgrade-1/` snapshot present & clean; 24 iters PR / env-scaled
+  nightly).
+- **H3** — criterion benches: `resolve_input_transform` ~0.30 µs, temp/tint ~0.21 µs, `eval_cpu`
+  ~3.5 ns/px, display bake ~27 ms, all comfortably inside the §7.5 budgets (≤1 ms / ≤100 ms);
+  probe + linearize throughput benches added. Wired into the nightly perf job.
+- **H5** — committed PV1 CPU-reference golden `reference/pv1/matrix_base_srgb.png` (ΔE2000 0.0 /
+  PSNR ∞ self-match) at the §4.4 tolerance (max ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB), PR-blocking via
+  `cargo test`. PV-immutability guard documented in the test rustdoc + `ci.yml`.
+- **H6/H7** — seam-handoff contract (E03/E04/E05/E09/E10/E15) + threat-model notes committed as
+  rustdoc in `crates/lightbox-cli/src/seams.rs` (rustdoc-level, alongside the crates; no separate
+  report .md). E05 transform-spec sign-off is a human/planner step → still owed at epic review.
