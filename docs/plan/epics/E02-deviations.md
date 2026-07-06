@@ -510,3 +510,15 @@ crate graph and `deny.toml` are untouched.
   floats, cyclic IFD) plus two proptest generators (`parse_dcp_never_panics` over random bytes,
   `mutated_valid_dcp_never_panics` over bit-flips of a valid profile). The 1 M-iteration soak is
   the nightly job. (Environment: absent tool + nightly.)
+
+## 2026-07-06 — Wave3 integration (merge agent)
+
+- **Cross-branch integration fix (E×F field collision).** Phase F (F5) added a required
+  `encoding: HueSatEncoding` field to `lut::HueSatTable`; Phase E's `look::resolve_look_hue_sat`
+  constructs a `HueSatTable` literal and predated that field, so the post-merge build failed with
+  `E0063 missing field encoding`. Resolved by setting `encoding: HueSatEncoding::Linear` in the
+  look resolver — matching that function's own doc comment ("Looks author their shaping with
+  `HueSatEncoding::Linear`; the resolved table indexes on a linear value coordinate"). One-line,
+  additive; full exit bar green on `main` after the fix (build/test/clippy -D warnings/fmt
+  --check/deny check). Phase F's merge note had predicted E used `HueSatLut` not the resolved
+  table; the resolver does build the resolved table, hence the reconciliation.
