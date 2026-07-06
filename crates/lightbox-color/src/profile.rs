@@ -23,7 +23,7 @@ use crate::lut::HueSatLut;
 use crate::matrix::{
     bradford_adaptation, xy_to_xyz, xyz_to_xy, Mat3, Spline1D, Vec3, D50_WHITE_XYZ,
 };
-use crate::transform::{ProfileRef, ProfileRegistry, ResolvedProfile};
+use crate::transform::{FallbackReason, ProfileKind, ProfileRef, ProfileRegistry, ResolvedProfile};
 use crate::wb::{WbMode, WhitePoint};
 
 /// Content id of a profile/look: xxh3-128 of its canonical serialization
@@ -409,16 +409,76 @@ fn reciprocal(x: f64) -> f64 {
     }
 }
 
+/// Lowercase hex of a [`ProfileId`] for user-visible fallback messages.
+fn profile_id_hex(id: &ProfileId) -> String {
+    let mut s = String::with_capacity(32);
+    for b in id.0 {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// Resolves a recipe `base_profile` reference with the Risk-10 fallback chain:
 /// requested → (missing) → matrix base + default look, with a user-visible flag
 /// (spec §3.4). **Owner: Phase F (F7).**
+///
+/// The camera profile resolves per [`ProfileRef::kind`]: `MatrixBase` builds the
+/// tier-1 base from `colorimetry`; a curated/user DCP is looked up by `id` (or,
+/// when no id is pinned, the camera's curated default). A missing profile is
+/// **not** an error — it falls back to the matrix base and records a
+/// [`FallbackReason::ProfileMissing`] the UI surfaces (R10). The look is resolved
+/// independently via [`ProfileRef::look_ref`]; a missing look degrades to no look
+/// with [`FallbackReason::LookMissing`] (reported only when no profile fallback
+/// already applies — the struct carries a single, most-significant reason).
 pub fn resolve_profile_ref(
-    _reg: &dyn ProfileRegistry,
-    _colorimetry: &RawColorimetry,
-    _camera: &CameraId,
-    _r: &ProfileRef,
+    reg: &dyn ProfileRegistry,
+    colorimetry: &RawColorimetry,
+    camera: &CameraId,
+    r: &ProfileRef,
 ) -> Result<ResolvedProfile, ColorError> {
-    unimplemented!("F7: profile-ref resolution with matrix-base fallback")
+    let mut fallback: Option<FallbackReason> = None;
+
+    let profile = match r.kind {
+        ProfileKind::MatrixBase => camera_matrix_base(colorimetry, camera)?,
+        ProfileKind::CuratedDcp | ProfileKind::UserDcp => {
+            let found = match &r.id {
+                Some(id) => reg.profile(id),
+                None => reg.default_for_camera(camera),
+            };
+            match found {
+                Some(p) => p,
+                None => {
+                    let what = match &r.id {
+                        Some(id) => profile_id_hex(id),
+                        None => format!("{} {}", camera.make, camera.model),
+                    };
+                    fallback = Some(FallbackReason::ProfileMissing(what));
+                    // Risk-10: fall back to the license-clean matrix base so the
+                    // image still renders correct color.
+                    camera_matrix_base(colorimetry, camera)?
+                }
+            }
+        }
+    };
+
+    let look = match &r.look_ref {
+        Some(look_id) => match reg.look(look_id) {
+            Some(l) => Some(l),
+            None => {
+                if fallback.is_none() {
+                    fallback = Some(FallbackReason::LookMissing(profile_id_hex(look_id)));
+                }
+                None
+            }
+        },
+        None => None,
+    };
+
+    Ok(ResolvedProfile {
+        profile,
+        look,
+        fallback,
+    })
 }
 
 #[cfg(test)]
@@ -593,6 +653,204 @@ mod tests {
                 "dual-illum {k}K neutral {xy:?} not D50"
             );
         }
+    }
+
+    // ------------------------- F7: resolve_profile_ref -------------------------
+
+    use crate::look::{Look, LookProvenance};
+    use crate::matrix::Spline1D;
+    use crate::transform::{FallbackReason, ProfileKind, ProfileRef, ProfileRegistry};
+
+    /// An in-memory registry for the F7 fallback-chain tests.
+    #[derive(Default)]
+    struct MockRegistry {
+        profiles: Vec<CameraProfile>,
+        looks: Vec<Look>,
+        camera_default: Option<CameraProfile>,
+    }
+
+    impl ProfileRegistry for MockRegistry {
+        fn profile(&self, id: &ProfileId) -> Option<CameraProfile> {
+            self.profiles.iter().find(|p| p.id == *id).cloned()
+        }
+        fn look(&self, id: &ProfileId) -> Option<Look> {
+            self.looks.iter().find(|l| l.id == *id).cloned()
+        }
+        fn default_for_camera(&self, _camera: &lightbox_decode::CameraId) -> Option<CameraProfile> {
+            self.camera_default.clone()
+        }
+    }
+
+    fn dcp_like_profile(id: ProfileId) -> CameraProfile {
+        let mut p = camera_matrix_base(
+            &srgb_camera(true),
+            &normalize_camera("Synthetic", "sRGB-Cam"),
+        )
+        .unwrap();
+        p.id = id;
+        p.source = ProfileSource::CuratedDcp;
+        p.name = "Curated DCP".into();
+        p
+    }
+
+    fn make_look(id: ProfileId) -> Look {
+        Look {
+            id,
+            name: "Look".into(),
+            version: 1,
+            tone_curve: Spline1D::identity(),
+            hue_sat: None,
+            provenance: LookProvenance {
+                author: "lightbox-authored".into(),
+                license: "project".into(),
+                review_record: None,
+            },
+        }
+    }
+
+    fn matrix_ref() -> ProfileRef {
+        ProfileRef {
+            kind: ProfileKind::MatrixBase,
+            id: None,
+            look_ref: None,
+            look_amount: 1.0,
+        }
+    }
+
+    #[test]
+    fn resolve_matrix_base_has_no_fallback() {
+        let reg = MockRegistry::default();
+        let cam = normalize_camera("Synthetic", "sRGB-Cam");
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &matrix_ref()).unwrap();
+        assert_eq!(out.profile.source, ProfileSource::MatrixBase);
+        assert!(out.look.is_none());
+        assert!(out.fallback.is_none());
+    }
+
+    #[test]
+    fn resolve_installed_curated_dcp_by_id() {
+        let id = ProfileId([7u8; 16]);
+        let reg = MockRegistry {
+            profiles: vec![dcp_like_profile(id)],
+            ..Default::default()
+        };
+        let cam = normalize_camera("Synthetic", "sRGB-Cam");
+        let r = ProfileRef {
+            kind: ProfileKind::CuratedDcp,
+            id: Some(id),
+            look_ref: None,
+            look_amount: 1.0,
+        };
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &r).unwrap();
+        assert_eq!(out.profile.source, ProfileSource::CuratedDcp);
+        assert_eq!(out.profile.id, id);
+        assert!(out.fallback.is_none());
+    }
+
+    #[test]
+    fn resolve_missing_dcp_falls_back_to_matrix_base() {
+        let reg = MockRegistry::default();
+        let cam = normalize_camera("Synthetic", "sRGB-Cam");
+        let r = ProfileRef {
+            kind: ProfileKind::UserDcp,
+            id: Some(ProfileId([0xAB; 16])),
+            look_ref: None,
+            look_amount: 1.0,
+        };
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &r).unwrap();
+        // R10: still renders via the license-clean matrix base, flag surfaced.
+        assert_eq!(out.profile.source, ProfileSource::MatrixBase);
+        match out.fallback {
+            Some(FallbackReason::ProfileMissing(ref s)) => assert!(s.contains("ab")),
+            other => panic!("expected ProfileMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_curated_default_for_camera_when_no_id() {
+        let id = ProfileId([3u8; 16]);
+        let reg = MockRegistry {
+            camera_default: Some(dcp_like_profile(id)),
+            ..Default::default()
+        };
+        let cam = normalize_camera("Synthetic", "sRGB-Cam");
+        let r = ProfileRef {
+            kind: ProfileKind::CuratedDcp,
+            id: None,
+            look_ref: None,
+            look_amount: 1.0,
+        };
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &r).unwrap();
+        assert_eq!(out.profile.id, id);
+        assert!(out.fallback.is_none());
+    }
+
+    #[test]
+    fn resolve_no_default_camera_falls_back() {
+        let reg = MockRegistry::default();
+        let cam = normalize_camera("Synthetic", "sRGB-Cam");
+        let r = ProfileRef {
+            kind: ProfileKind::CuratedDcp,
+            id: None,
+            look_ref: None,
+            look_amount: 1.0,
+        };
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &r).unwrap();
+        assert_eq!(out.profile.source, ProfileSource::MatrixBase);
+        assert!(matches!(
+            out.fallback,
+            Some(FallbackReason::ProfileMissing(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_look_present_and_missing() {
+        let look_id = ProfileId([5u8; 16]);
+        let reg = MockRegistry {
+            looks: vec![make_look(look_id)],
+            ..Default::default()
+        };
+        let cam = normalize_camera("Synthetic", "sRGB-Cam");
+        // Look present.
+        let r = ProfileRef {
+            kind: ProfileKind::MatrixBase,
+            id: None,
+            look_ref: Some(look_id),
+            look_amount: 1.0,
+        };
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &r).unwrap();
+        assert!(out.look.is_some());
+        assert!(out.fallback.is_none());
+
+        // Look missing → degrade to no look with a LookMissing flag.
+        let r_missing = ProfileRef {
+            kind: ProfileKind::MatrixBase,
+            id: None,
+            look_ref: Some(ProfileId([9u8; 16])),
+            look_amount: 1.0,
+        };
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &r_missing).unwrap();
+        assert!(out.look.is_none());
+        assert!(matches!(out.fallback, Some(FallbackReason::LookMissing(_))));
+    }
+
+    #[test]
+    fn resolve_profile_missing_wins_over_look_missing() {
+        let reg = MockRegistry::default();
+        let cam = normalize_camera("Synthetic", "sRGB-Cam");
+        let r = ProfileRef {
+            kind: ProfileKind::CuratedDcp,
+            id: Some(ProfileId([1u8; 16])),
+            look_ref: Some(ProfileId([2u8; 16])),
+            look_amount: 1.0,
+        };
+        let out = resolve_profile_ref(&reg, &srgb_camera(true), &cam, &r).unwrap();
+        // Both are missing; the profile fallback is the reported (dominant) one.
+        assert!(matches!(
+            out.fallback,
+            Some(FallbackReason::ProfileMissing(_))
+        ));
+        assert!(out.look.is_none());
     }
 
     proptest::proptest! {
