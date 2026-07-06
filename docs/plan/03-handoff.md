@@ -1,6 +1,6 @@
 # Lightbox — Session Handoff & Resume Guide
 
-_Last updated 2026-07-05. This document lets any fresh session (any model) resume the program without prior context. Read this first, then only what it points to._
+_Last updated 2026-07-06. This document lets any fresh session (any model) resume the program without prior context. Read this first, then only what it points to._
 
 ## 1. What this project is
 
@@ -17,7 +17,8 @@ _Last updated 2026-07-05. This document lets any fresh session (any model) resum
 | Governance record | ✅ `02-approval.md` (v1.x trail; v2.0 approved CTO round 1) |
 | **v2.1 addendum** (AI Looks epic + complete-raw-surface contract) | ✅ **LANDED & CTO-approved** (2026-07-05). E17 in `01-architecture.md` + §2.4 raw-surface binding; `epics/E17-ai-looks.md` (28 tasks). Recorded in `02-approval.md` §7. **One follow-up gates E10/E11 planning** (not E02): extend §3.2 recipe schema to persist raw-only params — see `02-approval.md` §7 follow-up #1. |
 | **E01 Foundation** | ✅ **BUILT & independently verified** (~23k LOC, commits `4ff768f…57039a0`) |
-| E02–E17 | 📋 Specced, not built (see §3) |
+| **E02 Decode & color foundation** | ✅ **BUILT & independently verified** (2026-07-06, commits `a495224…35474a3`) — parallel-wave execution, all 5 gates green |
+| E03–E17 | 📋 Specced, not built (see §3) |
 
 **E01 delivered:** 16-crate workspace; 3-OS CI + license gate (GPL-canary tested); crash-safe SQLite store (kill -9 fault-injection verified); jobs system; headless `lightbox-core` façade; decode probe (CR2/CR3/NEF/ARW/RAF/ORF/DNG, permissive in-crate walkers — rawler was dropped from probe for LGPL); embedded-preview pipeline; render Engine seed with one real GPU node + CIEDE2000 golden harness; virtualized grid + Engine-rendered loupe; CLI; perf harness; `cargo xtask exit-drill`. Deviations log: `epics/E01-deviations.md`. Handoff: `epics/E01-handoff.md`. Known pending: Win/Linux real-hardware exit-drill legs; shell-smoke CI legs are continue-on-error; `licensing.md` needs the egui-font/BSL scoped-exception entries documented.
 
@@ -28,7 +29,7 @@ Authoritative table lives in `01-architecture.md` §10. Summary — spec file pe
 | Epic | Title | Milestone | Status | Depends on |
 |---|---|---|---|---|
 | E01 | Foundation (edit store, engine seed, shell skeleton) | M0 | **BUILT** | — |
-| E02 | Decode & color foundation | M1 | spec ready | E01 |
+| E02 | Decode & color foundation | M1 | **BUILT** | E01 |
 | E03 | Preview pyramid & raw cache | M1 | spec ready (v1.x spec valid) | E01 |
 | E04 | Working-set loader & drag-drop intake | M1 | **v2 spec** `E04-working-set-loader.md` | E01, E03 |
 | E05 | Render node-graph engine | M1 | spec ready | E01, E02 |
@@ -47,7 +48,7 @@ Authoritative table lives in `01-architecture.md` §10. Summary — spec file pe
 
 **M1 exit criterion (next milestone):** a dropped raw file on screen with working WB/exposure/tone editing that auto-persists and survives kill -9.
 
-**Recommended execution order:** E02 → E05 (these unblock everything) → E09 + E04 in parallel → E08 → *M1 done* → E10 + E15 → E11 → E17 → E12 → E13 → E14 → E16.
+**Recommended execution order:** ~~E02~~ ✅ → **E05 next** (unblocks everything) → E09 + E04 in parallel → E08 → *M1 done* → E10 + E15 → E11 → E17 → E12 → E13 → E14 → E16.
 
 ## 4. How to build & verify
 
@@ -85,6 +86,7 @@ The pipeline that produced everything so far — reuse it per epic:
 ## 7. Open items beyond the epic board
 
 - ✅ v2.1 addendum verified & committed (2026-07-05).
+- ✅ **E02 built & verified (2026-07-06)** — see `epics/E02-deviations.md` for the full log. **Honestly-deferred E02 tasks** (each needs an absent tool, hardware, or human, none faked): **A8** HEIC decode (libheif absent → off-by-default `heic` feature); **F6** dcamprof reference harness (dcamprof/GPL-3 absent → §5.2 pinned by hand-derived DNG-SDK fixtures); **G2/G6** target-shot protocol + first curated DCP batch (need physical ColorChecker/IT8 capture + dcamprof → **zero profiles ship at M1**, tier-1 matrix base + tier-2 look render every body correctly); **E5** ≥2-human perceptual sign-off (no reviewers → author self-review + no-Adobe affidavit recorded); **H4** ASan/LSan nightly (config committed, no nightly sanitizer runner on the mac build box); **H2** corpus mosaic render-ref golden (needs a libraw-enabled CI runner — the license-clean default build ships the proxy without libraw). Real libraw decode of all 9 corpus bodies WAS exercised at verify time (libraw 0.22.1 present locally). Production packaging must build `lightbox-rawproxy --features libraw`.
 - **Before E10/E11 phase planning**: close CTO follow-up #1 (`02-approval.md` §7) — extend §3.2 CBOR recipe schema + XMP mapping for raw-only params. Editorial (architect), bounded. Does NOT block E02.
 - Smoke-mode UX: window closing after N frames reads as a crash to users; proposed fix (verdict banner or stay-open) offered, not yet approved/implemented.
 - `docs/plan/licensing.md`: add the scoped cargo-deny exceptions from E01 Phase 2 (BSL-1.0 clipboard-win/error-code via arboard; OFL/Ubuntu-font epaint fonts).
