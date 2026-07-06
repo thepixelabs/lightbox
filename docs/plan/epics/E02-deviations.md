@@ -356,3 +356,84 @@ Exit bar green in the worktree (`build`/`test`/`clippy -D warnings`/`fmt --check
 - **D6 — "emitted ICC validates in *external* tooling":** validated in-process by re-parsing the
   emitted bytes through `IccProfile::from_bytes` (a well-formed-ICC proxy). A third-party
   validator (e.g. `iccDumpProfile`) is not installed on this box. (Environment: absent tool.)
+
+## 2026-07-06 — Phase E: Lightbox default look family (staff engineer)
+
+Delivered E1, E2, E3, E4, E6, E7 in full; E5 recorded as an author self-review with the ≥2-human
+sign-off DEFERRED. Files owned: `lightbox-color::look` + `assets/color/looks/` + `assets/MANIFEST.toml`.
+Exit bar green in the worktree (`build`/`test`/`clippy -D warnings`/`fmt --check`/`deny check`).
+
+### What Phase E delivered
+
+- **`.lblook` format v1 (E1):** `[b"LBLK"][version:u16 LE][CBOR body]` (`crate::look`). `load_look`
+  is memory-safe/panic-free over arbitrary input (magic + version check on raw bytes, then CBOR body,
+  then structural validation: ascending tone-curve x, HueSat dims×deltas agreement, node cap
+  `2^20`). Unknown version → `LookError::UnsupportedVersion`; everything else structural →
+  `LookError::Malformed`. A look's `ProfileId` is the `xxh3-128` of the canonical bytes, so id == content.
+  `Look::to_bytes` is the writer; round-trip is byte-stable.
+- **Look evaluator + amount 0–200 % (E2):** `Look::eval(rgb, amount)` — `amount==0` is **bit-exact
+  identity** (short-circuit), `<1` identity-lerp, `1..=2` bounded extrapolation, tone clamped to
+  `[0,1]`, shaping sat/val floored at 0. `resolve_look_hue_sat` shares the amount rule with the B8
+  resolve.
+- **Authored looks (E4/E6):** `author_lightbox_color_v1()` (gentle scene-referred contrast S with a
+  toe/shoulder + a value-dependent saturation shaping incl. a highlight-desaturation guard, Δhue=0
+  so skin/sky are not rotated and neutrals stay neutral by construction) and
+  `author_lightbox_neutral()` (identity). Committed as `assets/color/looks/*.lblook`.
+- **Authoring harness (E3):** a deterministic synthetic `scene_corpus()` (34 scenes across skin/sky/
+  foliage/neutral/clipped/low-light/high-dr/hue-sweep) + `render_contact_sheet()`; driven by the new
+  `lightbox-cli look-dev --look <f.lblook> --out <dir> [--amount <f>]` which writes a self-contained
+  `index.html` + `tiles/*.png` base-vs-look contact sheet.
+- **Manifest + defaults (E6):** `assets/MANIFEST.toml` surface-3 entries for both looks + the corpus
+  + review record; the PR-blocking policy checker (`tests/look_assets.rs`) fails on any undeclared
+  file under `assets/color/`, any un-cleared provenance, or ANY Adobe-authored marker. E09 default
+  documented: `look_ref = "Lightbox Color v1"`, `look_amount = DEFAULT_LOOK_AMOUNT (1.0)`; §5.3
+  raw-vs-non-raw rule asserted via `default_look_applies` + a test.
+- **Look golden gate (E7):** `tests/look_golden.rs` renders the committed look over the corpus into a
+  stitched contact image, gated **exactly** against a committed golden PNG
+  (`crates/lightbox-color/goldens/look/pv1/lightbox-color-v1.png`), `LIGHTBOX_BLESS=1` to regenerate.
+  `one_lsb_curve_perturbation_breaks_the_golden` is the permanent same-process proof that a 1-LSB
+  tone-curve perturbation changes the render (so the gate would fail on it).
+
+### Deviations
+
+- **Two-line edit to the B-owned `transform.rs` (Phase B left the hook).** (1) `resolve_input_transform`
+  now amount-scales the look's hue/sat shaping via `crate::look::resolve_look_hue_sat` (was applied at
+  full strength regardless of amount — Phase B's own comment said "E2 refines the shaping-axis
+  amount"). (2) `apply_huesat` promoted `fn → pub(crate)` so the E2 reference `Look::eval` shares the
+  exact HSV shaping path with the resolved GPU-upload form. Blast radius: `resolve_input_transform`
+  now scales shaping with amount (correct); the existing B tests (`look_amount_zero_is_identity_curve`,
+  `key_is_stable_and_sensitive`) still pass (their look carries no shaping). Function-disjoint merge.
+- **`.lblook` id is derived on load (xxh3-128 of the file bytes), never stored.** Mirrors
+  `ProfileId` semantics in `profile.rs`; guarantees id==content and a byte-stable round-trip.
+- **Appended dev-deps to `lightbox-color/Cargo.toml`:** `lbx-image-compare` (E7 golden PNG IO +
+  `LIGHTBOX_BLESS`) and `toml` (E6 manifest parse). Test-only; both already in the deny-approved graph
+  (leaf tool crate + a workspace dep). No change to the shipped crate's dependency surface.
+- **Added dep + subcommand to the E01-owned `lightbox-cli`:** `lightbox-color.workspace = true` and the
+  `look-dev` subcommand (E3's named interface). H2 adds the other E02 subcommands (`probe`/`decode`/
+  `render-ref`/`profile`/`look inspect`); `look-dev` is a distinct name, so no collision — merge-agent
+  reconciles the manifest + `main.rs` dispatch.
+- **Look golden is an EXACT PNG compare, not the perceptual ΔE≤1 harness.** E7's "1-LSB curve
+  perturbation fails the gate" is incompatible with the shared `GOLDEN_TOLERANCE` (which deliberately
+  passes ±1 LSB). Exact match gives that sensitivity directly; the same-process perturbation test is
+  the belt-and-suspenders proof. **Cross-platform caveat:** exact-byte equality assumes deterministic
+  `f32`/libm `powf` across the 3-OS matrix — proven green on this darwin box; if a future CI run shows
+  ULP drift, switch the golden compare to a ≤1-LSB bound while keeping the perturbation test as the
+  1-LSB sensitivity guarantee. Recorded here so the merge/CI owner can make that call.
+
+### DEFERRED (with reason — nothing faked)
+
+- **E5 — ≥2-human-reviewer perceptual sign-off:** no human reviewers available on this machine. The
+  author self-reviewed against the full E5 structured checklist (skin/sky/foliage/neutrals/gradients/
+  clipped highlights) and recorded the **no-Adobe-derived-data affidavit** in
+  `assets/color/looks/lightbox-color-v1.review.toml` (referenced by the look's provenance
+  `review_record`). The ≥2-reviewer perceptual gate + its sign-off record remain DEFERRED; **no
+  reviewers were fabricated** and "Lightbox Neutral" ships alongside as the R6 fallback. (Human task.)
+- **E3 — real CC0 *photographic* neutral-scene corpus:** the pinned photographic corpus depends on the
+  A2 raw corpus + Phase C proxy, which are not on this branch. In its place ships a **synthetic,
+  deterministic, project-generated** scene corpus (labelled synthetic in `scene-corpus.toml`), which
+  is honest test content covering every checklist category — not a fabricated photographic set. Swap in
+  the photographic corpus when A2 lands; `scene_corpus()` is the seam.
+- **E4/E5 — hue-selective skin/sky protection and scene-referred highlight rolloff above 1.0:** the
+  iteration-1 look keeps Δhue=0 (no hue rotation) and a mild contrast S; hue-selective protection and
+  a >1.0 highlight rolloff (an HDR/log-domain concern, v1.x) are deferred to a later, human-reviewed
+  iteration, per the review record's open items. Not faked.
