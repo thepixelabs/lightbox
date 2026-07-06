@@ -40,6 +40,15 @@ lcms2-sys = "4"
 
 [dev-dependencies]
 proptest.workspace = true
+# Phase E (E7 look golden): the shared golden-image harness (PNG IO + the
+# LIGHTBOX_BLESS workflow) so the look golden lives alongside every other pixel
+# epic's goldens. Test-only; leaf tool crate (png + thiserror), no cycle back to
+# lightbox-color. (Appended dev-dep; see E02-deviations.md.)
+lbx-image-compare.workspace = true
+# Phase E (E6 manifest policy checker + E3 scene-corpus manifest): parse the
+# surface-3 assets/MANIFEST.toml and the committed scene-corpus manifest.
+# Test-only. (Appended dev-dep; see E02-deviations.md.)
+toml.workspace = true
 
 [lints]
 workspace = true

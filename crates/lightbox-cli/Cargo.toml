@@ -20,6 +20,10 @@ lightbox-core.workspace = true
 lightbox-edit.workspace = true
 lightbox-render.workspace = true
 lightbox-types.workspace = true
+# E02 Phase E: the `look-dev` authoring harness loads a `.lblook` and renders
+# the synthetic scene corpus to a base-vs-look contact sheet. (Appended dep; see
+# E02-deviations.md.)
+lightbox-color.workspace = true
 # PNG encoding for `render --out` (the workspace `png` codec, wrapped by the
 # golden harness's Rgba8Image — no new third-party dependency).
 lbx-image-compare.workspace = true

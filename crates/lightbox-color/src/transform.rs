@@ -196,7 +196,14 @@ pub fn resolve_input_transform(
 
     let resolved_look = look.map(|l| ResolvedLook {
         tone_curve: Curve1D::from_spline_amount(&l.tone_curve, look_amount),
-        hue_sat: l.hue_sat.as_ref().map(HueSatTable::from_lut),
+        // E2 refines the shaping-axis amount (Phase B left this hook): the look's
+        // hue/sat shaping is lerped toward identity by `look_amount` so the
+        // whole look — curve *and* shaping — scales as one, matching the
+        // reference `Look::eval`. (See E02-deviations.md.)
+        hue_sat: l
+            .hue_sat
+            .as_ref()
+            .map(|hs| crate::look::resolve_look_hue_sat(hs, look_amount)),
     });
 
     let key = content_key(profile, wb, as_shot, look, look_amount, &cam_to_working);
@@ -285,7 +292,9 @@ fn mul_f32(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
 }
 
 /// Applies a resolved HueSat table to a working-space RGB triple via HSV.
-fn apply_huesat(table: &HueSatTable, rgb: [f32; 3]) -> [f32; 3] {
+/// `pub(crate)` so the E2 reference look evaluator ([`crate::look::Look::eval`])
+/// shares this exact shaping path with the resolved GPU-upload form.
+pub(crate) fn apply_huesat(table: &HueSatTable, rgb: [f32; 3]) -> [f32; 3] {
     let hsv = rgb_to_hsv(rgb);
     let out = table.eval(hsv);
     hsv_to_rgb(out)

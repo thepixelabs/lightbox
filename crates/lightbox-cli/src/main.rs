@@ -11,6 +11,7 @@
 //! lightbox-cli render --catalog <dir> --image <id> --out <out.png> [--width <n>] [--cpu]
 //! lightbox-cli backup --catalog <dir>
 //! lightbox-cli check  --catalog <dir>
+//! lightbox-cli look-dev --look <file.lblook> --out <dir> [--amount <f>]
 //! ```
 //!
 //! This binary is the headless proof of seam 1 (spec §8 DoD 4): it drives
@@ -58,6 +59,7 @@ USAGE:
   lightbox-cli render --catalog <dir> --image <id> --out <out.png> [--width <n>] [--cpu]
   lightbox-cli backup --catalog <dir>
   lightbox-cli check  --catalog <dir>
+  lightbox-cli look-dev --look <file.lblook> --out <dir> [--amount <f>]
 
 EXIT CODES:
   0 success | 1 failure | 2 usage error | 3 catalog corrupt/refused
@@ -120,6 +122,7 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
         "render" => cmd_render(rest),
         "backup" => cmd_backup(rest),
         "check" => cmd_check(rest),
+        "look-dev" => cmd_look_dev(rest),
         "--help" | "-h" | "help" => {
             print!("{USAGE}");
             Ok(0)
@@ -564,6 +567,112 @@ fn check_catalog_at(catalog: &Path) -> anyhow::Result<u8> {
         }
         Err(other) => Err(other.into()),
     }
+}
+
+/// `look-dev` (E02 task E3): the Lightbox default-look authoring harness. Loads
+/// a `.lblook`, renders the built-in synthetic scene corpus base-vs-look, and
+/// writes a self-contained contact sheet (`<out>/index.html` + `<out>/tiles/`).
+///
+/// This is a headless authoring/dev tool, not a shipped runtime path.
+fn cmd_look_dev(args: &[String]) -> anyhow::Result<u8> {
+    with_usage(|| {
+        let mut flags = Flags::new(args);
+        let look_path = flags
+            .take_value("--look")?
+            .map(PathBuf::from)
+            .ok_or_else(|| UsageError("look-dev requires --look <file.lblook>".to_owned()))?;
+        let out = flags
+            .take_value("--out")?
+            .map(PathBuf::from)
+            .ok_or_else(|| UsageError("look-dev requires --out <dir>".to_owned()))?;
+        let amount = flags
+            .take_value("--amount")?
+            .map(|v| parse_num::<f32>("--amount", &v))
+            .transpose()?
+            .unwrap_or(1.0);
+        flags.finish()?;
+
+        let bytes = std::fs::read(&look_path)
+            .with_context(|| format!("reading {}", look_path.display()))?;
+        let look = lightbox_color::look::load_look(&bytes)
+            .map_err(|e| anyhow!("{}: {e}", look_path.display()))?;
+
+        let tiles_dir = out.join("tiles");
+        std::fs::create_dir_all(&tiles_dir)
+            .with_context(|| format!("creating {}", tiles_dir.display()))?;
+
+        let cells = lightbox_color::look::render_contact_sheet(&look, amount);
+        let mut body = String::new();
+        let mut last_cat = String::new();
+        for cell in &cells {
+            if cell.category != last_cat {
+                body.push_str(&format!(
+                    "<tr class=\"cat\"><td colspan=\"3\">{}</td></tr>\n",
+                    html_escape(&cell.category)
+                ));
+                last_cat = cell.category.clone();
+            }
+            write_tile_png(
+                &tiles_dir,
+                &format!("{}-base", cell.name),
+                cell.width,
+                cell.height,
+                &cell.base_rgba8,
+            )?;
+            write_tile_png(
+                &tiles_dir,
+                &format!("{}-look", cell.name),
+                cell.width,
+                cell.height,
+                &cell.look_rgba8,
+            )?;
+            body.push_str(&format!(
+                "<tr><td class=\"name\">{name}</td>\
+                 <td><img src=\"tiles/{name}-base.png\" alt=\"base\"></td>\
+                 <td><img src=\"tiles/{name}-look.png\" alt=\"look\"></td></tr>\n",
+                name = html_escape(&cell.name),
+            ));
+        }
+
+        let html = format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>look-dev: {look}</title>\
+             <style>body{{font:13px system-ui;margin:24px}}\
+             table{{border-collapse:collapse}}td{{padding:4px 8px;vertical-align:middle}}\
+             img{{width:160px;height:100px;image-rendering:pixelated;border:1px solid #ccc}}\
+             .cat td{{font-weight:600;padding-top:16px;text-transform:capitalize}}\
+             th{{text-align:left;padding:4px 8px}}.name{{font-family:monospace}}</style>\
+             <h1>look-dev — {look} @ amount {amount}</h1>\
+             <p>{n} synthetic scenes · left = base (no look) · right = look applied.</p>\
+             <table><tr><th>scene</th><th>base</th><th>look</th></tr>{body}</table>",
+            look = html_escape(&look.name),
+            n = cells.len(),
+        );
+        let index = out.join("index.html");
+        std::fs::write(&index, html).with_context(|| format!("writing {}", index.display()))?;
+        println!(
+            "wrote contact sheet {} ({} scenes, look {:?} @ {amount})",
+            index.display(),
+            cells.len(),
+            look.name,
+        );
+        Ok(0)
+    })
+}
+
+/// Writes one RGBA8 tile as a PNG under `dir/<name>.png`.
+fn write_tile_png(dir: &Path, name: &str, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    lbx_image_compare::Rgba8Image::new(w, h, rgba.to_vec())
+        .map_err(|e| anyhow!("tile {name}: {e}"))?
+        .write_png(&dir.join(format!("{name}.png")))
+        .map_err(|e| anyhow!("writing tile {name}: {e}"))
+}
+
+/// Minimal HTML-attribute/text escaping for the contact sheet.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]

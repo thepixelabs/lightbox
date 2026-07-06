@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# E02 task E5 — perceptual review record for "Lightbox Color v1".
+# Referenced by the look's provenance block (review_record =
+# "selfreview-lightbox-color-v1-2026-07-06").
+
+[record]
+id       = "selfreview-lightbox-color-v1-2026-07-06"
+look     = "Lightbox Color v1"
+version  = 1
+date     = "2026-07-06"
+status   = "iteration-1 author self-review; >=2-human-reviewer sign-off DEFERRED"
+
+# CONSTRAINT 4 AFFIDAVIT (non-negotiable): every value in the look was authored
+# from first principles. No Adobe-authored profile, look table, tone curve, HSL
+# map, preset, or rendered output was inspected, sampled, measured, curve-fit,
+# reverse-engineered, or copied at ANY step of authoring this look.
+[affidavit]
+no_adobe_derived_data = true
+authored_from         = "first principles (hand-chosen scene-referred contrast S + value-dependent saturation shaping)"
+statement = """
+No Adobe-derived data was used at any authoring step. The tone curve and the
+hue/sat shaping cube are hand-authored numeric constants in
+crates/lightbox-color/src/look.rs::author_lightbox_color_v1; their design
+rationale is documented there and below.
+"""
+
+# The >=2 independent human perceptual reviewers the spec requires are NOT
+# available on this build machine (see docs/plan/epics/E02-deviations.md). The
+# author self-reviewed against the E5 structured checklist below. The human
+# sign-off gate and its reviewer record remain DEFERRED — they are NOT
+# fabricated. Neutral fallback ("Lightbox Neutral") ships alongside per R6.
+[reviewers]
+human_signoff = "DEFERRED"
+count         = 0
+note          = "no human reviewers available; do not fabricate reviewers"
+
+# Structured checklist (E5): skin, sky, foliage, neutrals, gradients, clipped
+# highlights. Each item records the author's self-assessment on the synthetic
+# scene corpus (assets/color/looks/scene-corpus.toml), the finding, and the
+# resolution folded into iteration 1.
+[[checklist]]
+item       = "neutrals"
+scenes     = "neutral-05, neutral-18, neutral-50, neutral-75, neutral-95, neutral-ramp"
+assessment = "pass"
+finding    = "The tone curve is applied per channel, so R=G=B stays R=G=B; the shaping cube has Δhue=0 and sat is multiplied by (1+..), which is a no-op at sat=0. Verified bit-exact in per_channel_curve_keeps_neutrals_neutral."
+resolution = "No change needed; neutral axis is preserved by construction."
+
+[[checklist]]
+item       = "skin"
+scenes     = "skin-light, skin-fair, skin-medium, skin-tan, skin-deep"
+assessment = "pass"
+finding    = "Gentle contrast lift; no hue rotation from shaping (Δhue=0). Residual hue shift comes only from the per-channel curve and is small at the mild slopes used. Pinned by shaping_does_not_rotate_hue_on_skin_or_sky (< 0.5 deg)."
+resolution = "Kept the mid slope gentle (<= ~1.1) and the pivot on identity at x=0.18 to limit per-channel skin hue drift; hue-selective skin protection deferred to a later iteration under human review."
+
+[[checklist]]
+item       = "sky"
+scenes     = "sky-clear, sky-deep, sky-zenith, sky-haze, sky-dusk"
+assessment = "pass"
+finding    = "Blues gain a touch of saturation in the mids and desaturate as they approach clipping; no hue rotation. No posterization on the gradients."
+resolution = "Highlight-desaturation guard (sat x0.90 at value 1.0) keeps bright skies from over-saturating near clip."
+
+[[checklist]]
+item       = "foliage"
+scenes     = "foliage-spring, foliage-summer, foliage-shade, foliage-grass, foliage-conifer"
+assessment = "pass"
+finding    = "Greens gain mild mid saturation; shadowed foliage keeps detail (toe is gentle, slope 0.84, not crushed)."
+resolution = "No change needed."
+
+[[checklist]]
+item       = "gradients"
+scenes     = "neutral-ramp, sky-*, hue-sweep-mid, hue-sweep-bright, hdr-sweep, hdr-warm-window, hdr-backlit"
+assessment = "pass"
+finding    = "Monotone Fritsch-Carlson spline + monotone value-shaping produce smooth, banding-free gradients; the amount evaluator is continuous across 0..=2 (amount_is_continuous)."
+resolution = "No change needed."
+
+[[checklist]]
+item       = "clipped-highlights"
+scenes     = "clip-white, clip-warm, clip-sky, clip-specular"
+assessment = "pass"
+finding    = "Working-linear values > 1 clamp cleanly to white after the curve; the highlight-desaturation guard prevents hue-tinted clipping on warm/sky near-clips."
+resolution = "Accepted the [0,1] curve-domain clamp (documented on Look::eval); scene-referred highlight rolloff above 1.0 is out of the current look-stage domain and revisited when HDR editing lands (v1.x)."
+
+# Overall author disposition for iteration 1.
+[disposition]
+result = "iteration-1 accepted for shipping as the default look, with Lightbox Neutral as the safe fallback"
+open   = [
+  ">=2-human-reviewer perceptual sign-off (DEFERRED — no reviewers available)",
+  "hue-selective skin/sky protection (deferred to a reviewed iteration 2)",
+  "scene-referred highlight rolloff above 1.0 (deferred to HDR editing, v1.x)",
+]

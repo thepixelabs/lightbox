@@ -1703,6 +1703,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lbx-image-compare",
+ "lightbox-color",
  "lightbox-core",
  "lightbox-edit",
  "lightbox-render",
@@ -1717,12 +1718,14 @@ name = "lightbox-color"
 version = "0.1.0"
 dependencies = [
  "ciborium",
+ "lbx-image-compare",
  "lcms2",
  "lcms2-sys",
  "lightbox-decode",
  "proptest",
  "serde",
  "thiserror 2.0.18",
+ "toml",
  "twox-hash",
 ]
 
