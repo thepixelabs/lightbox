@@ -437,3 +437,76 @@ Exit bar green in the worktree (`build`/`test`/`clippy -D warnings`/`fmt --check
   iteration-1 look keeps Δhue=0 (no hue rotation) and a mild contrast S; hue-selective protection and
   a >1.0 highlight rolloff (an HDR/log-domain concern, v1.x) are deferred to a later, human-reviewed
   iteration, per the review record's open items. Not faked.
+
+## 2026-07-06 — Phase F: DCP parser + evaluator (staff engineer)
+
+Files owned/touched: `dcp` (full parser), `profile::resolve_profile_ref` (F7) + F7 tests,
+`crates/lightbox-color/fuzz` (added `parse_dcp` target). One additive cross-module touch:
+`lut::HueSatTable` (F5 encoding, see below). Exit bar green in-worktree: `cargo build --workspace`,
+`cargo test --workspace` (color: 75 tests), `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all --check`, `cargo deny check` — all pass. **No new crate dependency:** the `.dcp`
+TIFF-IFD reader is written from scratch over byte slices (no `tiff`/`byteorder` crate), so the
+crate graph and `deny.toml` are untouched.
+
+### Deviations
+
+- **`parse_dcp` lives in `lightbox-color::dcp`, not `lightbox-decode` (§2/§3.1 module map).** Its
+  output `CameraProfile` is a `lightbox-color` type; hosting the parser in `lightbox-decode` would
+  invert the crate dependency (decode → color). This deviation was pre-recorded by Phase A's
+  scaffold and is restated here. `.dcp` remains untrusted input — the parser is bounds-checked,
+  dimension-capped, and fuzzed regardless of host crate.
+- **F5 required one additive change to a Phase-B file (`lut.rs`).** `HueSatTable` (the resolved,
+  upload-ready form B8 builds in `resolve_input_transform`) gained an `encoding: HueSatEncoding`
+  field; `from_lut` now carries it and `eval` honours it. Phase B's scaffold explicitly deferred
+  this to F5 (its `from_lut` comment said "the resolved eval reproduces the sRGB-indexed lookup …
+  in the DCP path (F5)"). Without it, an **sRGB-encoded 3-D (val-div > 1) HueSatMap/LookTable would
+  be indexed with a linear value coordinate — silently wrong color** (exactly R3). The change is
+  purely additive (one field + two one-line bodies); `resolve_input_transform` already routed
+  through `from_lut`, so `transform.rs` needed no edit. Pinned by
+  `lut::tests::resolved_table_matches_lut_under_srgb_encoding`. **Merge note:** the only other file
+  that constructs `HueSatTable` is `from_lut` itself; Phase E (look.rs) uses `HueSatLut`, not the
+  resolved table, so this does not collide with a parallel Phase-E branch.
+- **`parse_dcp` sets `source = ProfileSource::UserDcp`.** The frozen `parse_dcp(bytes) ->
+  CameraProfile` signature carries no origin argument, and the parser cannot tell a curated bundle
+  from a user install. `UserDcp` is the safe default for untrusted input; the catalog/registry
+  (G-phase packaging, H1 sync-on-open) re-tags curated profiles at install time.
+- **`ProfileId` for a parsed DCP = xxh3-128 of the raw container bytes.** §3.4 says "xxh3-128 of
+  canonical serialization"; hashing the input bytes is the simplest content-addressed id and is
+  deterministic. Byte-identical `.dcp` files share an id; a re-authored profile gets a new one.
+- **Single `HueSatMap` per profile (DNG `Data2` narrowed).** §3.4's `CameraProfile.hue_sat_map` is
+  a single `Option<HueSatLut>`. DNG stores a per-illuminant pair (`Data1`/`Data2`); the parser uses
+  `Data1`, falling back to `Data2` only when `Data1` is absent. CCT-interpolating two HueSatMaps is
+  beyond the §3.4 single-map field and is not attempted (dcamprof profiles predominantly populate a
+  single map). Recorded for a future §3.4 revision if dual-map profiles need it.
+- **`ProfileEmbedPolicy` parsed-past, not stored.** §3.4's `CameraProfile` has no embed-policy
+  field, so the tag is skipped (unknown-tag path). `ProfileCopyright` *is* stored (surface-3
+  manifest / Adobe-authorship checker reads it, §4.3).
+- **Tone-curve spline (F4) reuses Phase B's `Spline1D` (Fritsch–Carlson monotone cubic).** §3.4/F4
+  call for a "monotone cubic spline"; `Spline1D::eval` (owned by `matrix.rs`, filled by Phase B per
+  its own deviation note) already implements exactly that and B8's resolve samples it to
+  `Curve1D[4096]`. The parser only builds the control points from `ProfileToneCurve` coordinate
+  pairs; the DNG SDK's own natural-spline solver is *not* reproduced (dcamprof cross-check is F6,
+  DEFERRED — see below).
+
+### DEFERRED (with reason — nothing faked)
+
+- **F6 — dcamprof reference harness:** dcamprof is absent on the build machine (E02 §0 pins F6
+  DEFERRED). The §5.2 stage-order/encoding arbiter (dcamprof patch-render) is **not** fabricated.
+  In its place, F2/F4/F5 are validated against **committed synthetic fixtures built by an in-tree
+  minimal TIFF/DCP writer** and cross-checked against independent paths: F5's
+  `dcp_identity_shaping_matches_matrix_base` uses the tier-1 matrix-base render as the reference,
+  and `dcp_hue_shift_flows_through_resolve` proves the HueSatMap stage is applied. No dcamprof
+  patch-render ΔE numbers are claimed. When dcamprof is available, F6 wires it as the binding
+  arbiter and §5.2 is amended (if needed) before PV1 freeze. (Environment: absent tool.)
+- **F2 — "field-level equality vs `dcptool -d` dumps for 3 reference profiles":** `dcptool` is not
+  installed. `parses_all_fields_field_by_field` asserts every §3.4 field against the values written
+  by the committed synthetic profile (the writer *is* the reference). Real dcamprof/dcptool-produced
+  `.dcp` files are parsed by the same code path once those tools/corpus are available.
+  (Environment: absent tool.)
+- **F3 — the 1 M-iteration cargo-fuzz *run*:** `cargo-fuzz` (nightly + libFuzzer) is not installed.
+  The fuzz **target** ships (`crates/lightbox-color/fuzz/fuzz_targets/parse_dcp.rs`, detached
+  workspace, off the default exit bar). The always-on in-gate subset is the adversarial-fixture
+  unit tests (bad headers, missing ColorMatrix1, dims-overflow cap, giant-count OOB, non-finite
+  floats, cyclic IFD) plus two proptest generators (`parse_dcp_never_panics` over random bytes,
+  `mutated_valid_dcp_never_panics` over bit-flips of a valid profile). The 1 M-iteration soak is
+  the nightly job. (Environment: absent tool + nightly.)

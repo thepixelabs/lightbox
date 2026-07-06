@@ -33,3 +33,12 @@ path = "fuzz_targets/icc_from_bytes.rs"
 test = false
 doc = false
 bench = false
+
+# F3: the untrusted `.dcp` TIFF-IFD parser. Same nightly/off-gate job as the
+# ICC target above (this whole crate is `exclude`d from the workspace).
+[[bin]]
+name = "parse_dcp"
+path = "fuzz_targets/parse_dcp.rs"
+test = false
+doc = false
+bench = false

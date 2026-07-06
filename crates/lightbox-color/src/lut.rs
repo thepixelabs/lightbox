@@ -42,37 +42,38 @@ impl HueSatLut {
     }
 }
 
-/// A HueSat table with its encoding already applied and resampled for GPU
-/// upload (the `ResolvedInputTransform` form, spec §3.4).
+/// A HueSat table resolved for GPU upload (the `ResolvedInputTransform` form,
+/// spec §3.4). Carries its value-axis `encoding` so a resolved eval indexes on
+/// the same coordinate the DNG semantics use.
 #[derive(Clone, Debug)]
 pub struct HueSatTable {
     /// `[hue_divisions, sat_divisions, val_divisions]`.
     pub dims: [u32; 3],
-    /// Resolved (encoding-applied) deltas, upload-ready.
+    /// Deltas in hue-major (`(h·sat + s)·val + v`) order, upload-ready.
     pub deltas: Vec<[f32; 3]>,
+    /// Value-axis encoding (Linear or sRGB) used to index the table.
+    pub encoding: HueSatEncoding,
 }
 
 impl HueSatTable {
-    /// Applies the resolved table to an `HSV` sample. The value axis is already
-    /// linearized (encoding was folded in at resolve time), so this is the
-    /// [`HueSatLut::eval`] path with [`HueSatEncoding::Linear`].
+    /// Applies the resolved table to an `HSV` sample, honouring the value-axis
+    /// `encoding` (F5: an sRGB-encoded DCP map indexes its value axis through the
+    /// sRGB curve — dropping this ships wrong color on 3D maps, R3).
     pub fn eval(&self, hsv: [f32; 3]) -> [f32; 3] {
-        let delta = interpolate_delta(self.dims, &self.deltas, hsv, HueSatEncoding::Linear);
+        let delta = interpolate_delta(self.dims, &self.deltas, hsv, self.encoding);
         apply_delta(hsv, delta)
     }
 
-    /// Builds an upload-ready table from a parsed [`HueSatLut`]. The encoding is
-    /// carried into the deltas' semantics by resampling the value axis so the
-    /// resolved table indexes on a linear value coordinate.
+    /// Builds an upload-ready table from a parsed [`HueSatLut`], preserving both
+    /// the deltas and the value-axis encoding. The deltas are already in
+    /// hue-major order (the DCP parser reorders DNG's value-major layout), so
+    /// this is a faithful copy — the encoding is threaded through so
+    /// [`HueSatTable::eval`] reproduces [`HueSatLut::eval`] exactly.
     pub fn from_lut(lut: &HueSatLut) -> HueSatTable {
-        // The delta values themselves are encoding-independent; only the value
-        // *coordinate* used to index them changes. We keep the deltas as-is and
-        // record that lookups are linear — the resolved eval reproduces the
-        // sRGB-indexed lookup by pre-encoding at sample time in the DCP path
-        // (F5). For the identity/empty tables Phase B resolves, this is a copy.
         HueSatTable {
             dims: lut.dims,
             deltas: lut.deltas.clone(),
+            encoding: lut.encoding,
         }
     }
 }
@@ -244,6 +245,40 @@ mod tests {
             (below[1] - above[1]).abs() < 0.01,
             "seam discontinuity: {below:?} vs {above:?}"
         );
+    }
+
+    #[test]
+    fn resolved_table_matches_lut_under_srgb_encoding() {
+        // F5: the resolved HueSatTable must reproduce HueSatLut::eval exactly,
+        // including the sRGB value-axis indexing on a 3D (val-div > 1) table.
+        let lut = HueSatLut {
+            dims: [2, 2, 3],
+            deltas: vec![
+                [5.0, 1.1, 0.9],
+                [7.0, 1.0, 1.0],
+                [3.0, 0.95, 1.05],
+                [1.0, 1.2, 0.8],
+                [9.0, 1.05, 0.97],
+                [2.0, 1.0, 1.0],
+                [4.0, 0.9, 1.1],
+                [6.0, 1.15, 0.85],
+                [8.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+                [5.5, 1.02, 0.98],
+                [3.3, 1.0, 1.0],
+            ],
+            encoding: HueSatEncoding::Srgb,
+        };
+        let table = HueSatTable::from_lut(&lut);
+        assert_eq!(table.encoding, HueSatEncoding::Srgb);
+        for hsv in [
+            [30.0, 0.3, 0.2],
+            [200.0, 0.7, 0.5],
+            [330.0, 0.5, 0.85],
+            [95.0, 0.9, 0.05],
+        ] {
+            approx(table.eval(hsv), lut.eval(hsv), 1e-6);
+        }
     }
 
     #[test]
