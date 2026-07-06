@@ -181,6 +181,7 @@ pub(crate) fn resolve_look_hue_sat(lut: &HueSatLut, amount: f32) -> HueSatTable 
     HueSatTable {
         dims: lut.dims,
         deltas,
+        encoding: HueSatEncoding::Linear,
     }
 }
 
