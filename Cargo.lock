@@ -1842,10 +1842,13 @@ name = "lightbox-profgen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "lbx-image-compare",
  "lightbox-color",
  "lightbox-decode",
  "serde",
+ "thiserror 2.0.18",
  "toml",
+ "twox-hash",
 ]
 
 [[package]]

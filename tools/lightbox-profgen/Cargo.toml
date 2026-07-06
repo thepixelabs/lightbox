@@ -14,6 +14,21 @@ publish.workspace = true
 name = "lightbox-profgen"
 path = "src/main.rs"
 
+# The tooling modules (session/dcamprof/validate/package/select) are a small
+# library the thin `main` binary drives. Auto-detected from `src/lib.rs`; making
+# them a lib (a) lets the unit tests exercise every stage and (b) marks the pub
+# surface reachable so `-D warnings` dead-code analysis does not fire on
+# helpers only the tests use. (Added target; see E02-deviations.md.)
+
+[features]
+# G1: the dcamprof orchestration is behind an OFF-BY-DEFAULT feature because
+# dcamprof (GPL-3) is ABSENT on the build machine (spec §0). The argv builders
+# and session/validation/packaging code all compile and unit-test without it;
+# only the actual `Command::spawn` of dcamprof is gated. Default builds stay
+# green and never attempt to exec an absent tool.
+default = []
+dcamprof = []
+
 [dependencies]
 # SUPERSET deps for Phase G so it fills the content-line tooling without
 # editing this manifest. dcamprof is invoked as a SUBPROCESS only (GPL-3, never
@@ -24,6 +39,18 @@ serde = { workspace = true }
 toml.workspace = true
 lightbox-color.workspace = true
 lightbox-decode.workspace = true
+# G1 dcamprof error taxonomy: structured, non-panicking subprocess errors.
+# (Appended dep; see E02-deviations.md.)
+thiserror.workspace = true
+# G3 validation harness: the shared CIEDE2000 patch-ΔE (sRGB8 → Lab → CIEDE2000)
+# every pixel epic uses, so profgen's reject gates measure color difference the
+# same way the golden gates do. Leaf tool crate (png + thiserror), permissive.
+# (Appended dep; see E02-deviations.md.)
+lbx-image-compare.workspace = true
+# G4 packaging: xxh3-128 content hash of the packaged `.dcp` bytes for the
+# surface-3 manifest / catalog `file_hash`, matching the ProfileId hasher the
+# color crate already uses. (Appended dep; see E02-deviations.md.)
+twox-hash.workspace = true
 
 [lints]
 workspace = true
