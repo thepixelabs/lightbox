@@ -1886,12 +1886,20 @@ version = "0.1.0"
 name = "lightbox-preview"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "fast_image_resize",
+ "fastrand",
+ "lightbox-catalog",
  "lightbox-decode",
  "lightbox-jobs",
  "lightbox-types",
+ "serde",
+ "tempfile",
  "thiserror 2.0.18",
+ "toml",
  "tracing",
+ "twox-hash",
+ "uuid",
  "zune-jpeg",
 ]
 

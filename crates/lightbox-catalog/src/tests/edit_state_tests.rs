@@ -4,19 +4,11 @@
 //! E09 Phase B (T5-DAOs/T6) acceptance criteria: the edit-state write DAOs
 //! and their matching `ReaderHandle` read surface.
 
-use lightbox_types::{AssetId, ProcessVersion, PV_M0};
+use lightbox_types::{ProcessVersion, PV_M0};
 use rusqlite::params;
 
-use super::{seed_assets, seed_folder, temp_catalog};
+use super::{one_image, seed_assets, seed_folder, temp_catalog};
 use crate::CatalogError;
-
-fn one_image(
-    catalog: &crate::Catalog,
-    dir: &std::path::Path,
-) -> (AssetId, lightbox_types::ImageId) {
-    let (_root, folder) = seed_folder(catalog, dir);
-    seed_assets(catalog, folder, "e", 1, 0, &[])[0]
-}
 
 #[test]
 fn upsert_edit_recipe_enforces_pv_immutability() {

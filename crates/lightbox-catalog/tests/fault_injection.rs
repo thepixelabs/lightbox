@@ -41,6 +41,18 @@
 //! this exercises the identical write path and identical atomicity
 //! guarantee `EditStore::commit` relies on.
 //!
+//! # E03 Phase A T04 — the preview-index build + touch-flush loop
+//!
+//! A fourth randomized operation drives `preview_dao`'s write path: an
+//! initial `upsert_preview`, then repeated 50/50 choices between a rebuild
+//! (new `upsert_preview`, same scope/tier/variant — the "content changed"
+//! case) and a batched `touch_previews_last_used` flush (the "just bump
+//! LRU" case, spec §3.2). The kill can land mid-rebuild or mid-flush; either
+//! way the same single-WAL-transaction guarantee the other three operations
+//! already prove applies here too — this branch is the T04 AC's direct
+//! evidence ("kill mid-batch loses only unflushed touches, catalog
+//! integrity clean") rather than a new mechanism.
+//!
 //! # The negative control we do NOT ship (documentation, not code)
 //!
 //! With `PRAGMA synchronous = OFF` + `journal_mode = DELETE` this harness's
@@ -60,8 +72,10 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-use lightbox_catalog::{BackupOpts, Catalog, IntegrityStatus, NewAsset};
-use lightbox_types::{ContentHash, FolderId, ImageId, Orientation, PV_M0};
+use lightbox_catalog::{
+    BackupOpts, Catalog, IntegrityStatus, NewAsset, NewPreviewRow, PreviewSourceTag,
+};
+use lightbox_types::{AssetId, ContentHash, FolderId, ImageId, Orientation, PreviewId, PV_M0};
 
 const CHILD_DIR_ENV: &str = "LIGHTBOX_FAULT_CHILD_DIR";
 const ITERS_ENV: &str = "LIGHTBOX_FAULT_ITERS";
@@ -104,11 +118,17 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut counter = 0u64;
     let mut rng = fastrand::Rng::with_seed(run_id);
     let mut my_images: Vec<i64> = Vec::new();
+    // image -> owning asset (E03 T04 branch: preview rows need an asset id).
+    let mut my_assets: HashMap<i64, i64> = HashMap::new();
     // Per-image local head_seq (E09 T12): only ever incremented by THIS
     // child, on images THIS child created (mirrors the rating branch's
     // `my_images` scoping) — so no cross-process resumption bookkeeping is
     // needed; a fresh child never touches an older child's images.
     let mut edit_head: HashMap<i64, u64> = HashMap::new();
+    // E03 T04: per-image preview build tag (bumped on each rebuild) and the
+    // row id once built (so the touch-flush leg has something to touch).
+    let mut preview_tag: HashMap<i64, u64> = HashMap::new();
+    let mut preview_id: HashMap<i64, i64> = HashMap::new();
 
     // Loop until killed.
     loop {
@@ -134,8 +154,11 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }
             line.push('\n');
             log(line)?;
+            for (a, i) in assets.iter().zip(&images) {
+                my_assets.insert(i.0, a.0);
+            }
             my_images.extend(images.iter().map(|i| i.0));
-        } else if roll < 228 {
+        } else if roll < 216 {
             // Overwrite a rating on an image we created earlier: intent
             // before the txn, done after the commit.
             let image = my_images[rng.usize(..my_images.len())];
@@ -145,6 +168,34 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 .writer()
                 .with_txn(move |txn| txn.set_rating(ImageId(image), Some(rating)))?;
             log(format!("done {image}:{rating}\n"))?;
+        } else if roll < 236 {
+            // E03 Phase A T04: preview build / rebuild / touch-flush.
+            let image = my_images[rng.usize(..my_images.len())];
+            let asset = *my_assets
+                .get(&image)
+                .expect("asset tracked for every image");
+            let already_built = preview_id.contains_key(&image);
+            if already_built && rng.bool() {
+                // Touch-flush leg: bump last_used_at on the existing row.
+                let id = preview_id[&image];
+                log(format!("touch_intent {image}\n"))?;
+                catalog
+                    .writer()
+                    .with_txn(move |txn| txn.touch_previews_last_used(&[PreviewId(id)]))?;
+                log(format!("touch_done {image}\n"))?;
+            } else {
+                // Build (first time) or rebuild (new content, same scope/
+                // tier/variant — an in-place upsert per T03).
+                let tag = preview_tag.get(&image).copied().unwrap_or(0) + 1;
+                log(format!("preview_intent {image}:{tag}\n"))?;
+                let row = preview_row(AssetId(asset), ImageId(image), tag);
+                let id = catalog
+                    .writer()
+                    .with_txn(move |txn| txn.upsert_preview(row))?;
+                log(format!("preview_done {image}:{tag}\n"))?;
+                preview_tag.insert(image, tag);
+                preview_id.insert(image, id.0);
+            }
         } else {
             // E09 T12: an edit-commit — the exact §4.1-2 protocol
             // (truncate → append step → upsert doc → rebuild index), one
@@ -295,6 +346,20 @@ struct EditCommitState {
     trailing_intents: Vec<(u64, u32)>,
 }
 
+/// E03 Phase A T04: the same intent/done tolerance as [`RatingState`], keyed
+/// by the build `tag` that lands in `preview.bytes`.
+#[derive(Default)]
+struct PreviewOpState {
+    /// `tag` of the last `preview_done` line (a proven commit).
+    last_done: Option<u64>,
+    /// `tag`s seen after the last `preview_done` — builds that may or may
+    /// not have landed before a kill.
+    trailing_intents: Vec<u64>,
+    /// Whether a `touch_done` was journaled at all (proves at least one
+    /// touch-flush transaction committed for this image).
+    touched: bool,
+}
+
 /// Replays the journal and checks every committed txn is present. Returns
 /// the number of journal lines read.
 fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usize {
@@ -306,11 +371,18 @@ fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usi
     let mut expected_assets: Vec<(i64, i64)> = Vec::new();
     let mut ratings: HashMap<i64, RatingState> = HashMap::new();
     let mut edits: HashMap<i64, EditCommitState> = HashMap::new();
+    let mut previews: HashMap<i64, PreviewOpState> = HashMap::new();
     for (idx, line) in lines.iter().enumerate() {
         let last = idx + 1 == lines.len();
         // A kill can tear at most the final line; anything malformed earlier
         // is a harness bug.
-        let ok = parse_line(line, &mut expected_assets, &mut ratings, &mut edits);
+        let ok = parse_line(
+            line,
+            &mut expected_assets,
+            &mut ratings,
+            &mut edits,
+            &mut previews,
+        );
         if !ok {
             assert!(
                 last,
@@ -425,6 +497,59 @@ fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usi
             }
         }
     }
+
+    // E03 Phase A T04: preview build/rebuild/touch-flush — same
+    // journal-tolerance pattern as ratings, plus a monotonicity check on the
+    // touch-flush leg (a committed touch can only ever move `last_used_at`
+    // forward, never leave it stuck below `built_at`).
+    for (image, state) in &previews {
+        let asset = expected_assets
+            .iter()
+            .find(|&&(_, i)| i == *image)
+            .map(|&(a, _)| a)
+            .unwrap_or_else(|| {
+                panic!("iteration {iteration}: preview image {image} has no journaled asset")
+            });
+        let row = reader
+            .preview_lookup(AssetId(asset), Some(ImageId(*image)), 1, [1u8; 8])
+            .unwrap_or_else(|e| {
+                panic!("iteration {iteration}: reading preview row for image {image}: {e}")
+            });
+        match row {
+            None => {
+                assert!(
+                    state.last_done.is_none(),
+                    "iteration {iteration}: image {image} has a journaled DONE preview \
+                     build (tag {:?}) but no preview row exists — a committed \
+                     preview write was lost",
+                    state.last_done
+                );
+            }
+            Some(r) => {
+                let allowed: Vec<u64> = match state.last_done {
+                    Some(done) => std::iter::once(done)
+                        .chain(state.trailing_intents.iter().copied())
+                        .collect(),
+                    None => state.trailing_intents.to_vec(),
+                };
+                assert!(
+                    allowed.contains(&r.bytes),
+                    "iteration {iteration}: image {image} preview.bytes={} not explainable \
+                     by the journal (allowed {allowed:?}) — a committed preview build was lost",
+                    r.bytes,
+                );
+                if state.touched {
+                    assert!(
+                        r.last_used_at >= r.built_at,
+                        "iteration {iteration}: image {image} preview last_used_at {} \
+                         < built_at {} after a journaled touch-flush — touch write was torn",
+                        r.last_used_at,
+                        r.built_at,
+                    );
+                }
+            }
+        }
+    }
     lines.len()
 }
 
@@ -434,8 +559,13 @@ fn parse_line(
     expected_assets: &mut Vec<(i64, i64)>,
     ratings: &mut HashMap<i64, RatingState>,
     edits: &mut HashMap<i64, EditCommitState>,
+    previews: &mut HashMap<i64, PreviewOpState>,
 ) -> bool {
     fn pair(s: &str) -> Option<(i64, u8)> {
+        let (a, b) = s.split_once(':')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    }
+    fn pair_u64(s: &str) -> Option<(i64, u64)> {
         let (a, b) = s.split_once(':')?;
         Some((a.parse().ok()?, b.parse().ok()?))
     }
@@ -498,6 +628,36 @@ fn parse_line(
         state.last_done = Some(rating);
         state.trailing_intents.clear();
         true
+    } else if let Some(rest) = line.strip_prefix("preview_intent ") {
+        let Some((image, tag)) = pair_u64(rest) else {
+            return false;
+        };
+        previews
+            .entry(image)
+            .or_default()
+            .trailing_intents
+            .push(tag);
+        true
+    } else if let Some(rest) = line.strip_prefix("preview_done ") {
+        let Some((image, tag)) = pair_u64(rest) else {
+            return false;
+        };
+        let state = previews.entry(image).or_default();
+        state.last_done = Some(tag);
+        state.trailing_intents.clear();
+        true
+    } else if let Some(rest) = line.strip_prefix("touch_intent ") {
+        let Ok(image) = rest.parse::<i64>() else {
+            return false;
+        };
+        previews.entry(image).or_default();
+        true
+    } else if let Some(rest) = line.strip_prefix("touch_done ") {
+        let Ok(image) = rest.parse::<i64>() else {
+            return false;
+        };
+        previews.entry(image).or_default().touched = true;
+        true
     } else {
         false
     }
@@ -522,6 +682,30 @@ fn new_asset(folder: FolderId, run_id: u64, counter: u64) -> NewAsset {
         mtime_utc: None,
         decode_error: None,
         import_session: None,
+    }
+}
+
+/// One image-scope (T1) preview row for the E03 T04 fault-injection branch.
+/// `tag` rides in `bytes` (a real column, no synthetic payload needed) so
+/// the verifier can read back which build actually landed — the exact
+/// tolerance pattern `RatingState`/`EditCommitState` already use.
+fn preview_row(asset: AssetId, image: ImageId, tag: u64) -> NewPreviewRow {
+    let mut hash = [0u8; 16];
+    hash[..8].copy_from_slice(&image.0.to_le_bytes());
+    NewPreviewRow {
+        asset,
+        image: Some(image),
+        content_hash: ContentHash(hash),
+        tier: 1,
+        variant_hash: [1; 8],
+        source: PreviewSourceTag::Embedded,
+        recipe_rev: 0,
+        colorspace: "srgb".to_owned(),
+        store_path: format!("previews/aa/{}.t1.jxl", image.0),
+        width: 3840,
+        height: 2560,
+        bytes: tag,
+        checksum: [2; 8],
     }
 }
 

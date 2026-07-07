@@ -54,6 +54,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         name: "edit_state",
         sql: include_str!("../migrations/0003_edit_state.sql"),
     },
+    // E03 Phase A (T03): the preview pyramid index + raw-cache accounting —
+    // preview, raw_cache_entry (§4). Recreates `preview` rather than altering
+    // (cache rows are disposable; see the migration file header).
+    Migration {
+        number: 4,
+        name: "preview_pyramid",
+        sql: include_str!("../migrations/0004_preview_pyramid.sql"),
+    },
 ];
 
 /// Highest schema version a migration set supports.

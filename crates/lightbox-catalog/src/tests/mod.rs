@@ -11,6 +11,7 @@ mod edit_state_tests;
 mod fts_tests;
 mod open_create_tests;
 mod pages_tests;
+mod preview_dao_tests;
 
 use std::path::Path;
 
@@ -54,6 +55,13 @@ pub(crate) fn new_asset(folder: FolderId, name: &str, seed: u64) -> NewAsset {
         decode_error: None,
         import_session: None,
     }
+}
+
+/// One seeded asset + its default image (the common single-fixture case used
+/// by DAO acceptance tests that don't need a whole batch).
+pub(crate) fn one_image(catalog: &Catalog, dir: &Path) -> (AssetId, ImageId) {
+    let (_root, folder) = seed_folder(catalog, dir);
+    seed_assets(catalog, folder, "e", 1, 0, &[])[0]
 }
 
 /// Root + root folder + one subfolder, ready for asset inserts.

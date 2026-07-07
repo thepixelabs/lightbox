@@ -18,15 +18,15 @@ Rules (linted by `cargo xtask lint-migrations`, a CI gate):
   owning epic;
 - rows are never deleted or renumbered once merged.
 
-| number | epic | name       | status |
-|--------|------|------------|--------|
-| 0001   | E01  | spine      | shipped (E01 Phase 3, T9) |
-| 0002   | E02  | e02_color  | shipped (E02 Phase H, H1) |
-| 0003   | E09  | edit_state | shipped (E09 Phase B, T5) |
+| number | epic | name            | status |
+|--------|------|-----------------|--------|
+| 0001   | E01  | spine           | shipped (E01 Phase 3, T9) |
+| 0002   | E02  | e02_color       | shipped (E02 Phase H, H1) |
+| 0003   | E09  | edit_state      | shipped (E09 Phase B, T5) |
+| 0004   | E03  | preview_pyramid | shipped (E03 Phase A, T03) |
 
 Expected future reservations (from the architecture §3.1 entity map — the
-owning epics reserve the actual numbers when their specs land): `preview`
-(E03); collections/keywords/smart collections/`metadata_cache` (E07); edit
-recipes/history/snapshots (E09); masks/retouch ops (E12);
-embeddings/faces/model packs (E13/E14, including the sqlite-vec virtual
-table, which must not be created before the extension ships).
+owning epics reserve the actual numbers when their specs land):
+collections/keywords/smart collections/`metadata_cache` (E07); masks/retouch
+ops (E12); embeddings/faces/model packs (E13/E14, including the sqlite-vec
+virtual table, which must not be created before the extension ships).

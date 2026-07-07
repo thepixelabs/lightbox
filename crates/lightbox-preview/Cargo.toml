@@ -11,13 +11,23 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+lightbox-catalog.workspace = true
 lightbox-decode.workspace = true
 lightbox-jobs.workspace = true
 lightbox-types.workspace = true
+ciborium.workspace = true
 fast_image_resize.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 tracing.workspace = true
+twox-hash.workspace = true
+uuid.workspace = true
 zune-jpeg.workspace = true
+
+[dev-dependencies]
+fastrand.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

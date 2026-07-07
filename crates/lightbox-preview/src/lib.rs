@@ -15,8 +15,17 @@
 //! small [`AssetLocator`] seam (implemented by `lightbox-core` over the
 //! catalog) so this crate stays SQL-free and unit-testable.
 
+// E03 Phase A (T01-T05): the store foundation — config, store-level errors,
+// atomic blob IO + BlobStore, the preview index + touch batcher, and the
+// tier/scope/variant-keying vocabulary. Phases B-F build the embedded
+// producer, codecs, scheduler, raw cache, and lifecycle on top of these.
+mod config;
 mod embedded;
+mod error;
+mod index;
 mod pipeline;
+mod pyramid;
+mod store;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +34,16 @@ use std::sync::Arc;
 use lightbox_jobs::Class;
 use lightbox_types::{ImageId, Orientation, SourceTier};
 
+pub use config::{CacheLimits, Codec, PreviewStoreConfig, Retention, StandardSize};
 pub use embedded::{EmbeddedPreviewProvider, ProviderStats};
+pub use error::StoreError;
+pub use index::{now_unix_seconds, PreviewIndex};
+pub use pyramid::{
+    derive_store_key, t0_rel_path, t1_rel_path, t2_rel_dir, PreviewColorspace, PreviewDesc,
+    PreviewScope, PreviewSource, ProducerId, RelPath, StoreKey, Tier, VariantHash, VariantParams,
+    VARIANT_PARAMS_ENC_VER,
+};
+pub use store::{BlobNamespace, BlobRef, BlobStore, Store, StoreManifest, STORE_FORMAT_VERSION};
 
 /// Which rendition of an image is being asked for (spec §3.6).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -71,6 +89,31 @@ pub enum PreviewError {
     /// before T21's `EmbeddedPreviewProvider`).
     #[error("preview provider unavailable: {0}")]
     Unavailable(String),
+    /// The on-disk store manifest (`store.toml`) is unreadable or malformed
+    /// (E03 spec §3.2, Phase A T01).
+    #[error("store manifest: {0}")]
+    Manifest(String),
+    /// The store's on-disk format is newer than this build supports
+    /// (forward-only, matching the catalog's own `SchemaTooNew` posture).
+    #[error("preview store format {found} is newer than this build supports (max {supported})")]
+    StoreTooNew {
+        /// `store.toml`'s `format`.
+        found: u32,
+        /// Highest format this build writes/understands.
+        supported: u32,
+    },
+    /// A catalog operation failed while loading/updating the preview index
+    /// (E03 spec §5.2, Phase A T04). Carried as a string —
+    /// `lightbox_catalog::CatalogError` is not `Clone`, and this enum must
+    /// stay `Clone` (`PreviewState::Failed` clones its error, spec T21).
+    #[error("catalog: {0}")]
+    Catalog(String),
+}
+
+impl From<std::io::Error> for PreviewError {
+    fn from(e: std::io::Error) -> PreviewError {
+        PreviewError::Io(e.to_string())
+    }
 }
 
 /// Decoded preview pixels (spec §3.6).

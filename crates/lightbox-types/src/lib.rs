@@ -60,6 +60,13 @@ pub struct SnapshotId(pub i64);
 )]
 pub struct HistoryStepId(pub i64);
 
+/// Rowid of a `preview` row (one built pyramid tier/variant, E03 spec §4).
+/// Additive per E03 Phase A (T03/T04) — the preview index's row identity.
+#[derive(
+    Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
+pub struct PreviewId(pub i64);
+
 /// xxh3-128 of the full original file. Keys caches + relink (architecture §3.1).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContentHash(pub [u8; 16]);
@@ -269,10 +276,17 @@ mod tests {
             serde_json::from_str::<HistoryStepId>(&serde_json::to_string(&step).unwrap()).unwrap(),
             step
         );
+        // E03 Phase A (T03/T04): PreviewId follows the same additive-newtype pattern.
+        let preview = PreviewId(42);
+        assert_eq!(
+            serde_json::from_str::<PreviewId>(&serde_json::to_string(&preview).unwrap()).unwrap(),
+            preview
+        );
 
         // Ord is derived (used by ordered id lists / future keying).
         assert!(MaskId(1) < MaskId(2));
         assert!(HistoryStepId(10) > HistoryStepId(9));
+        assert!(PreviewId(1) < PreviewId(2));
     }
 
     #[test]

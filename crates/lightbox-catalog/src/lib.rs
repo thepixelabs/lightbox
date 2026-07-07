@@ -43,6 +43,10 @@ mod edit_state;
 mod error;
 mod migrate;
 mod pages;
+// E03 Phase A (T03/T04): the preview-pyramid index store layer — write DAOs
+// on `CatalogTxn` and the matching read surface on `ReaderHandle` for the
+// `preview` table (migration 0004_preview_pyramid).
+mod preview_dao;
 // E02 Phase H (H1): the `camera_profile` registry — bundled-asset sync-on-open
 // + install/query DAOs (migration 0002_e02_color).
 mod profile_sync;
@@ -59,6 +63,7 @@ pub use edit_state::{
 };
 pub use error::{CatalogError, Result};
 pub use pages::{ImageQuery, ImageSummary, Page, PageCursor, SortOrder};
+pub use preview_dao::{NewPreviewRow, PreviewRow, PreviewSourceTag};
 pub use profile_sync::{
     BundledProfile, InstalledProfile, ProfileKind, ProfileSource, ProfileUpsert, SyncReport,
 };
