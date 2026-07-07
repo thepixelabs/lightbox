@@ -4,7 +4,9 @@
 //! Sidecar-only XMP file I/O (spec §3.5). **Mandate constraint c.2:** Lightbox
 //! writes `.xmp` sidecars only and *never* modifies an original image file's
 //! bytes or mtime. [`write_atomic`] targets the sidecar path exclusively; the
-//! permanent byte-identity guard test lives in `lightbox-edit`.
+//! permanent byte-identity guard test is [`tests::write_atomic_never_touches_original`]
+//! (mandate c.2, DoD §9.4 / T15 — asserts the original's bytes *and* mtime are
+//! unchanged across a sidecar write).
 
 use std::fs;
 use std::io::Write;
@@ -183,6 +185,48 @@ mod tests {
         let (back, rstamp) = read_with_stamp(&side).unwrap().unwrap();
         assert_eq!(back.get(ns::CRS, "Exposure2012").unwrap().as_str(), "+1.00");
         assert_eq!(stamp.hash, rstamp.hash);
+    }
+
+    /// Mandate constraint c.2 (DoD §9.4 / T15 AC): a sidecar write must **never**
+    /// touch the original image file — neither its bytes nor its mtime. This is the
+    /// permanent, PR-blocking byte-identity guard for the `write_atomic` path.
+    #[test]
+    fn write_atomic_never_touches_original() {
+        let dir = tempfile::tempdir().unwrap();
+        // A "raw original" with distinct bytes, next to where its sidecar will land.
+        let original = dir.path().join("IMG_1234.CR3");
+        let original_bytes: Vec<u8> = (0u16..4096).map(|n| (n % 251) as u8).collect();
+        fs::write(&original, &original_bytes).unwrap();
+        let mtime_before = fs::metadata(&original).unwrap().modified().unwrap();
+
+        // Write the sidecar (goes to IMG_1234.xmp — the c.2-safe target).
+        let side = sidecar_path(&original);
+        assert_eq!(side, dir.path().join("IMG_1234.xmp"));
+        let mut doc = XmpDoc::new();
+        doc.set(ns::CRS, "Exposure2012", XmpValue::text("+1.00"))
+            .unwrap();
+        write_atomic(&side, &doc).unwrap();
+        assert!(side.exists(), "sidecar must be created at the .xmp path");
+
+        // The original is byte-for-byte and mtime identical.
+        let after_bytes = fs::read(&original).unwrap();
+        assert_eq!(
+            after_bytes, original_bytes,
+            "original bytes must be untouched"
+        );
+        let mtime_after = fs::metadata(&original).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime_after, mtime_before,
+            "original mtime must be untouched"
+        );
+
+        // Overwriting the sidecar a second time must still leave the original intact.
+        write_atomic(&side, &doc).unwrap();
+        assert_eq!(fs::read(&original).unwrap(), original_bytes);
+        assert_eq!(
+            fs::metadata(&original).unwrap().modified().unwrap(),
+            mtime_before
+        );
     }
 
     #[test]
