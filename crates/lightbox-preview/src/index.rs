@@ -220,6 +220,32 @@ impl PreviewIndex {
         chosen.map(|e| e.desc.clone())
     }
 
+    /// Exact `(tier, variant)` point lookup within one image's asset/image
+    /// scoped rows (Phase C, T12) — unlike [`Self::best_available`]'s
+    /// ranked "pick the single best across every live variant" semantics,
+    /// this looks for ONE specific variant. T0 never needed this (spec
+    /// §3.1: exactly one canonical `VariantParams` per asset, so "any T0
+    /// row" already means "the T0 row"); T1 varies by target size/codec/
+    /// quality, so `producer::ensure_t1`'s re-entrancy fast path must ask
+    /// for the exact variant it is about to build, not whichever T1 row
+    /// happens to rank highest overall. Still sync/IO-free (spec §5.2).
+    pub fn lookup_variant(
+        &self,
+        image: ImageId,
+        asset: AssetId,
+        tier: Tier,
+        variant: crate::pyramid::VariantHash,
+    ) -> Option<PreviewDesc> {
+        let empty = Vec::new();
+        let image_rows = self.by_image.get(&image).unwrap_or(&empty);
+        let asset_rows = self.by_asset.get(&asset).unwrap_or(&empty);
+        image_rows
+            .iter()
+            .chain(asset_rows.iter())
+            .find(|e| e.tier == tier && e.desc.variant == variant)
+            .map(|e| e.desc.clone())
+    }
+
     /// Records a touch (spec §3.2): queues the id for the next flush.
     /// `now_unix` is the caller's timestamp (usually "now" — see
     /// [`now_unix_seconds`]) so tests can drive it deterministically. Note
@@ -436,6 +462,62 @@ mod tests {
         );
         // A different asset id sees nothing.
         assert_eq!(idx.best_available(ImageId(99), AssetId(8), 100), None);
+    }
+
+    /// T12: `lookup_variant` finds the EXACT variant even when a
+    /// different-variant row of the same tier would outrank it under
+    /// `best_available`'s ranking (higher `recipe_rev`/`built_at`).
+    #[test]
+    fn lookup_variant_finds_the_exact_variant_not_just_the_best_ranked_one() {
+        let mut idx = PreviewIndex::empty();
+        let mut older = row(
+            1,
+            1,
+            Some(1),
+            1280,
+            853,
+            shape(1, false, PreviewSourceTag::Embedded, 0, 1),
+        );
+        older.variant_hash = [1; 8];
+        let mut newer = row(
+            2,
+            1,
+            Some(1),
+            3840,
+            2560,
+            shape(1, false, PreviewSourceTag::Embedded, 0, 99),
+        );
+        newer.variant_hash = [2; 8];
+        idx.upsert(&older);
+        idx.upsert(&newer);
+
+        // best_available would pick the newer/larger row...
+        let best = idx.best_available(ImageId(1), AssetId(1), 0).unwrap();
+        assert_eq!(
+            best.variant,
+            crate::pyramid::VariantHash(u64::from_le_bytes([2; 8]))
+        );
+
+        // ...but lookup_variant finds the OLDER variant specifically, when asked.
+        let exact = idx
+            .lookup_variant(
+                ImageId(1),
+                AssetId(1),
+                Tier::T1,
+                crate::pyramid::VariantHash(u64::from_le_bytes([1; 8])),
+            )
+            .unwrap();
+        assert_eq!((exact.width, exact.height), (1280, 853));
+
+        // A variant that was never built: None, not a fallback guess.
+        assert!(idx
+            .lookup_variant(
+                ImageId(1),
+                AssetId(1),
+                Tier::T1,
+                crate::pyramid::VariantHash(u64::from_le_bytes([9; 8])),
+            )
+            .is_none());
     }
 
     #[test]

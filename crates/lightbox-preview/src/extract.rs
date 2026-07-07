@@ -90,7 +90,12 @@ pub(crate) fn extract_largest_embedded(path: &Path) -> Result<T0Extract, Preview
 /// (spec §5.1 `PreviewColorspace::TaggedIcc` — "the profile bytes themselves
 /// travel with the container", i.e. the decoder that actually needs them
 /// reads the stored JPEG directly, not through this enum).
-fn sniff_colorspace(jpeg: &[u8]) -> PreviewColorspace {
+///
+/// `pub(crate)` (not just used internally here) since Phase C's T1 pipeline
+/// (`producer::ensure_t1`) also needs it for the "non-raw JPEG source, no
+/// T0 row" path (T12 AC) — it sniffs the source file's own colorspace tag
+/// directly rather than going through [`extract_largest_embedded`].
+pub(crate) fn sniff_colorspace(jpeg: &[u8]) -> PreviewColorspace {
     const ICC_MARKER: u8 = 0xE2;
     const ICC_ID: &[u8] = b"ICC_PROFILE\0";
     // A malformed/adversarial stream just fails this scan (never panics —

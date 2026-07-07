@@ -62,6 +62,11 @@ kind = "bundled-c"
 note = "vendored Little-CMS2 (MIT), STATIC, for E02 color management (working/display/output transforms). The GPL-3 fast_float plugin is NEVER enabled (E02 §Risks R2 / D1 assert). LibRaw stays out-of-process in lightbox-rawproxy — never a -sys crate."
 
 [[package]]
+name = "clang-sys"
+kind = "os-binding"
+note = "E03 Phase C (T11): `bindgen`'s libclang binding, pulled in ONLY by lightbox-preview's `jxl` feature (default OFF) to generate the libjxl encoder FFI surface at build time — see crates/lightbox-preview/build.rs. Best-fit classification, not a perfect one: unlike this inventory's other `os-binding` rows, libclang is loaded at BUILD time (bindgen's default `runtime`/dlopen path, never statically linked), not by the shipped app binary at runtime — no clang-sys/libclang code, symbols, or bytes ship in any Lightbox binary. Kept as `os-binding` (not `bundled-c`: nothing here is compiled/linked INTO our binaries) since the inventory's three kinds have no dedicated 'build-tool-only' bucket; flagged for whoever adds one (E16)."
+
+[[package]]
 name = "core-foundation-sys"
 kind = "os-binding"
 note = "macOS CoreFoundation declarations (winit/wgpu)"

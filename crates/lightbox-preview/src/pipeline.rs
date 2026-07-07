@@ -101,17 +101,88 @@ pub(crate) fn decode_jpeg_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), Prev
     Ok((px, w, h))
 }
 
+/// `zune-jpeg` decode straight to (alpha-free) RGB8 — the T1 build
+/// pipeline's decode step (E03 Phase C, T12): T1's codec (`codec.rs`)
+/// carries no alpha channel (neither JPEG nor this epic's photographic T2
+/// tiles have one), so this skips the extra byte-per-pixel `decode_jpeg_rgba`
+/// would otherwise decode and immediately discard.
+pub(crate) fn decode_jpeg_rgb(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), PreviewError> {
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+    let mut decoder =
+        zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(bytes), options);
+    let px = decoder
+        .decode()
+        .map_err(|e| PreviewError::Decode(e.to_string()))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| PreviewError::Decode("JPEG decoded without header info".into()))?;
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
+    let expect = (w as usize) * (h as usize) * 3;
+    if px.len() != expect {
+        return Err(PreviewError::Decode(format!(
+            "decoder returned {} bytes for {w}x{h} RGB",
+            px.len()
+        )));
+    }
+    Ok((px, w, h))
+}
+
 /// Downscales so the longest edge fits `max_px` (never upscales), bilinear
 /// in the JPEG's own encoding (spec §3.6 names `fast_image_resize`;
 /// perceptually-exact linear-light resampling is the render node's job).
+/// RGBA8 (thumbnails, T08/T09's decode-for-display path).
 pub(crate) fn resize_to_fit(
     px: Vec<u8>,
     w: u32,
     h: u32,
     max_px: u32,
 ) -> Result<(Vec<u8>, u32, u32), PreviewError> {
+    resize_to_fit_impl(
+        px,
+        w,
+        h,
+        max_px,
+        fast_image_resize::PixelType::U8x4,
+        fast_image_resize::FilterType::Bilinear,
+        true, // JPEG previews are opaque; skip the premultiply round-trip.
+    )
+}
+
+/// Downscales so the longest edge fits `max_px` (never upscales), Lanczos3 —
+/// the T1 build pipeline's resize step (spec §3.4/T10 AC: "Lanczos3
+/// downscale via `fast_image_resize`"). RGB8 (no alpha; see
+/// [`decode_jpeg_rgb`]'s doc comment).
+pub(crate) fn resize_rgb_lanczos3_to_fit(
+    px: Vec<u8>,
+    w: u32,
+    h: u32,
+    max_px: u32,
+) -> Result<(Vec<u8>, u32, u32), PreviewError> {
+    resize_to_fit_impl(
+        px,
+        w,
+        h,
+        max_px,
+        fast_image_resize::PixelType::U8x3,
+        fast_image_resize::FilterType::Lanczos3,
+        false, // U8x3 carries no alpha channel to (not-)premultiply.
+    )
+}
+
+fn resize_to_fit_impl(
+    px: Vec<u8>,
+    w: u32,
+    h: u32,
+    max_px: u32,
+    pixel_type: fast_image_resize::PixelType,
+    filter: fast_image_resize::FilterType,
+    use_alpha: bool,
+) -> Result<(Vec<u8>, u32, u32), PreviewError> {
     use fast_image_resize::images::Image;
-    use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+    use fast_image_resize::{ResizeAlg, ResizeOptions, Resizer};
 
     let max_px = max_px.max(1);
     let long = w.max(h);
@@ -122,17 +193,16 @@ pub(crate) fn resize_to_fit(
     let tw = ((f64::from(w) * scale).round() as u32).max(1);
     let th = ((f64::from(h) * scale).round() as u32).max(1);
 
-    let src = Image::from_vec_u8(w, h, px, PixelType::U8x4)
+    let src = Image::from_vec_u8(w, h, px, pixel_type)
         .map_err(|e| PreviewError::Decode(format!("resize source: {e}")))?;
-    let mut dst = Image::new(tw, th, PixelType::U8x4);
+    let mut dst = Image::new(tw, th, pixel_type);
     Resizer::new()
         .resize(
             &src,
             &mut dst,
             &ResizeOptions::new()
-                .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
-                // JPEG previews are opaque; skip the premultiply round-trip.
-                .use_alpha(false),
+                .resize_alg(ResizeAlg::Convolution(filter))
+                .use_alpha(use_alpha),
         )
         .map_err(|e| PreviewError::Decode(format!("resize: {e}")))?;
     Ok((dst.into_vec(), tw, th))
@@ -226,6 +296,20 @@ mod tests {
         assert!(out.chunks_exact(4).all(|c| c == [200, 200, 200, 200]));
         // Already small enough: untouched.
         let (out, w, h) = resize_to_fit(px.clone(), 8, 4, 8).unwrap();
+        assert_eq!((w, h), (8, 4));
+        assert_eq!(out, px);
+    }
+
+    /// T10: the T1 pipeline's RGB8/Lanczos3 sibling of `resize_only_downscales`.
+    #[test]
+    fn resize_rgb_lanczos3_only_downscales() {
+        let px = vec![180u8; 8 * 4 * 3];
+        let (out, w, h) = resize_rgb_lanczos3_to_fit(px.clone(), 8, 4, 4).unwrap();
+        assert_eq!((w, h), (4, 2));
+        assert_eq!(out.len(), 4 * 2 * 3);
+        assert!(out.chunks_exact(3).all(|c| c == [180, 180, 180]));
+        // Already small enough: untouched.
+        let (out, w, h) = resize_rgb_lanczos3_to_fit(px.clone(), 8, 4, 8).unwrap();
         assert_eq!((w, h), (8, 4));
         assert_eq!(out, px);
     }

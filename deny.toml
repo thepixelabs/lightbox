@@ -48,6 +48,17 @@ exceptions = [
   # font DATA, making this the first entry of license surface 3 (bundled
   # content, E16) rather than a code-license question. Flagged for review.
   { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+  # E03 Phase C (T10): the T1 JPEG backend (`jpeg-encoder`, pure Rust —
+  # see the workspace Cargo.toml's comment for the mozjpeg-vs-jpeg-encoder
+  # measurement that picked it). License `(MIT OR Apache-2.0) AND IJG`: MIT/
+  # Apache-2.0 are already allowlisted; IJG (Independent JPEG Group) is a
+  # short, permissive, BSD-like attribution license (libjpeg's own
+  # historical license — crates.io's license metadata attributes it here,
+  # presumably for IJG-derived constants such as standard quantization
+  # tables) — not copyleft, just not on the exhaustive surface-1 allowlist.
+  # Flagged for licensing review, same pattern as the BSL-1.0/OFL-1.1
+  # entries above.
+  { crate = "jpeg-encoder", allow = ["IJG"] },
 ]
 
 [bans]

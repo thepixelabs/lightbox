@@ -24,6 +24,30 @@ tracing.workspace = true
 twox-hash.workspace = true
 uuid.workspace = true
 zune-jpeg.workspace = true
+# T1 JPEG backend (T10) — always available, unconditional dependency. See
+# the workspace Cargo.toml's own comment for the mozjpeg-vs-jpeg-encoder
+# codec reconciliation (measured latency, not a build-failure fallback).
+jpeg-encoder.workspace = true
+# JXL decode (T11) — pure-Rust, always buildable, but only ever exercised
+# behind the `jxl` feature (a JXL file can only exist on disk if something
+# encoded one, and encode is feature-gated — see `codec/jxl.rs`). Kept as an
+# optional/feature-gated dep too so the default build's dependency graph
+# stays JXL-free, matching the "default build never needs libjxl" mandate.
+jxl-oxide = { workspace = true, optional = true }
+
+[build-dependencies]
+# Only invoked when built with `--features jxl` (see build.rs) — generates
+# the libjxl encoder FFI surface from installed headers. Optional so the
+# default build never compiles bindgen or needs libclang.
+bindgen = { workspace = true, optional = true }
+
+[features]
+default = []
+# T11: own minimal libjxl encode FFI + jxl-oxide decode. OFF by default —
+# this build machine has no libjxl installed, so this feature is unverified
+# here (E03-deviations.md, Phase C T11). With it off, T1 falls back to the
+# JPEG codec with no API change (spec Risk R1's reversal trigger).
+jxl = ["dep:jxl-oxide", "dep:bindgen"]
 
 [dev-dependencies]
 fastrand.workspace = true

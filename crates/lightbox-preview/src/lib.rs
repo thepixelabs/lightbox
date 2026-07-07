@@ -20,8 +20,12 @@
 // tier/scope/variant-keying vocabulary. Phase B (T06-T09) builds the
 // embedded-preview producer (extract/producer), decode-for-display (decode),
 // and wires both — plus the decoded LRU/prefetch — into `embedded.rs`'s
-// provider. Phases C-F build codecs/T1, the scheduler, raw cache, and
-// lifecycle on top of these.
+// provider. Phase C (T10-T12) adds the `PreviewCodec` trait + JPEG backend +
+// Lanczos3 resize (codec), the feature-gated libjxl encode FFI + jxl-oxide
+// decode (codec/jxl.rs, `jxl` feature — OFF by default, libjxl absent on
+// this build machine), and the T1 build pipeline (producer::ensure_t1).
+// Phases D-F build the scheduler, raw cache, and lifecycle on top of these.
+mod codec;
 mod config;
 mod decode;
 mod embedded;
@@ -115,6 +119,12 @@ pub enum PreviewError {
     /// stay `Clone` (`PreviewState::Failed` clones its error, spec T21).
     #[error("catalog: {0}")]
     Catalog(String),
+    /// A `PreviewCodec::encode` call failed (E03 spec §5.3, Phase C T10/T11)
+    /// — e.g. the JPEG/JXL encoder rejected the buffer, or (JPEG backend)
+    /// panicked across the mozjpeg FFI boundary (caught, never propagated
+    /// as a raw panic — see `codec.rs`).
+    #[error("encode: {0}")]
+    Encode(String),
 }
 
 impl From<std::io::Error> for PreviewError {

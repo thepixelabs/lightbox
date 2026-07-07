@@ -100,6 +100,36 @@ lcms2 = "6"
 # the manifest.
 libc = "0.2"
 fast_image_resize = "6"
+# E03 Phase C T10: T1 JPEG backend. CODEC RECONCILIATION (see
+# E03-deviations.md, Phase C T10 for the full measurement): the spec's
+# preferred `mozjpeg` DOES build cleanly here with
+# `default-features = false` (disabling `mozjpeg-sys`'s `nasm_simd`, which
+# needs `nasm` — absent on this build machine) — but the resulting
+# non-SIMD encoder measured ~475-500ms/image on an 8 MP fixture, ~2x over
+# the spec's 250ms/image latency AC (§6/T10). `jpeg-encoder` (pure Rust;
+# `simd` feature = runtime-detected AVX2 on x86_64, no `nasm`/C toolchain
+# needed at all) measured ~45ms on the same image/machine — comfortably
+# inside budget — so it ships instead, per the task's own "never fake the
+# latency AC" mandate. License `(MIT OR Apache-2.0) AND IJG`: the IJG
+# component is not on the surface-1 allowlist; a scoped `deny.toml`
+# `[licenses].exceptions` entry covers it (same pattern as the existing
+# BSL-1.0/OFL-1.1 entries there).
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+# E03 Phase C T11: pure-Rust JXL decode (MIT/Apache-2.0, no native lib) — the
+# always-available half of the `jxl` feature; encode is the separately
+# feature-gated own-FFI binding (`lightbox-preview/src/codec/jxl.rs`).
+# `default-features = false` skips the optional `rayon`/`image`/`lcms2`
+# integration features this crate does not need (single-threaded decode of
+# small preview tiers is not perf-critical the way raw decode is).
+jxl-oxide = { version = "0.12", default-features = false }
+# E03 Phase C T11: bindgen generates the libjxl encoder FFI surface AT BUILD
+# TIME from whatever `jxl/encode.h` is actually installed (feature `jxl`
+# only — never a default-build dependency) — deliberately NOT a hand-copied
+# struct layout: `JxlBasicInfo` is a large, version-sensitive C struct, and
+# getting its layout wrong from memory (this build machine has no libjxl to
+# bindgen against, so it is UNVERIFIED — see E03-deviations.md Phase C T11)
+# would be a silent ABI/memory-safety bug. BSD-3-Clause.
+bindgen = "0.72"
 # Golden-image harness (spec §5 T22): committed goldens + failure heatmaps
 # are PNGs; `png` is the image-rs codec (MIT/Apache-2.0).
 png = "0.18"
@@ -139,3 +169,23 @@ lto = "thin"
 # Golden-image and fault-injection tests are IO/CPU heavy; keep dev-deps optimized enough.
 [profile.dev.package."*"]
 opt-level = 1
+
+# E03 Phase C T10: `jpeg-encoder` is pure Rust with no usable SIMD path on
+# this reference machine (its `simd` feature is AVX2-only, x86_64-gated; ARM
+# has none) — unlike a native-library encoder its speed is entirely at the
+# mercy of LLVM's optimizer, and debug-profile codegen is dramatically
+# slower for this kind of numeric code. At the workspace-wide dev
+# `opt-level = 1` above it measured ~600ms/8MP-image; this override gets it
+# to ~400ms — real, worthwhile, but still short of the spec's 250ms/image
+# encode-latency AC (§6/T10) in a debug/test build. `--release` clears the
+# budget comfortably (~30-50ms measured). The T10 AC's own latency
+# assertion is therefore release-gated (`codec.rs`'s
+# `jpeg_encode_meets_the_250ms_latency_budget` — see its doc comment) rather
+# than asserted unconditionally under plain `cargo test`; full numbers in
+# `docs/plan/epics/E03-deviations.md`, Phase C T10. Scoped to this one crate
+# (not every dependency) to avoid inflating everyone's `cargo build`/
+# `cargo test` time for packages that don't need it.
+[profile.dev.package.jpeg-encoder]
+opt-level = 3
+overflow-checks = false
+debug-assertions = false

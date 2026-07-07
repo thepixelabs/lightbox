@@ -73,16 +73,73 @@ impl std::fmt::Debug for DecodedPreview {
 /// "optionally downscales to the caller's target"; `None` for the loupe,
 /// `Some(px)` for thumbnails, spec T08/T09).
 pub(crate) fn decode_for_display(
-    jpeg_bytes: &[u8],
+    bytes: &[u8],
     orientation: Orientation,
     max_long_edge: Option<u32>,
 ) -> Result<(Vec<u8>, u32, u32), PreviewError> {
-    let (px, w, h) = pipeline::decode_jpeg_rgba(jpeg_bytes)?;
+    let (px, w, h) = decode_container_to_rgba(bytes)?;
     let (px, w, h) = match max_long_edge {
         Some(edge) => pipeline::resize_to_fit(px, w, h, edge)?,
         None => (px, w, h),
     };
     Ok(pipeline::bake_orientation(&px, w, h, orientation))
+}
+
+/// Content-first container dispatch (Phase C, T10-T12's forward-compat
+/// fix): mirrors `lightbox_decode::probe`'s own "magic bytes pick the
+/// walker" convention rather than trusting `desc.store_path`'s extension.
+/// T0 is always JPEG (spec §3.1); T1 is JPEG by default and JXL only when
+/// built AND requested with the `jxl` feature (T11's R1 fallback,
+/// `codec::effective_codec`) — so in the default build every stored
+/// preview is JPEG and this always takes the `zune-jpeg` branch; the JXL
+/// branch exists so a JXL-coded T1 (feature `jxl`, once libjxl is
+/// available) decodes correctly instead of silently mis-reading a JXL
+/// codestream as JPEG.
+fn decode_container_to_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), PreviewError> {
+    if is_jxl_container(bytes) {
+        return decode_jxl_to_rgba(bytes);
+    }
+    pipeline::decode_jpeg_rgba(bytes)
+}
+
+/// JPEG XL magic: a bare codestream (`FF 0A`) or the ISOBMFF-boxed
+/// container (12-byte `ftyp`-style signature box, big-endian: size=12,
+/// `"JXL "` brand, then `0D 0A 87 0A`).
+fn is_jxl_container(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0x0A])
+        || bytes.starts_with(&[
+            0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A,
+        ])
+}
+
+#[cfg(feature = "jxl")]
+fn decode_jxl_to_rgba(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), PreviewError> {
+    let rgb = crate::codec::resolve(crate::config::Codec::Jxl)
+        .decode(bytes)
+        .map_err(|e| PreviewError::Decode(e.to_string()))?;
+    Ok((rgb_to_rgba(&rgb.px), rgb.width, rgb.height))
+}
+
+#[cfg(feature = "jxl")]
+fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
+    for chunk in rgb.chunks_exact(3) {
+        out.extend_from_slice(chunk);
+        out.push(255);
+    }
+    out
+}
+
+/// With the `jxl` feature off (default build), a JXL-magic byte stream can
+/// only mean the store itself is corrupt/foreign (spec §3.2's reconcile
+/// territory, Phase F) — never a preview this build produced (T11's R1
+/// fallback means every T1 this build writes is JPEG). A clear, typed
+/// error beats silently mis-decoding it as JPEG.
+#[cfg(not(feature = "jxl"))]
+fn decode_jxl_to_rgba(_bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), PreviewError> {
+    Err(PreviewError::Decode(
+        "found a JXL-coded preview but this build was compiled without the `jxl` feature".into(),
+    ))
 }
 
 /// Decodes the preview `desc` points at, reading its bytes from `store`
@@ -193,6 +250,32 @@ mod tests {
 
         let (_, w, h) = decode_for_display(&jpeg, Orientation::O6, None).unwrap();
         assert_eq!((w, h), (1448, 2176), "O6 transposes landscape to portrait");
+    }
+
+    #[test]
+    fn is_jxl_container_recognizes_both_jxl_signatures_and_not_jpeg() {
+        assert!(is_jxl_container(&[0xFF, 0x0A, 0, 0]), "bare codestream");
+        assert!(
+            is_jxl_container(&[
+                0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A, 0, 0
+            ]),
+            "ISOBMFF container"
+        );
+        assert!(!is_jxl_container(&[0xFF, 0xD8, 0xFF, 0xE0]), "JPEG SOI");
+        assert!(!is_jxl_container(&[]));
+    }
+
+    /// Forward-compat guard (Phase C): with the `jxl` feature off (this
+    /// build), a JXL-magic byte stream is a clear, typed decode error — not
+    /// a silent mis-read as JPEG (T11's R1 fallback means this build never
+    /// writes JXL bytes itself, so seeing one only ever means a foreign/
+    /// corrupt store file).
+    #[cfg(not(feature = "jxl"))]
+    #[test]
+    fn jxl_bytes_report_a_clear_error_when_the_feature_is_off() {
+        let jxl_magic = [0xFFu8, 0x0A, 0, 0, 0, 0, 0, 0];
+        let err = decode_for_display(&jxl_magic, Orientation::O1, None).unwrap_err();
+        assert!(matches!(err, PreviewError::Decode(_)), "{err:?}");
     }
 
     /// `max_long_edge` downscales and never upscales (mirrors
