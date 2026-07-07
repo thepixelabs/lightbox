@@ -23,40 +23,132 @@ use crate::ng::types::{Extent, Roi, TilePrecision};
 ///
 /// # Payload
 ///
-/// The handle carries **whichever backend produced it**: the CPU path
-/// ([`crate::ng::exec::cpu::CpuBackend`], task A14) fills [`TileHandle::cpu`]
-/// with an [`Arc<PixelBuf>`] working tile; **A-gpu** adds the pooled-texture
-/// payload (a second additive field) for the GPU path. The two are additive so
-/// the two waves fill this frozen seam without stepping on each other
-/// (Risk R8 — see `E05-deviations.md` D-A-core-1).
-#[derive(Clone, Debug, Default)]
+/// The handle carries **whichever backend produced it** (merged frozen seam,
+/// `E05-deviations.md` D-A-core-1 + D-tile): a GPU variant
+/// wrapping a pooled `wgpu::Texture` (reclaimed by the [`crate::ng::gpu::TilePool`]
+/// via strong-count once the last handle drops) or a CPU variant wrapping a host
+/// [`PixelBuf`] for the rayon path. An empty handle (`Default`) carries no tile —
+/// it is the "not yet produced" sentinel the executor replaces.
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct TileHandle {
-    /// The CPU-resident working tile (`None` on a GPU-only handle).
-    cpu: Option<Arc<PixelBuf>>,
+    storage: Option<TileStorage>,
+}
+
+#[derive(Clone)]
+enum TileStorage {
+    Gpu(Arc<GpuTile>),
+    Cpu(Arc<PixelBuf>),
+}
+
+/// The GPU-resident backing of a [`TileHandle`]: a pooled texture plus its view
+/// and shape metadata. The `Arc<wgpu::Texture>` is shared with the owning
+/// [`crate::ng::gpu::TilePool`], which detects reuse by its strong count.
+struct GpuTile {
+    texture: Arc<wgpu::Texture>,
+    view: wgpu::TextureView,
+    extent: Extent,
+    precision: TilePrecision,
+    format: wgpu::TextureFormat,
 }
 
 impl TileHandle {
-    /// A handle wrapping a CPU-resident working tile (task A14).
-    pub fn from_cpu(px: PixelBuf) -> TileHandle {
+    /// GPU constructor used by the [`crate::ng::gpu::TilePool`].
+    pub(crate) fn gpu(
+        texture: Arc<wgpu::Texture>,
+        view: wgpu::TextureView,
+        extent: Extent,
+        precision: TilePrecision,
+        format: wgpu::TextureFormat,
+    ) -> TileHandle {
         TileHandle {
-            cpu: Some(Arc::new(px)),
+            storage: Some(TileStorage::Gpu(Arc::new(GpuTile {
+                texture,
+                view,
+                extent,
+                precision,
+                format,
+            }))),
         }
     }
 
-    /// A handle wrapping an already-shared CPU working tile.
-    pub fn from_cpu_arc(px: Arc<PixelBuf>) -> TileHandle {
-        TileHandle { cpu: Some(px) }
+    /// CPU constructor — the rayon-path tile currency (A-core CPU backend).
+    pub fn from_cpu(pixels: PixelBuf) -> TileHandle {
+        TileHandle {
+            storage: Some(TileStorage::Cpu(Arc::new(pixels))),
+        }
     }
 
-    /// The CPU working tile, if this handle carries one.
+    /// True when this handle carries no tile (the `Default` sentinel).
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_none()
+    }
+
+    /// The tile extent, if any.
+    pub fn extent(&self) -> Option<Extent> {
+        match &self.storage {
+            Some(TileStorage::Gpu(g)) => Some(g.extent),
+            Some(TileStorage::Cpu(p)) => Some(p.extent),
+            None => None,
+        }
+    }
+
+    /// The tile precision, if this is a working-format tile.
+    pub fn precision(&self) -> Option<TilePrecision> {
+        match &self.storage {
+            Some(TileStorage::Gpu(g)) => Some(g.precision),
+            _ => None,
+        }
+    }
+
+    /// The GPU texture view a node binds as an input, if this is a GPU tile.
+    pub fn texture_view(&self) -> Option<&wgpu::TextureView> {
+        match &self.storage {
+            Some(TileStorage::Gpu(g)) => Some(&g.view),
+            _ => None,
+        }
+    }
+
+    /// The GPU texture, if this is a GPU tile (readback / copy source).
+    pub fn texture(&self) -> Option<&wgpu::Texture> {
+        match &self.storage {
+            Some(TileStorage::Gpu(g)) => Some(&g.texture),
+            _ => None,
+        }
+    }
+
+    /// The GPU texture format, if this is a GPU tile.
+    pub fn format(&self) -> Option<wgpu::TextureFormat> {
+        match &self.storage {
+            Some(TileStorage::Gpu(g)) => Some(g.format),
+            _ => None,
+        }
+    }
+
+    /// The host pixels, if this is a CPU tile (the A-core CPU-backend accessor).
     pub fn cpu(&self) -> Option<&PixelBuf> {
-        self.cpu.as_deref()
+        match &self.storage {
+            Some(TileStorage::Cpu(p)) => Some(p),
+            _ => None,
+        }
     }
+}
 
-    /// The shared CPU working tile, if any (cheap clone of the `Arc`).
-    pub fn cpu_arc(&self) -> Option<Arc<PixelBuf>> {
-        self.cpu.clone()
+impl std::fmt::Debug for TileHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.storage {
+            None => f.write_str("TileHandle(empty)"),
+            Some(TileStorage::Gpu(g)) => f
+                .debug_struct("TileHandle::Gpu")
+                .field("extent", &g.extent)
+                .field("precision", &g.precision)
+                .field("format", &g.format)
+                .finish(),
+            Some(TileStorage::Cpu(p)) => f
+                .debug_struct("TileHandle::Cpu")
+                .field("pixels", p)
+                .finish(),
+        }
     }
 }
 

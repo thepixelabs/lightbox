@@ -16,6 +16,7 @@ use std::sync::Arc;
 use lightbox_jobs::CancelToken;
 
 use crate::ng::error::NodeError;
+use crate::ng::gpu::KernelBuilder;
 use crate::ng::tile::{CpuTileView, PixelBuf, TileHandle, TileView};
 use crate::ng::types::{Extent, NodeId, PortType, Roi, TilePrecision};
 
@@ -100,7 +101,17 @@ impl AuxRequirements {
 pub struct KernelSalt(pub blake3::Hash);
 
 /// What a GPU node sees during evaluation (spec §3.2). Record compute
-/// dispatches here; write [`GpuEvalCtx::output`]. **A-gpu fills the internals.**
+/// dispatches here; write [`GpuEvalCtx::output`].
+///
+/// **A-gpu completion** (E05-deviations §A-gpu D-gpuctx): the output tile is
+/// **pre-acquired by the backend** (from the [`crate::ng::gpu::TilePool`], at the
+/// node's output precision/format) and handed in here; the node records its
+/// compute dispatch writing into `output`'s `@group(1)` storage texture, and the
+/// backend takes the finished handle back out. Pipelines come from the shared
+/// [`KernelBuilder`] cache (`@blake3(wgsl)`), so a node's shader is compiled once
+/// per process. This context is constructed and consumed entirely within A-gpu
+/// territory (the GPU backend builds it; engine-owned node bodies read it), so it
+/// carries no cross-wave coupling.
 pub struct GpuEvalCtx<'a> {
     /// The shared device the node records dispatches on (§2.3 seam 2).
     pub device: &'a wgpu::Device,
@@ -110,13 +121,43 @@ pub struct GpuEvalCtx<'a> {
     pub scale: f32,
     /// Cooperative cancellation; long nodes check at checkpoints.
     pub cancel: &'a CancelToken,
-    // A-gpu adds: output tile handle, TilePool, scratch/aux slots, params UBO.
+    /// The shared pipeline cache (§3.2 kernel conventions).
+    pub kernels: &'a KernelBuilder,
+    /// The pre-acquired output tile the node writes into.
+    output: TileHandle,
 }
 
-impl GpuEvalCtx<'_> {
-    /// The output tile the node writes (`@group(1)` storage texture).
+impl<'a> GpuEvalCtx<'a> {
+    /// Construct an eval context around a pre-acquired `output` tile (the
+    /// backend owns tile acquisition; the node only writes).
+    pub fn new(
+        device: &'a wgpu::Device,
+        queue: &'a wgpu::Queue,
+        kernels: &'a KernelBuilder,
+        scale: f32,
+        cancel: &'a CancelToken,
+        output: TileHandle,
+    ) -> GpuEvalCtx<'a> {
+        GpuEvalCtx {
+            device,
+            queue,
+            scale,
+            cancel,
+            kernels,
+            output,
+        }
+    }
+
+    /// The output tile the node writes (`@group(1)` storage texture). The tile
+    /// was acquired by the backend at the node's output precision/format.
     pub fn output(&mut self) -> &mut TileHandle {
-        unimplemented!("A-gpu: GpuEvalCtx::output — acquire output tile from the pool")
+        &mut self.output
+    }
+
+    /// Take the (written) output tile back out — the backend calls this after
+    /// [`RenderNode::eval_gpu`] returns to hand the result to the cache/executor.
+    pub fn into_output(self) -> TileHandle {
+        self.output
     }
 }
 

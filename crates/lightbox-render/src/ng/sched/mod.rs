@@ -7,6 +7,8 @@
 //! (task A13); **B** owns latest-wins coalescing (one in-flight + one pending
 //! slot per image, task B6). Consumed by the shell (E08) via [`RenderScheduler::canvas`].
 
+pub mod canvas;
+
 use std::sync::Arc;
 
 use lightbox_edit::Recipe;

@@ -307,3 +307,89 @@ log and the method docstring. Reconciled by implementing the one-liner in `ng/no
 (`ParamHash(blake3::hash(&self.canonical))`) plus a focused test
 (`param_hash_is_canonical_and_order_independent`). B1 (Phase B) is now the no-op verify D-A-core-2 always
 described. Blast radius: `ng/node/param.rs` only; signatures unchanged; all five gates re-run green.
+
+## Wave A-gpu — 2026-07-07 (A6/A7/A9/A10/A13 + engine-owned node bodies)
+
+Fills the A-gpu stubs (`ng/gpu/`, `ng/exec/gpu/`, `ng/source/`, `ng/sched/canvas.rs`, `shaders/`,
+`ng/nodes/{decoded,resize,display}.rs`). Full five-green exit bar verified in the worktree on the
+real Metal adapter (build / test / clippy -D warnings / fmt --check / deny check). New GPU tests in
+`crates/lightbox-render/tests/ng_gpu.rs` (11 tests: A6 kernel+cache+invalid-WGSL, A7 pool
+reuse/budget/10k-stress, A9 backend `src.decoded`, A10 upload 8/16/f32 round-trip, A13 tear-free
+canvas, resize + display CPU/GPU parity) — all pass; each guards with `gpu_or_skip!` and reports
+honestly if an adapter is momentarily unavailable rather than faking a readback.
+
+### D-A6: `naga` added as a **build-dependency** (build-time WGSL validation)
+
+`build.rs` parses + validates every `shaders/*.wgsl` with naga at build time, so **invalid WGSL
+fails the build, not runtime** (the A6 acceptance criterion). `cargo tree -i naga` resolves to the
+**single** version `29.0.4` — wgpu's own vendored shader front-end at the pinned wgpu 29 — so this
+adds **no new external surface** (cargo-deny bans/licenses/sources all green). Blast radius:
+`crates/lightbox-render/{Cargo.toml,build.rs}` + a `naga` line in `Cargo.lock` (already present
+transitively). Rollback: delete `build.rs` + the `[build-dependencies]` block.
+
+### D-tile: `TileHandle` internals filled (scaffold-frozen `ng/tile.rs`)
+
+Per the scaffold note ("Field internals of the opaque `TileHandle` are filled by **A-gpu**"), the
+frozen seam is now inhabited: a `Gpu(Arc<GpuTile>)` variant (pooled `Arc<wgpu::Texture>` + view +
+extent + precision + format; reclaimed by `TilePool` via `Arc::strong_count == 1`) or a
+`Cpu(Arc<PixelBuf>)` variant for the rayon path, plus a hand-written `Debug` (a
+`wgpu::TextureView` is not `Debug`) and the accessor surface (`extent/precision/texture_view/
+texture/format/cpu_pixels/is_empty`). **The seam SHAPE is unchanged** — still opaque,
+`#[non_exhaustive]`, `Clone + Default`, still "CacheKey in / TileHandle out" — only the reserved
+internals were added. Blast radius: `ng/tile.rs` only.
+
+### D-gpuctx: `GpuEvalCtx` completed in A-core's `ng/node/mod.rs` (agreed cross-file touch)
+
+The scaffold left `GpuEvalCtx` with a `// A-gpu adds: output tile handle, TilePool, …` comment and
+an `unimplemented!("A-gpu")` `output()`. Completed **additively**: a `kernels: &KernelBuilder`
+field, a private `output: TileHandle` (pre-acquired by the backend from the `TilePool` at the
+node's output precision/format), and `new()` / `output() -> &mut TileHandle` / `into_output()`.
+This is the one A-gpu touch inside an A-core-owned file; it is **additive only** (no `RenderNode`
+trait signature change, no change to any A-core method body) and was pre-agreed as the A-gpu
+completion of the GPU eval context. The context is built and consumed entirely within A-gpu
+territory (the GPU backend constructs it; engine-owned node bodies read it), so it carries no
+cross-wave coupling. Blast radius: the `GpuEvalCtx` struct + its `impl`.
+
+### D-nodes: engine-owned node bodies land against the future `CpuEvalCtx` (A14)
+
+`src.decoded`, `util.resize`, `xform.display` have **complete, GPU-tested** `eval_gpu` bodies
+(bind-group conventions §3.2: `@group(0)` input / `@group(1)` write-only storage output /
+`@group(2)` params UBO / `@group(3)` LUT-aux; dispatched via `gpu::dispatch_compute`). Their
+`eval_cpu` bodies call `CpuEvalCtx::output()`, which is still `unimplemented!("A14 (A-core)")` — so
+the CPU **algorithm** ships and is parity-tested **now** as a standalone free function
+(`decoded::copy_cpu`, `resize::decimate_box_cpu`, `display::apply_display_cpu`) against the GPU
+readback, while the trait's `eval_cpu` wiring goes live unchanged when A14 lands the output buffer.
+Nothing in-gate calls `eval_cpu` through the A14 stub, so no panic is reachable. The `resize` and
+`display` CPU/GPU parity tests pass (byte-exact resize within 2/1000; display within 2 LSB on
+`rgba8unorm`).
+
+### D-resize-box: `util.resize` ships an area-average **box** filter (real Lanczos = C2)
+
+Phase A ships box decimation (`resize.wgsl` / `decimate_box_cpu`) sharing **identical half-open
+integer region math** GPU↔CPU so the §4.4 parity gate holds. Task **C2** replaces the kernel with
+Lanczos; because the kernel change bumps `kernel_salt`, C2's replacement trips a fresh golden by
+design (no trait change, no seam change).
+
+### D-display-srgb: `xform.display` targets the **built-in sRGB** display (LCMS2-baked)
+
+100% of the color math is `lightbox_color::display::build_display_transform` (a 1-D shaper + 65³
+LUT, LCMS2); the engine only **applies** it (`out = trilinear(lut, shaper(rgb))`) — GPU
+(`display.wgsl`) and CPU (`DisplayTransform::apply`) evaluate the identical baked data, so parity is
+exact by construction and **zero color science lives in the engine** (E02 guardrail). Wiring a live
+monitor profile through the params ABI is a later task, mechanism unchanged. This **resolves the
+D-2 `use lightbox_color as _;` stub note** — `lightbox-color` is now genuinely consumed. The
+`kernel_salt` spans both the WGSL and the baked color-data revision (`dt.key`).
+
+### D-a13-readback: A13 shell-sim samples via **readback**, not a live egui-wgpu pass
+
+The A13 mechanism — `sched::canvas::CanvasPublisher`: a 3-slot display-texture ring + atomic
+generation counter + `tokio::sync::watch` publisher — is **standalone and independently tested**
+(the `a13_canvas_publishes_tear_free_generations` test publishes 12 solid frames whose generation
+is encoded in the red channel and, after each publish, samples the watch value **and** reads the
+published ring slot back, asserting the whole texture is one consistent generation — no tear — in
+lock-step with the watch generation). The publish-after-submit ordering + distinct ring slots are
+what make it tear-free. Integration into a **live** egui-wgpu compositor pass rides on **F5**
+(`RenderScheduler` → `lightbox-core`), where the scheduler owns the publisher;
+`RenderScheduler::canvas()` stays `unimplemented!` until **B6** gives the scheduler its publisher
+field (the scheduler struct body is B6-owned). The double-buffer/tear-free **mechanism is proven
+now** on the real device; only the shell-side live compositing wiring is deferred to F5.

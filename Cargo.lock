@@ -1911,6 +1911,7 @@ dependencies = [
  "lightbox-edit",
  "lightbox-jobs",
  "lightbox-types",
+ "naga",
  "petgraph",
  "pollster",
  "proptest",
