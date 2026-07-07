@@ -253,9 +253,12 @@ impl ParamBlock {
         }
     }
 
-    /// blake3 over the canonical bytes — the `param_hash` cache-key ingredient.
+    /// blake3 over the canonical bytes — the `param_hash` cache-key ingredient
+    /// (spec §3.5). Equal params ⇒ equal hash across processes/builds, because
+    /// the input is the field-order-independent canonical CBOR. B1 (Phase B) is
+    /// the no-op verify of this over the compiler/executor call sites.
     pub fn hash(&self) -> ParamHash {
-        unimplemented!("B1: ParamHash over canonical ParamBlock")
+        ParamHash(blake3::hash(&self.canonical))
     }
 }
 
@@ -384,6 +387,30 @@ mod tests {
 
         let wrong = ParamBlock::from_fields([("exposure", ParamValue::Int(3))]).unwrap();
         assert!(ParamBlock::from_canonical_cbor(wrong.canonical_bytes(), &SCHEMA).is_err());
+    }
+
+    #[test]
+    fn param_hash_is_canonical_and_order_independent() {
+        // Equal params (any field order) ⇒ equal hash; distinct params differ.
+        let a = ParamBlock::from_fields([
+            ("exposure", ParamValue::Float(0.5)),
+            ("contrast", ParamValue::Int(20)),
+        ])
+        .unwrap();
+        let b = ParamBlock::from_fields([
+            ("contrast", ParamValue::Int(20)),
+            ("exposure", ParamValue::Float(0.5)),
+        ])
+        .unwrap();
+        let c = ParamBlock::from_fields([
+            ("exposure", ParamValue::Float(0.6)),
+            ("contrast", ParamValue::Int(20)),
+        ])
+        .unwrap();
+        assert_eq!(a.hash(), b.hash());
+        assert_ne!(a.hash(), c.hash());
+        // Hash is a pure function of the canonical bytes.
+        assert_eq!(a.hash().0, blake3::hash(a.canonical_bytes()));
     }
 
     #[test]

@@ -297,3 +297,13 @@ currently renders the checker→gain reference graph (D wires the full case→gr
 The CPU path, self-contained ΔE2000/PSNR comparators, and the first golden are **green in the worktree
 now**; the GPU-dependent parity/readback is honestly deferred to the single-process merge on the real
 Metal box, per the disposition above.
+
+### D-A-core-5 (verification pass, 2026-07-07): `ParamBlock::hash` reconciled with D-A-core-2
+
+The A-core commit left `ParamBlock::hash` as an `unimplemented!("B1")` stub even though D-A-core-2 states
+it "is implemented here (blake3 over canonical bytes)". Nothing on the live CPU path called it (the exec
+walk uses its own `placeholder_key`), so the exit bar was green regardless — but the stub contradicted the
+log and the method docstring. Reconciled by implementing the one-liner in `ng/node/param.rs`
+(`ParamHash(blake3::hash(&self.canonical))`) plus a focused test
+(`param_hash_is_canonical_and_order_independent`). B1 (Phase B) is now the no-op verify D-A-core-2 always
+described. Blast radius: `ng/node/param.rs` only; signatures unchanged; all five gates re-run green.
