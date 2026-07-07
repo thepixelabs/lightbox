@@ -31,6 +31,35 @@ pub struct RootId(pub i64);
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImportSessionId(pub i64);
 
+/// Rowid of a `mask` row. **Content is owned by E12**; `Recipe.masks` (E09)
+/// carries only ordered `MaskId` refs (spec §3.1 ownership rule). Additive per
+/// E09 T1 — see `docs/plan/epics/E09-deviations.md` A-1 (E01 joint-review flag).
+#[derive(
+    Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
+pub struct MaskId(pub i64);
+
+/// Rowid of a `retouch_op` row. Content owned by E12/E14; `Recipe.retouch` (E09)
+/// carries only ordered `RetouchOpId` refs. Additive per E09 T1 (deviations A-1).
+#[derive(
+    Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
+pub struct RetouchOpId(pub i64);
+
+/// Rowid of a `snapshot` row (a named, self-contained edit projection, spec §3.1).
+/// Additive per E09 T1 (deviations A-1).
+#[derive(
+    Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
+pub struct SnapshotId(pub i64);
+
+/// Rowid of a `history_step` row (the persistent edit step log, spec §3.1).
+/// Additive per E09 T1 (deviations A-1).
+#[derive(
+    Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
+pub struct HistoryStepId(pub i64);
+
 /// xxh3-128 of the full original file. Keys caches + relink (architecture §3.1).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContentHash(pub [u8; 16]);
@@ -216,6 +245,34 @@ mod tests {
                 .unwrap(),
             session
         );
+    }
+
+    #[test]
+    fn e09_id_newtypes_round_trip_serde() {
+        // E09 T1: additive newtypes serialize as their inner i64 (transparent).
+        let mask = MaskId(7);
+        assert_eq!(serde_json::to_string(&mask).unwrap(), "7");
+        assert_eq!(serde_json::from_str::<MaskId>("7").unwrap(), mask);
+
+        let retouch = RetouchOpId(-3);
+        assert_eq!(
+            serde_json::from_str::<RetouchOpId>(&serde_json::to_string(&retouch).unwrap()).unwrap(),
+            retouch
+        );
+        let snap = SnapshotId(i64::MAX);
+        assert_eq!(
+            serde_json::from_str::<SnapshotId>(&serde_json::to_string(&snap).unwrap()).unwrap(),
+            snap
+        );
+        let step = HistoryStepId(0);
+        assert_eq!(
+            serde_json::from_str::<HistoryStepId>(&serde_json::to_string(&step).unwrap()).unwrap(),
+            step
+        );
+
+        // Ord is derived (used by ordered id lists / future keying).
+        assert!(MaskId(1) < MaskId(2));
+        assert!(HistoryStepId(10) > HistoryStepId(9));
     }
 
     #[test]

@@ -115,8 +115,9 @@ fn create_import_list_render_check_backup_flow() {
     // --- create ---
     let out = cli(&["create", "--catalog", cat]);
     assert_exit(&out, 0);
+    // Latest migration is 0003 (E09 edit_state); a fresh create is fully migrated.
     assert!(
-        stdout(&out).contains("schema version 2"),
+        stdout(&out).contains("schema version 3"),
         "{}",
         stdout(&out)
     );
@@ -258,7 +259,7 @@ fn create_import_list_render_check_backup_flow() {
     // --- check (clean) ---
     let out = cli(&["check", "--catalog", cat]);
     assert_exit(&out, 0);
-    assert!(stdout(&out).contains("ok: schema version 2"));
+    assert!(stdout(&out).contains("ok: schema version 3"));
 
     // --- backup ---
     let out = cli(&["backup", "--catalog", cat]);

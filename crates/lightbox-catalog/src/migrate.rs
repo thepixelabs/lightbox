@@ -47,6 +47,13 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         name: "e02_color",
         sql: include_str!("../migrations/0002_e02_color.sql"),
     },
+    // E09 Phase B (T5): the edit state (primary data model) — edit_recipe,
+    // edit_index, history_step, snapshot, xmp_sync (§3.1.1 / §4.1).
+    Migration {
+        number: 3,
+        name: "edit_state",
+        sql: include_str!("../migrations/0003_edit_state.sql"),
+    },
 ];
 
 /// Highest schema version a migration set supports.
