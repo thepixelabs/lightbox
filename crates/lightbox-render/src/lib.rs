@@ -37,6 +37,27 @@ mod planner;
 mod pool;
 mod source;
 
+// ── E05 render node-graph engine (the full §2 module map + frozen §3
+// interfaces) ────────────────────────────────────────────────────────────────
+//
+// SCAFFOLD NOTE (E05 Phase A). The items at this crate's *root* above are the
+// working **E01 one-node Engine seed** — kept in place so every existing
+// consumer (`lightbox-core`, `-shell`, `-cli`, `tools/lbx-perf`) and all four
+// E01 render tests build and pass unchanged. The full E05 engine — the §2
+// module map (`graph/ compile/ node/ exec/ cache/ gpu/ sched/ recover/ source/
+// nodes/ stats`) with the §3 interfaces transcribed as frozen, owner-tagged
+// stubs — lives under [`ng`] ("next-generation") to avoid the many name
+// collisions with the seed (`Engine`, `RenderNode`, `Roi`, `RenderScale`,
+// `RenderRequest`/`State`/`Target`/`Output`, `NodeRegistry`, `SourceImage`,
+// `NodeError`, `RenderError` all differ in shape between the seed and E05 §3).
+//
+// The parallel phase agents (Wave A-core / A-gpu, then B/C/D/E, then F) fill the
+// `ng::*` stubs in strictly-disjoint files; **task F5 promotes `ng` to the crate
+// root, deletes the seed, and rewires the consumers** (exactly where the spec
+// §2 "small named touches" + DoD #5 place the single-node-path deletion). See
+// `docs/plan/epics/E05-deviations.md` for the full file-ownership map.
+pub mod ng;
+
 pub use engine::{
     BackendKind, Engine, RenderOutput, RenderRequest, RenderScale, RenderState, RenderTarget,
     RenderTicket, Roi, ViewportId,

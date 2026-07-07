@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Lightbox contributors
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lightbox-render-testkit"
+description = "E05 render golden/parity/scenario harness + probe nodes (dev/test only — NOT shipped)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The engine under test (probe nodes implement `lightbox_render::ng::RenderNode`).
+lightbox-render.workspace = true
+lightbox-types.workspace = true
+lightbox-jobs.workspace = true
+# f16 working-tile pixels; content hashing for recipe/manifest keys.
+half.workspace = true
+blake3.workspace = true
+# Committed goldens + failure heatmaps are PNGs.
+png.workspace = true
+# Corpus manifest (de)serialization.
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

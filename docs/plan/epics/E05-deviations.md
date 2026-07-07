@@ -122,3 +122,98 @@ Never commit broken.
   rawler crate-banned (`deny.toml`); a planner reading the old parenthetical would guess a banned
   in-process rawler path that does not exist. Blast radius: documentation only — no interface,
   gate, or task changes.
+
+## Phase A — SCAFFOLD (full module map + frozen interfaces) — 2026-07-07
+
+Serial scaffold on `main`. Exit bar re-run and **all five gates green**:
+`cargo build --workspace` · `cargo test --workspace` (every workspace test passes, incl. the
+four E01 render tests — `adapter_smoke`, `gpu_context`, `engine_lifecycle` (10), `display_transform`
+(3) — which ran **on the real Metal adapter**, unchanged) · `cargo clippy --workspace --all-targets
+-- -D warnings` · `cargo fmt --all --check` · `cargo deny check` (advisories/bans/licenses/sources
+all ok). Commit: `E05 Phase A: full module scaffold + testkit crate + frozen interfaces`.
+
+### D-1 (STRUCTURAL, the big one): E01 seed kept at crate root; the E05 §3 surface lives under `pub mod ng`
+
+**What.** The full E05 §2 module map + §3 interfaces are created under
+`crates/lightbox-render/src/ng/` (the "next-generation" engine), **not** at the crate root. The
+working **E01 one-node Engine seed stays exactly where it is** at the crate root
+(`engine.rs node.rs planner.rs gpu.rs pool.rs source.rs error.rs nodes/`), re-exported unchanged.
+
+**Why.** `lightbox-render`'s E01 public API is consumed by **four external crates** —
+`lightbox-core` (`session.rs`, `render_source.rs`, `error.rs`, tests), `lightbox-shell`
+(`lib.rs`, `loupe.rs`), `lightbox-cli` (`main.rs`), `tools/lbx-perf` (`scenarios.rs`, `main.rs`) —
+plus the four in-crate render tests. The E05 §3 surface **redefines the same names with different
+shapes** (`Engine`, `RenderNode`, `RenderRequest`/`State`/`Target`/`Output`, `Roi`, `RenderScale`,
+`NodeRegistry`, `SourceImage`, `NodeError`, `RenderError`). A single crate cannot expose two types
+of the same name; promoting the E05 surface to the root now would break all four consumers and every
+seed test — far beyond a scaffold's remit ("keep the build green; freeze disjoint interfaces"), and
+the task also mandates every new method be an `unimplemented!()` stub, which is incompatible with
+"the E01 tests must still pass" if the root `Engine` becomes a stub. Namespacing under `ng` resolves
+the contradiction: the seed keeps proving E01's functionality; the `ng::*` stubs freeze the E05
+interfaces for the parallel waves in strictly-disjoint files.
+
+**Reconciliation with "generalize the seed IN PLACE."** The seed's *algorithms and patterns* (the
+`display.transform` math, the worker-loop/ticket-store/latest-wins pattern, the texture pool, the
+`GpuContext` shared-device seam) are the reference the wave agents port from; the seed is **retained,
+not clobbered**. Promotion is **task F5's** job — exactly where the spec §2 "small named touches" and
+DoD #5 already place the single-node-path deletion + `lightbox-core`/`-cli` rewiring. Until F5:
+`lightbox_render::Engine` = working seed; `lightbox_render::ng::Engine` = E05 engine (stubbed).
+
+**Blast radius.** Zero source changes outside `crates/lightbox-render/src/{lib.rs,ng/**}` and the two
+manifests + the new testkit crate. No consumer edits, no seed edits, no test edits. Rollback: delete
+`src/ng/` and the `pub mod ng;` line.
+
+### D-2: dependencies added (superset, spec §2/deliverable D)
+
+- `blake3`, `half`, `wide` (task-listed) + **`petgraph`** (NOT in the task's enumerated list, but the
+  spec §2 module map + §1.3 make petgraph the **architecturally-DECIDED** DAG backend — declared so
+  the A8 wave never touches the manifest). All MIT/Apache/CC0/Zlib — `cargo deny licenses` green.
+- `tokio` gains the **`sync`** feature on `lightbox-render` — the §3.6/§3.7 signatures name
+  `broadcast::Receiver<EngineEvent>` and `watch::Receiver<CanvasFrame>` verbatim.
+- **`lightbox-color`** added as a `lightbox-render` dep (superset): the engine-owned `xform.display`
+  node consumes color math from it (E02 guardrail — zero color science in-engine). Referenced via
+  `use lightbox_color as _;` in `ng/nodes/display.rs` so the edge is explicit while the body is
+  stubbed (A-gpu).
+- `wide` is **unused in the scaffold** (declared per deliverable D's "unused-in-scaffold is fine").
+
+### D-3: pre-existing advisory remediated by lockfile bump (not introduced by E05)
+
+`cargo deny check` surfaced **RUSTSEC-2026-0204** (`crossbeam-epoch 0.9.18`, a `fmt::Pointer`
+invalid-deref, transitive via `rayon → rayon-core → crossbeam-deque`). Verified against
+`git show HEAD:Cargo.lock`: **`crossbeam-epoch 0.9.18` + `rayon 1.12.0` were already locked before
+this scaffold** — this is a newly-published advisory going red on `main` independent of E05, not
+something E05 pulled in. Fixed with the advisory's own recommended, **lockfile-only, semver-compatible**
+bump `cargo update -p crossbeam-epoch` (0.9.18 → 0.9.20). No manifest change; no functional change.
+
+### D-4: minor interface adaptations (spec's illustrative sigs → compiling Rust)
+
+- `DeviceProvider::rebuild` return factored through a `pub type DeviceHandles = (Arc<Device>,
+  Arc<Queue>)` alias to satisfy `clippy::type_complexity` (behavior identical to §3.8).
+- `CacheKey::derive` takes a `CacheKeyInputs<'_>` struct rather than 8 positional args (avoids
+  `clippy::too_many_arguments`; same §3.5 ingredients).
+- `Roi::tiles` (spec `-> impl Iterator<Item = TileCoord>`) ships a **placeholder empty iterator**
+  (an `unimplemented!()` body can't inhabit an opaque `impl Iterator` return); `Roi::expand` /
+  `intersect` are `unimplemented!("A2")`. A2 fills the real 256² algebra.
+- `SourceColorimetry` / `OutputColorimetry` / `SourceKind{Raw{cfa}}` are **opaque placeholder tags**
+  in `ng/colorimetry.rs` (the engine holds zero color science). To be reconciled with
+  `lightbox-color`/E02 descriptors when `xform.display` lands (A-gpu) — noted in-code.
+- Frozen shared seams placed in dedicated files (reshaping needs a deviation): `ng/exec/backend.rs`
+  (`trait Backend` — the R8 exec↔backend seam: `CacheKey` + graph node in, `TileHandle` out) and
+  `ng/tile.rs` (`TileHandle`/`TileView`/`CpuTileView`/`PixelBuf` currency).
+
+### FILE-OWNERSHIP MAP (keep the parallel waves strictly disjoint)
+
+All E05 modules are under `crates/lightbox-render/src/ng/`. Every method is an `unimplemented!("<task>
+(<owner>): …")` stub or a spec-default; the crate compiles, tests are green, nothing calls a stub.
+
+| Wave / owner | Files it owns (fills the stubs) |
+|---|---|
+| **A-core** | `ng/types.rs` (A2) · `ng/node/{mod,param,registry}.rs` (A3/A4/A5) · `ng/graph/mod.rs` (A8) · `ng/compile/mod.rs` (A11; D extends) · `ng/exec/mod.rs` (A9/A12) · `ng/exec/cpu/mod.rs` (A14) · `ng/cache/mod.rs` *type surface* (A-core) · `ng/stats.rs` (A15) · `ng/engine.rs` + `ng/config.rs` + `ng/error.rs` (A1/A12) · testkit `compare.rs` + `corpus.rs` GoldenCase/first golden (A16) |
+| **A-gpu** | `ng/gpu/mod.rs` (A6/A7) · `ng/exec/gpu/mod.rs` (A9) · `ng/source/mod.rs` upload path (A10) · `ng/sched/mod.rs` canvas double-buffer (A13) · `shaders/` (A6) · `ng/nodes/{decoded,resize,display}.rs` (engine-owned node bodies) |
+| **B** | `ng/cache/mod.rs` *real impl* (VRAM+RAM tiers, LRU, pin, integrity; B1–B4,B7) · `CacheKey` derivation+propagation (B2) · `ng/sched/mod.rs` latest-wins coalescing (B6) · cache benches (B8) |
+| **C** | `ng/exec/mod.rs` tiling layered on the topo walk (ROI plan, scale/resize, 256² tiles, visible-first, 1:1, progressive ladder, VRAM budget, F32 path, priority lanes, soak; C1–C10) · testkit `probes.rs` `BlurRProbe`/`AccumProbe` · `scenario.rs` soak (C10) |
+| **D** | `ng/compile/mod.rs` per-PV templates + PV plumbing + PV manifest (D1–D5) · testkit per-PV golden matrix (`corpus::run_matrix`, D3) |
+| **E** | `ng/recover/mod.rs` (detection, rebuild, re-warm, degradation; E1–E4) · CPU parity gate (E6) · degraded-contract enforcement (E7) · export-safety (E8); `ng/engine.rs` `events`/`active_backend` wiring |
+| **F** | `lightbox-core` wiring + `lightbox-cli render` + engine book (docs) + fuzz targets + `scenario.rs` perf harness (F1); **F5 promotes `ng` → crate root, deletes the seed, rewires consumers** |
+| **Scaffold-frozen** (deviation to touch) | `ng/exec/backend.rs` (`trait Backend`, R8 seam) · `ng/tile.rs` (tile currency) |
+| **Retained seed** (no wave owner; F5 deletes) | crate-root `engine.rs node.rs planner.rs gpu.rs pool.rs source.rs error.rs nodes/**` — **do not modify** unless your task explicitly ports from it |
