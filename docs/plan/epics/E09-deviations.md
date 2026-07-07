@@ -212,6 +212,96 @@ confirmed clean at review time (`grep` found no `EditHub` in `lightbox-core`, no
   `WriterHandle::with_txn` call (the same primitive E01's existing kill-9 harness
   already exercises for other tables), so the harness extension is additive.
 
+### B-6 — T8/T11/T12 landed (the follow-up this section named): `EditHub`, `Command::Edit`, the CLI, the kill-9 edit-commit loop
+
+**What shipped.** `crates/lightbox-core/src/edit_hub.rs` (`EditHub`: registry of
+open images, `Arc<Recipe>` working snapshots, gesture lifecycle D2, the full
+`EditCommand` dispatcher); `Command::Edit(EditCommand)` (24 variants, spec §3.4,
+in `command.rs`) + `Event::{EditWorkingChanged, EditCommitted, XmpDivergenceChanged}`
+(`event.rs`); `Session::edits()` + auto-commit in `Session::close` (before the
+drain/backup) + the dispatcher's `Command::Edit` arm (`session.rs`); additive
+`Queries` methods (`edit_state`, `edit_history`, `snapshots`, `edit_badges`,
+`xmp_status`, `presets`, `preset_preview_recipe`); `lightbox-cli` subcommands
+`edit set/get`, `history`, `step-to`, `undo`, `redo`, `clear-history`,
+`snapshot create/restore/list/delete/rename`, `preset
+create/list/apply/import/export/delete/rename`, `xmp write/read/status`
+(`crates/lightbox-cli/src/edit.rs`); the kill-9 edit-commit loop extension
+(`crates/lightbox-catalog/tests/fault_injection.rs`); `reopen_restores_recipe`
+incl. file-move + file-rename legs, and the working-set-replacement auto-commit
+leg (`crates/lightbox-core/tests/reopen_restores_recipe.rs`).
+
+**Deviation 1 — `working_recipe` is "practically lock-free", not literally
+atomic-swap.** T8's spec text says "`Arc` snapshot (atomic swap)". No `arc-swap`
+(or other new) crate was added (cargo-deny surface stays exactly as before);
+`EditHub`'s per-image entry uses `RwLock<Arc<Recipe>>` — readers take a read lock
+(never blocked by other readers), and the writer's critical section is a single
+pointer swap after cloning the just-mutated `Recipe`, a few nanoseconds. This is
+the R8-anticipated "escape hatch" territory (per-param dirty tracking) if
+profiling ever shows the per-`update_gesture` `Recipe` clone costing real time —
+not exercised here, since M1 recipes are small. Proven by a contention smoke test
+(`tests/edit_hub.rs::working_recipe_reads_are_lock_free_under_contention`), not a
+loom model-checker (loom is not in the dependency graph).
+
+**Deviation 2 — `Queries::xmp_status` takes `&[ImageId]`, not `&[AssetId]`.** The
+spec signature is `xmp_status(&self, assets: &[AssetId]) -> Result<Vec<(AssetId,
+DivergenceStatus)>>`. `lightbox-catalog`'s `ReaderHandle` only resolves
+image→asset (`image_detail(image).asset`), never asset→image (no such DAO exists
+today), so accepting `AssetId` directly would need a new catalog read method for
+a seam only this one query uses. `Queries::xmp_status` instead takes `ImageId`
+(what every other E09 caller already has in hand) and still returns
+`(AssetId, DivergenceStatus)` pairs. Reversal: an additive
+`ReaderHandle::images_for_asset` DAO, a small change, if a caller ever only has
+`AssetId`s (E15 export, maybe).
+
+**Deviation 3 — `sync::status(cat, asset, original)` (spec §3.5, deferred at T17
+to "once the `xmp_sync` DAO lands") is implemented as `EditHub::compute_status`,
+not as a free function on `lightbox_meta::xmp::sync`.** The pure state machine
+(`classify`) still lives in `lightbox-meta` untouched; the entry point that reads
+the `xmp_sync` row and stats/hashes the sidecar needed `EditStore`'s catalog
+handle plus `lightbox-meta`'s sidecar reader, i.e. exactly what `EditHub` already
+holds — adding it there (instead of a new `lightbox-meta`↔`lightbox-catalog`
+edge, which `lightbox-meta` must not gain per its own crate docs) kept the
+dependency direction intact. `Queries::xmp_status` and the `RefreshXmpStatus`/
+`ReadMetadata`/`WriteMetadata` dispatch arms all route through it.
+
+**Deviation 4 — `SyncSettings` is spawned as a `Class::Background` job by
+`session.rs`'s dispatcher (not by `EditHub::dispatch`), with `EditHub::dispatch`
+itself keeping a synchronous-fallback arm for the same variant.** Matches the
+task brief's "spawns as a job with a graceful synchronous fallback" literally:
+the live command-bus path (`dispatch_loop`) pattern-matches
+`Command::Edit(EditCommand::SyncSettings{..})` before the generic
+`Command::Edit(cmd)` arm and spawns it via `ctx.jobs.spawn_blocking(Class::
+Background, …)` (mirrors `spawn_backup`/`spawn_import`); a direct
+`hub.dispatch(EditCommand::SyncSettings{..})` call (e.g. from a test, or a
+future caller without a job system) still runs it synchronously and correctly —
+`sync_to`'s own ~64/txn chunking is unchanged either way.
+
+**Deviation 5 — `reopen_restores_recipe` resolves the moved/renamed file via
+`EditStore::image_for_content_hash` directly, not via `import_add_in_place`
+pointed at the new location.** E04 (the working-set loader that would run
+`import_add_in_place`-style find-or-create-by-hash *and* update the existing
+asset row's `path`/`filename` hint on a move) is not built yet (handoff board:
+"📋 Specced, not built"); today's `CatalogTxn::insert_assets` is a pure dup-skip
+on `content_hash` with no path-hint update (that behavior is explicitly E04's,
+per this spec's own §4.2: "Row find-or-create is E04's loader … `image_for_
+content_hash` … is the E09 seam it consumes"). The test therefore hashes the
+moved/renamed file itself (`lightbox_decode::hash_file`) and resolves it through
+`EditStore::image_for_content_hash` — the actual E09-owned mechanism E04 will
+call — rather than simulating a drag-and-drop through a loader that doesn't
+exist. Documented in the test's own module doc; not a gap in the §3.1.1 promise
+this epic owns, since the content-hash restore chain itself (`file → ContentHash
+→ asset → default image → edit_recipe`) is exactly what's proven, end to end.
+
+**Not wired (named, intentionally out of T8/T11/T12's scope).** CLI subcommands
+for `sync`/`paste`/`previous`/`apply-preset-to-many`/`reset` (the `EditCommand`
+dispatcher handles all of these; only their CLI surface is unwired — a UI/E08
+concern, and the 500-target-against-SQLite perf number named in E-5 stays open
+until such a caller exists). `EditHub::copy_settings` (the non-durable copy-
+buffer setter `PasteSettings` reads) has no CLI subcommand either, for the same
+reason. XMP auto-write scheduling (`SetAutoWriteXmp` flips an in-process
+`AtomicBool`; the debounced `Class::Background` auto-write job itself, using the
+already-shipped `XmpWriteCoalescer`, is E06/E08 wiring, per T22's own scope).
+
 ---
 
 ## Phases C + D — XMP substrate + `crs:`/`lb:` mapping layer (T13–T22)

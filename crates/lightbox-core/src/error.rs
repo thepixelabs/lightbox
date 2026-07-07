@@ -19,6 +19,19 @@ pub enum CoreError {
     /// Filesystem-level failure outside the catalog.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// The E09 edit store (`lightbox-edit`) failed: recipe decode, a typed
+    /// history/snapshot error, or a schema-too-new doc.
+    #[error(transparent)]
+    Edit(#[from] lightbox_edit::StoreError),
+    /// A recipe/delta failed to apply or validate (`EditHub::update_gesture`).
+    #[error(transparent)]
+    Recipe(#[from] lightbox_edit::RecipeError),
+    /// The develop-preset store failed (open/scan/create/import/export).
+    #[error(transparent)]
+    Preset(#[from] lightbox_edit::PresetError),
+    /// The settings-transfer engine (sync/paste/previous/reset) failed.
+    #[error(transparent)]
+    Transfer(#[from] lightbox_edit::TransferError),
     /// Invariant violation inside the core (a bug).
     #[error("internal core error: {0}")]
     Internal(String),

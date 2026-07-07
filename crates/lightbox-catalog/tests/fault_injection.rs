@@ -7,19 +7,39 @@
 //! `LIGHTBOX_FAULT_CHILD_DIR` set, filtered to [`fault_child`]) performs
 //! randomized small write transactions in a tight loop, journaling every
 //! **committed** transaction's ids to a side file *after* the commit
-//! returns (rating overwrites additionally journal a pre-commit `intent`
-//! line, so a kill in the commit→journal window cannot masquerade as a lost
-//! or phantom write). The parent SIGKILLs the child at a random moment,
-//! reopens the catalog (which runs `PRAGMA quick_check`), and verifies:
+//! returns (rating overwrites and edit commits additionally journal a
+//! pre-commit `intent` line, so a kill in the commit→journal window cannot
+//! masquerade as a lost or phantom write). The parent SIGKILLs the child at
+//! a random moment, reopens the catalog (which runs `PRAGMA quick_check`),
+//! and verifies:
 //!
 //! 1. **0 corruptions** — reopen succeeds; `quick_check` is clean;
-//! 2. **0 lost committed transactions** — every journaled asset id exists
-//!    and every image's rating is explainable by the journal (the last
-//!    `done` value, or a trailing `intent` whose commit raced the kill).
+//! 2. **0 lost committed transactions** — every journaled asset id exists,
+//!    every image's rating is explainable by the journal (the last `done`
+//!    value, or a trailing `intent` whose commit raced the kill), and
+//!    (E09 T12) every image's edit-recipe `head_seq`/doc is explainable the
+//!    same way, with its `history_step` row at that `seq` present too (the
+//!    §4.1 same-txn invariant: `edit_recipe`/`history_step`/`edit_index`
+//!    mutate together or not at all).
 //!
 //! Iterations: 50 by default (PR gate); the nightly workflow sets
 //! `LIGHTBOX_FAULT_ITERS=1000` (spec §6, DoD §8.3). The run ends with the
 //! restore-from-backup drill (backup → unzstd → open → integrity, spec §6).
+//!
+//! # E09 T12 — the edit-commit loop
+//!
+//! A third randomized operation (alongside asset-insert and rating-
+//! overwrite) drives the **exact same three/four-DAO commit protocol**
+//! `lightbox_edit::EditStore::commit` uses (spec §4.1-2):
+//! `truncate_history_after` → `append_history_step` → `upsert_edit_recipe`
+//! → `rebuild_edit_index`, all in one `WriterHandle::with_txn` closure. It
+//! is driven at the `lightbox-catalog` DAO layer directly (synthetic
+//! payload bytes, not real CBOR) rather than through `lightbox-edit`, since
+//! this crate cannot depend on it (that would be a dependency cycle:
+//! `lightbox-edit` depends on `lightbox-catalog`) — but the DAOs treat
+//! `doc`/`delta`/`inverse`/`op` as opaque `BLOB`s regardless of caller, so
+//! this exercises the identical write path and identical atomicity
+//! guarantee `EditStore::commit` relies on.
 //!
 //! # The negative control we do NOT ship (documentation, not code)
 //!
@@ -41,7 +61,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use lightbox_catalog::{BackupOpts, Catalog, IntegrityStatus, NewAsset};
-use lightbox_types::{ContentHash, FolderId, ImageId, Orientation};
+use lightbox_types::{ContentHash, FolderId, ImageId, Orientation, PV_M0};
 
 const CHILD_DIR_ENV: &str = "LIGHTBOX_FAULT_CHILD_DIR";
 const ITERS_ENV: &str = "LIGHTBOX_FAULT_ITERS";
@@ -84,10 +104,16 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut counter = 0u64;
     let mut rng = fastrand::Rng::with_seed(run_id);
     let mut my_images: Vec<i64> = Vec::new();
+    // Per-image local head_seq (E09 T12): only ever incremented by THIS
+    // child, on images THIS child created (mirrors the rating branch's
+    // `my_images` scoping) — so no cross-process resumption bookkeeping is
+    // needed; a fresh child never touches an older child's images.
+    let mut edit_head: HashMap<i64, u64> = HashMap::new();
 
     // Loop until killed.
     loop {
-        if rng.u8(..) < 200 || my_images.is_empty() {
+        let roll = rng.u8(..);
+        if roll < 200 || my_images.is_empty() {
             // Insert a small batch of assets + default images.
             let n = rng.u64(1..=4);
             let batch: Vec<NewAsset> = (0..n)
@@ -109,7 +135,7 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             line.push('\n');
             log(line)?;
             my_images.extend(images.iter().map(|i| i.0));
-        } else {
+        } else if roll < 228 {
             // Overwrite a rating on an image we created earlier: intent
             // before the txn, done after the commit.
             let image = my_images[rng.usize(..my_images.len())];
@@ -119,6 +145,33 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 .writer()
                 .with_txn(move |txn| txn.set_rating(ImageId(image), Some(rating)))?;
             log(format!("done {image}:{rating}\n"))?;
+        } else {
+            // E09 T12: an edit-commit — the exact §4.1-2 protocol
+            // (truncate → append step → upsert doc → rebuild index), one
+            // WAL txn. `value` stands in for a real CBOR recipe/delta
+            // (this crate never decodes those bytes).
+            let image = my_images[rng.usize(..my_images.len())];
+            let prev_seq = *edit_head.get(&image).unwrap_or(&0);
+            let new_seq = prev_seq + 1;
+            let value = rng.u32(..);
+            let payload = value.to_le_bytes().to_vec();
+            log(format!("edit_intent {image}:{new_seq}:{value}\n"))?;
+            catalog.writer().with_txn(move |txn| {
+                txn.truncate_history_after(ImageId(image), prev_seq)?;
+                txn.append_history_step(
+                    ImageId(image),
+                    new_seq,
+                    &payload,
+                    &payload,
+                    &payload,
+                    None,
+                )?;
+                txn.upsert_edit_recipe(ImageId(image), PV_M0, 1, &payload, new_seq)?;
+                txn.rebuild_edit_index(ImageId(image), true, false, false, None, Some("color"))?;
+                Ok(())
+            })?;
+            log(format!("edit_done {image}:{new_seq}:{value}\n"))?;
+            edit_head.insert(image, new_seq);
         }
     }
 }
@@ -231,6 +284,17 @@ struct RatingState {
     trailing_intents: Vec<u8>,
 }
 
+/// E09 T12: the same intent/done tolerance as [`RatingState`], keyed by
+/// `(seq, value)` pairs instead of a single scalar.
+#[derive(Default)]
+struct EditCommitState {
+    /// `(seq, value)` of the last `edit_done` line (a proven commit).
+    last_done: Option<(u64, u32)>,
+    /// `(seq, value)` seen after the last `edit_done` — commits that may or
+    /// may not have landed before a kill.
+    trailing_intents: Vec<(u64, u32)>,
+}
+
 /// Replays the journal and checks every committed txn is present. Returns
 /// the number of journal lines read.
 fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usize {
@@ -241,11 +305,12 @@ fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usi
     let lines: Vec<&str> = journal.lines().collect();
     let mut expected_assets: Vec<(i64, i64)> = Vec::new();
     let mut ratings: HashMap<i64, RatingState> = HashMap::new();
+    let mut edits: HashMap<i64, EditCommitState> = HashMap::new();
     for (idx, line) in lines.iter().enumerate() {
         let last = idx + 1 == lines.len();
         // A kill can tear at most the final line; anything malformed earlier
         // is a harness bug.
-        let ok = parse_line(line, &mut expected_assets, &mut ratings);
+        let ok = parse_line(line, &mut expected_assets, &mut ratings, &mut edits);
         if !ok {
             assert!(
                 last,
@@ -286,6 +351,80 @@ fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usi
             detail.rating
         );
     }
+
+    // E09 T12: the edit-commit loop — same tolerance, plus the §4.1
+    // same-txn invariant (edit_recipe.head_seq's history_step actually
+    // exists, with matching payload bytes).
+    for (image, state) in &edits {
+        let row = reader.edit_state_row(ImageId(*image)).unwrap_or_else(|e| {
+            panic!("iteration {iteration}: reading edit_recipe for image {image}: {e}")
+        });
+        match row {
+            None => {
+                assert!(
+                    state.last_done.is_none(),
+                    "iteration {iteration}: image {image} has a journaled DONE edit \
+                     commit (seq {:?}) but no edit_recipe row exists at all — \
+                     a committed edit was lost",
+                    state.last_done
+                );
+            }
+            Some(r) => {
+                let value = u32::from_le_bytes(r.doc[..4].try_into().unwrap_or_else(|_| {
+                    panic!("iteration {iteration}: image {image} edit_recipe.doc malformed")
+                }));
+                let allowed: Vec<(u64, u32)> = match state.last_done {
+                    Some(done) => std::iter::once(done)
+                        .chain(state.trailing_intents.iter().copied())
+                        .collect(),
+                    None => state.trailing_intents.to_vec(),
+                };
+                assert!(
+                    allowed.contains(&(r.head_seq, value)),
+                    "iteration {iteration}: image {image} edit_recipe head_seq={} value={value} \
+                     not explainable by the journal (allowed {allowed:?}) — a committed \
+                     edit was lost",
+                    r.head_seq,
+                );
+
+                // Same-txn invariant (§4.1-1): whatever head_seq the doc
+                // landed at, the matching history_step row must exist too
+                // — they were written in the SAME WAL txn, so SQLite's
+                // atomicity means it is impossible for one to persist
+                // without the other.
+                let steps = reader
+                    .history_page(ImageId(*image), None, 1)
+                    .unwrap_or_else(|e| {
+                        panic!("iteration {iteration}: reading history_step for image {image}: {e}")
+                    });
+                assert_eq!(
+                    steps.len(),
+                    1,
+                    "iteration {iteration}: image {image} has an edit_recipe row \
+                     (head_seq={}) but no history_step row — the §4.1 same-txn \
+                     invariant was violated",
+                    r.head_seq,
+                );
+                assert_eq!(
+                    steps[0].seq, r.head_seq,
+                    "iteration {iteration}: image {image} newest history_step seq {} \
+                     != edit_recipe.head_seq {} — torn commit",
+                    steps[0].seq, r.head_seq,
+                );
+                let step_value =
+                    u32::from_le_bytes(steps[0].delta[..4].try_into().unwrap_or_else(|_| {
+                        panic!(
+                            "iteration {iteration}: image {image} history_step payload malformed"
+                        )
+                    }));
+                assert_eq!(
+                    step_value, value,
+                    "iteration {iteration}: image {image} history_step payload {step_value} \
+                     != edit_recipe.doc payload {value} — torn commit",
+                );
+            }
+        }
+    }
     lines.len()
 }
 
@@ -294,10 +433,21 @@ fn parse_line(
     line: &str,
     expected_assets: &mut Vec<(i64, i64)>,
     ratings: &mut HashMap<i64, RatingState>,
+    edits: &mut HashMap<i64, EditCommitState>,
 ) -> bool {
     fn pair(s: &str) -> Option<(i64, u8)> {
         let (a, b) = s.split_once(':')?;
         Some((a.parse().ok()?, b.parse().ok()?))
+    }
+    fn triple(s: &str) -> Option<(i64, u64, u32)> {
+        let mut it = s.split(':');
+        let image = it.next()?.parse().ok()?;
+        let seq = it.next()?.parse().ok()?;
+        let value = it.next()?.parse().ok()?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some((image, seq, value))
     }
     if let Some(rest) = line.strip_prefix("assets ") {
         let mut parsed = Vec::new();
@@ -311,6 +461,24 @@ fn parse_line(
             parsed.push((a, i));
         }
         expected_assets.extend(parsed);
+        true
+    } else if let Some(rest) = line.strip_prefix("edit_intent ") {
+        let Some((image, seq, value)) = triple(rest) else {
+            return false;
+        };
+        edits
+            .entry(image)
+            .or_default()
+            .trailing_intents
+            .push((seq, value));
+        true
+    } else if let Some(rest) = line.strip_prefix("edit_done ") {
+        let Some((image, seq, value)) = triple(rest) else {
+            return false;
+        };
+        let state = edits.entry(image).or_default();
+        state.last_done = Some((seq, value));
+        state.trailing_intents.clear();
         true
     } else if let Some(rest) = line.strip_prefix("intent ") {
         let Some((image, rating)) = pair(rest) else {

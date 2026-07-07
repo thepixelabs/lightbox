@@ -3,6 +3,7 @@
 
 //! [`CoreConfig`] — knobs for [`crate::Core::start`].
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use lightbox_jobs::JobConfig;
@@ -29,6 +30,13 @@ pub struct CoreConfig {
     /// How long `Session::close` waits for in-flight command jobs
     /// (cancelled imports flushing their final stats) before backing up.
     pub close_wait: Duration,
+    /// Root directory for the develop-preset store (spec §3.7 / D3:
+    /// app-level files, not catalog rows). `None` resolves the platform
+    /// default (`<config>/Lightbox/presets`) — but only lazily, on first
+    /// preset use (`EditHub`), so a session that never touches presets
+    /// never creates the directory. Tests override this to a tempdir to
+    /// stay hermetic.
+    pub preset_dir: Option<PathBuf>,
 }
 
 impl Default for CoreConfig {
@@ -40,6 +48,7 @@ impl Default for CoreConfig {
             backup_max_age: Duration::from_secs(24 * 60 * 60),
             backup_retain: 10,
             close_wait: Duration::from_secs(10),
+            preset_dir: None,
         }
     }
 }

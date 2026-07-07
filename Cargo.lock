@@ -1772,9 +1772,11 @@ version = "0.1.0"
 dependencies = [
  "fastrand",
  "lightbox-catalog",
+ "lightbox-decode",
  "lightbox-edit",
  "lightbox-ingest",
  "lightbox-jobs",
+ "lightbox-meta",
  "lightbox-preview",
  "lightbox-render",
  "lightbox-types",

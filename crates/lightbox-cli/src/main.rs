@@ -48,12 +48,16 @@ use lightbox_types::{FolderId, ImageId, PV_M0};
 
 // E02 Phase H (H2): the decode → color → look reference subcommands.
 mod e02;
+// E09 Phase B follow-up (T11): `edit`/`history`/`step-to`/`undo`/`redo`/
+// `snapshot`/`preset`/`xmp` subcommands over the `Command::Edit`/`EditHub`
+// seam.
+mod edit;
 // E02 Phase H (H6/H7): the seam-handoff contract + threat-model notes, as
 // rustdoc committed alongside the crates (no separate report .md).
 mod seams;
 
 /// Exit code for usage errors (bad flags, missing arguments).
-const EXIT_USAGE: u8 = 2;
+pub(crate) const EXIT_USAGE: u8 = 2;
 /// Exit code when the catalog is corrupt or refused (`check` — T27 AC).
 const EXIT_CORRUPT: u8 = 3;
 
@@ -77,6 +81,30 @@ USAGE:
   lightbox-cli profile install --catalog <dir> --file <path.dcp|.lblook>
   lightbox-cli profile list    --catalog <dir> [--json]
   lightbox-cli look inspect    --file <path.lblook> [--json]
+
+  E09 edit state / history / presets / XMP (headless):
+  lightbox-cli edit set   --catalog <dir> --image <id> <param>=<value> [<param>=<value> ...]
+  lightbox-cli edit get   --catalog <dir> --image <id> [--json]
+  lightbox-cli history    --catalog <dir> --image <id> [--json]
+  lightbox-cli step-to    --catalog <dir> --image <id> --seq <n>
+  lightbox-cli undo       --catalog <dir> --image <id>
+  lightbox-cli redo       --catalog <dir> --image <id>
+  lightbox-cli clear-history --catalog <dir> --image <id>
+  lightbox-cli snapshot create  --catalog <dir> --image <id> --name <name>
+  lightbox-cli snapshot restore --catalog <dir> --image <id> --id <snapshot-id>
+  lightbox-cli snapshot list    --catalog <dir> --image <id> [--json]
+  lightbox-cli snapshot delete  --catalog <dir> --image <id> --id <snapshot-id>
+  lightbox-cli snapshot rename  --catalog <dir> --image <id> --id <snapshot-id> --name <name>
+  lightbox-cli preset create --catalog <dir> --image <id> --name <name> [--group <g>] [--groups <g1,g2,...>]
+  lightbox-cli preset list   --catalog <dir> [--json]
+  lightbox-cli preset apply  --catalog <dir> --image <id> --id <preset-id>
+  lightbox-cli preset import --catalog <dir> <file.xmp> [<file2.xmp> ...]
+  lightbox-cli preset export --catalog <dir> --id <preset-id> --out <path>
+  lightbox-cli preset delete --catalog <dir> --id <preset-id>
+  lightbox-cli preset rename --catalog <dir> --id <preset-id> --name <name>
+  lightbox-cli xmp write  --catalog <dir> --image <id>
+  lightbox-cli xmp read   --catalog <dir> --image <id>
+  lightbox-cli xmp status --catalog <dir> --image <id> [--json]
 
 EXIT CODES:
   0 success | 1 failure | 2 usage error | 3 catalog corrupt/refused
@@ -146,6 +174,16 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
         "render-ref" => e02::cmd_render_ref(rest),
         "profile" => e02::cmd_profile(rest),
         "look" => e02::cmd_look(rest),
+        // E09 Phase B follow-up (T11): edit state / history / presets / XMP.
+        "edit" => edit::cmd_edit(rest),
+        "history" => edit::cmd_history(rest),
+        "step-to" => edit::cmd_step_to(rest),
+        "undo" => edit::cmd_undo(rest),
+        "redo" => edit::cmd_redo(rest),
+        "clear-history" => edit::cmd_clear_history(rest),
+        "snapshot" => edit::cmd_snapshot(rest),
+        "preset" => edit::cmd_preset(rest),
+        "xmp" => edit::cmd_xmp(rest),
         "--help" | "-h" | "help" => {
             print!("{USAGE}");
             Ok(0)
@@ -214,6 +252,23 @@ impl Flags {
             }
         }
         false
+    }
+
+    /// Consumes every remaining bare (non-`--flag`) argument, in order (E09
+    /// T11: `edit set exposure=+1.0 contrast=5.0`, `preset import a.xmp
+    /// b.xmp`). Leaves flags untouched for subsequent `take_value`/
+    /// `take_switch` calls.
+    pub(crate) fn take_positionals(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for slot in &mut self.args {
+            if let Some(s) = slot {
+                if !s.starts_with("--") {
+                    out.push(s.clone());
+                    *slot = None;
+                }
+            }
+        }
+        out
     }
 
     /// Errors on any argument no subcommand consumed.

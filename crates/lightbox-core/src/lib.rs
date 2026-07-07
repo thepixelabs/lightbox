@@ -22,6 +22,9 @@
 mod check;
 mod command;
 mod config;
+// E09 Phase B follow-up (T8): `EditHub` — the edit-state session registry +
+// durable command dispatcher (spec §3.4).
+mod edit_hub;
 mod error;
 mod event;
 pub mod observability;
@@ -31,12 +34,26 @@ mod render_source;
 mod session;
 
 pub use check::{check_catalog, CatalogCheck};
-pub use command::{Command, CommandTicket};
+pub use command::{Command, CommandTicket, EditCommand};
 pub use config::CoreConfig;
+pub use edit_hub::EditHub;
 pub use error::{CoreError, Result};
 pub use event::{ChangeSet, Event};
 pub use queries::Queries;
 pub use session::{CloseOpts, ClosePolicy, CloseReport, Core, Session};
+
+// The E09 edit-state vocabulary (spec §3.4) — re-exported so callers (the
+// CLI, tests, the eventual shell) get `EditState`/`HistoryStepMeta`/
+// `SnapshotMeta`/preset types/`Recipe` straight off `lightbox-core` without
+// a separate `lightbox-edit` dependency for read-path types. `Recipe` itself
+// and the param vocabulary stay owned by `lightbox-edit` (frozen surface,
+// spec §2); mutation still only ever happens through `Command::Edit`/
+// `EditHub`.
+pub use lightbox_edit::{
+    EditState, HistoryStepMeta, ParamDelta, ParamGroup, ParamId, ParamSubset, ParamValue, PresetId,
+    PresetMeta, Recipe, RecipeRead, SnapshotMeta, StepLabel,
+};
+pub use lightbox_meta::xmp::sync::DivergenceStatus;
 
 // Reader DTOs (spec §3.8: "the reader types simply re-exported") and the
 // report/option types shared with the import pipeline. No SQL, no rusqlite
@@ -44,7 +61,7 @@ pub use session::{CloseOpts, ClosePolicy, CloseReport, Core, Session};
 // headless callers (the CLI's `check`) can classify open failures without a
 // `lightbox-catalog` dependency of their own.
 pub use lightbox_catalog::{
-    BackupReport, CatalogCounts, CatalogError, FolderNode, ImageDetail, ImageQuery, ImageSummary,
-    IntegrityStatus, Page, PageCursor, SortOrder,
+    BackupReport, CatalogCounts, CatalogError, EditBadge, FolderNode, ImageDetail, ImageQuery,
+    ImageSummary, IntegrityStatus, Page, PageCursor, SortOrder,
 };
 pub use lightbox_ingest::{ImportOptions, ImportReport};

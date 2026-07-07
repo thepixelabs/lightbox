@@ -1,6 +1,6 @@
 # Lightbox — Session Handoff & Resume Guide
 
-_Last updated 2026-07-06. This document lets any fresh session (any model) resume the program without prior context. Read this first, then only what it points to._
+_Last updated 2026-07-07. This document lets any fresh session (any model) resume the program without prior context. Read this first, then only what it points to._
 
 ## 1. What this project is
 
@@ -19,7 +19,7 @@ _Last updated 2026-07-06. This document lets any fresh session (any model) resum
 | **E01 Foundation** | ✅ **BUILT & independently verified** (~23k LOC, commits `4ff768f…57039a0`) |
 | **E02 Decode & color foundation** | ✅ **BUILT & independently verified** (2026-07-06, commits `a495224…35474a3`) — parallel-wave execution, all 5 gates green |
 | **E05 Render node-graph engine** | ✅ **BUILT & verified** (2026-07-07, commits `7f1f0b7…c49cb29`) — Phases A–F; all four §10.1 gates + CPU/GPU parity + per-PV immutability green on real Metal; app renders through `ng` engine (E01 seed retired from live path). Deferred (tracked, `E05-deviations.md`): Phase-C tiling not yet wired into live `Engine::submit` (GPU renders at native res), physical seed deletion, non-macOS GPU CI legs, reference-runner p95. Built under API instability — Wave-DF agents lost to connection errors; Phase D salvaged from a stranded worktree, Phase F rebuilt. |
-| E09 Edit state/history/presets/XMP | 🔶 **PARTIAL, on `main`** — A (recipe model), C (XMP/quick-xml), D (crs/lb mapping), E (presets) done & green; **Phase B store layer** (T5-DAOs edit_recipe/edit_index/history_step/snapshot/xmp_sync DAOs, T6 `EditStore`/read surface, T7 `EditSession` gesture lifecycle, T9 history reconstruction incl. Undo/Redo, T10 snapshots) **BUILT & green** (2026-07-07; all five exit-bar gates pass). **Still missing:** T8 (`EditHub` in `lightbox-core`), T11 (`lightbox-cli edit/history/snapshot/preset/xmp` subcommands), T12 (kill-9 auto-persist fault-injection extension) — a scoped follow-up; seams are clean (`EditStore`/`EditSession`/`PendingCommit` ready to wrap). See `epics/E09-deviations.md` Phase B section. |
+| E09 Edit state/history/presets/XMP | ✅ **BUILT** (2026-07-07) — A (recipe model), C (XMP/quick-xml), D (crs/lb mapping), E (presets), Phase B store layer (T5-DAOs, T6 `EditStore`, T7 `EditSession`, T9 history, T10 snapshots), and the T8/T11/T12 follow-up all done & green. **T8:** `EditHub` in `lightbox-core` (`crates/lightbox-core/src/edit_hub.rs`) — session registry, `Arc<Recipe>` working snapshots (practically lock-free reads via `RwLock<Arc<Recipe>>`, proven by a contention smoke test), `Session::edits()`, `Event::{EditWorkingChanged, EditCommitted, XmpDivergenceChanged}`, auto-commit on `EditHub::close`/`Session::close`. **T11:** `Command::Edit(EditCommand)` (24 variants) + dispatcher arm, additive `Queries` methods, `lightbox-cli` subcommands `edit set/get`, `history`, `step-to`, `undo`, `redo`, `clear-history`, `snapshot create/restore/list/delete/rename`, `preset create/list/apply/import/export/delete/rename`, `xmp write/read/status` (`crates/lightbox-cli/src/edit.rs`) — hand-tested end to end (import → edit set → history → step-to → snapshot create/restore → preset → xmp all exit 0; malformed `edit set` exits 2). **T12 (load-bearing):** the E01 kill-9 fault-injection harness extended with a real edit-commit loop (`crates/lightbox-catalog/tests/fault_injection.rs`) — genuine `SIGKILL`, 150 iterations run clean (0 corruptions, 0 lost committed edits, same-txn atomicity checked); `reopen_restores_recipe` (`crates/lightbox-core/tests/reopen_restores_recipe.rs`) proves the file-move and file-rename legs via `EditStore::image_for_content_hash` (E04's loader isn't built yet, so this drives the actual E09-owned content-hash restore mechanism directly rather than simulating a drag-and-drop — documented in the test), plus the working-set-replacement auto-commit leg. All five exit-bar gates green workspace-wide. Deviations (lock-free wording, `xmp_status` keyed by `ImageId` not `AssetId`, `sync::status` landing as `EditHub::compute_status`, `SyncSettings` job-spawn plus a sync fallback, the reopen test's E04 scope note) recorded in `epics/E09-deviations.md` §B-6. Not wired (named, out of scope): CLI surface for sync/paste/previous/reset (dispatcher supports them; no subcommand) and XMP auto-write scheduling (E06/E08). |
 | E03, E04, E06–E17 | 📋 Specced, not built (see §3) |
 
 **E01 delivered:** 16-crate workspace; 3-OS CI + license gate (GPL-canary tested); crash-safe SQLite store (kill -9 fault-injection verified); jobs system; headless `lightbox-core` façade; decode probe (CR2/CR3/NEF/ARW/RAF/ORF/DNG, permissive in-crate walkers — rawler was dropped from probe for LGPL); embedded-preview pipeline; render Engine seed with one real GPU node + CIEDE2000 golden harness; virtualized grid + Engine-rendered loupe; CLI; perf harness; `cargo xtask exit-drill`. Deviations log: `epics/E01-deviations.md`. Handoff: `epics/E01-handoff.md`. Known pending: Win/Linux real-hardware exit-drill legs; shell-smoke CI legs are continue-on-error; `licensing.md` needs the egui-font/BSL scoped-exception entries documented.
@@ -38,7 +38,7 @@ Authoritative table lives in `01-architecture.md` §10. Summary — spec file pe
 | E06 | Jobs & background system | M1 | spec ready (mostly seeded in E01) | E01 |
 | E07 | ~~Catalog DAM~~ | — | **RETIRED** | — |
 | E08 | Editor shell, drag-drop entry & develop UI | M1 | **v2 spec** `E08-editor-shell.md` | E01,03,04,05,09 |
-| E09 | Edit state, history, presets, XMP | M1 | 🔶 **PARTIAL** — A/C/D/E + Phase B store layer BUILT; T8 `EditHub`/T11 CLI/T12 kill-9 remain | E01 |
+| E09 | Edit state, history, presets, XMP | M1 | **BUILT** | E01 |
 | E10 | Develop — global toolset | M2 | spec ready | E02,05,09 |
 | E11 | Detail, optics, geometry, clean-room demosaic | M2 | spec ready | E02,05 |
 | E12 | Masking, local adjustments & retouch | M3 | spec ready | E05,10 |
@@ -50,7 +50,7 @@ Authoritative table lives in `01-architecture.md` §10. Summary — spec file pe
 
 **M1 exit criterion (next milestone):** a dropped raw file on screen with working WB/exposure/tone editing that auto-persists and survives kill -9.
 
-**Recommended execution order:** ~~E02~~ ✅ → ~~E05~~ ✅ → **E09 (finish T8 `EditHub`/T11 CLI/T12 kill-9) + E04** → **E08** (editor UI — first user-visible editing) → *M1 done* → E10 + E15 → E11 → E17 → E12 → E13 → E14 → E16.
+**Recommended execution order:** ~~E02~~ ✅ → ~~E05~~ ✅ → ~~E09~~ ✅ → **E04** (working-set loader — E09's `image_for_content_hash`/`EditStore::open_state`/`EditHub::open`/`close` seam is ready for it to consume) → **E08** (editor shell — first user-visible editing; consumes `Session::edits()`/`Command::Edit`/`Queries::{edit_history,snapshots,presets,xmp_status}` as built) → *M1 done* → E10 + E15 → E11 → E17 → E12 → E13 → E14 → E16.
 
 ## 4. How to build & verify
 

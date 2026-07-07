@@ -17,6 +17,15 @@ lightbox-jobs.workspace = true
 lightbox-preview.workspace = true
 lightbox-render.workspace = true
 lightbox-types.workspace = true
+# E09 Phase B follow-up (T8/T11): `EditHub` wraps `lightbox_edit::EditStore`/
+# `EditSession`/`PresetStore` and drives the `crs:`/`lb:` XMP substrate for
+# ReadMetadata/WriteMetadata/RefreshXmpStatus.
+lightbox-edit.workspace = true
+lightbox-meta.workspace = true
+# `AssetProbe` for the xmp_map read path — built from the catalog's own
+# `ImageDetail`, not faked (`default_for`/`from_lr_crs` currently ignore most
+# of its fields, an E09 Phase D deviation, not a T8/T11 one).
+lightbox-decode.workspace = true
 thiserror.workspace = true
 # `sync` for the §3.8 event broadcast (tokio broadcast::Receiver is part of
 # the frozen Session surface); `rt` for the command dispatcher task.
@@ -31,8 +40,6 @@ wgpu.workspace = true
 
 [dev-dependencies]
 fastrand.workspace = true
-# Recipe::identity for driving Engine::submit end-to-end (spec §3.9).
-lightbox-edit.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 zstd.workspace = true

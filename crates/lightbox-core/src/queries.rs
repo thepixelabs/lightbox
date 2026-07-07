@@ -13,22 +13,29 @@
 //! value promptly: it holds one of the `min(cores, 4)` pool connections.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use lightbox_catalog::{
-    CatalogCounts, FolderNode, ImageDetail, ImageQuery, ImageSummary, Page, ReaderHandle,
+    CatalogCounts, EditBadge, FolderNode, ImageDetail, ImageQuery, ImageSummary, Page, ReaderHandle,
 };
+use lightbox_edit::{EditState, HistoryStepMeta, PresetId, PresetMeta, Recipe, SnapshotMeta};
+use lightbox_meta::xmp::sync::DivergenceStatus;
 use lightbox_types::{AssetId, ImageId};
 
+use crate::edit_hub::EditHub;
 use crate::error::Result;
 
-/// A borrowed snapshot view of the catalog (spec §3.8).
+/// A borrowed snapshot view of the catalog (spec §3.8), plus the E09 edit
+/// read surface (spec §3.4 — additive methods, hydrated via `lightbox-edit`
+/// from raw catalog DTOs; no SQL crosses up).
 pub struct Queries {
     reader: ReaderHandle,
+    edits: Arc<EditHub>,
 }
 
 impl Queries {
-    pub(crate) fn new(reader: ReaderHandle) -> Queries {
-        Queries { reader }
+    pub(crate) fn new(reader: ReaderHandle, edits: Arc<EditHub>) -> Queries {
+        Queries { reader, edits }
     }
 
     /// One page of images by keyset cursor (never OFFSET — spec §3.2).
@@ -59,6 +66,65 @@ impl Queries {
     /// FTS5 prefix search over filenames + camera, best match first.
     pub fn search_filenames(&self, query: &str, limit: u32) -> Result<Vec<ImageId>> {
         Ok(self.reader.search_filenames(query, limit)?)
+    }
+
+    // ── E09 (spec §3.4) — additive read surface ─────────────────────────────
+
+    /// The durable-or-neutral edit state for `image` (spec §3.4
+    /// `Queries::edit_state`): `EditState::persisted` distinguishes "restored
+    /// from a row" from "untouched, neutral default" (D1).
+    pub fn edit_state(&self, image: ImageId) -> Result<EditState> {
+        Ok(self.edits.store().open_state(image)?)
+    }
+
+    /// Newest-first history steps for the E08 panel (spec §3.4).
+    pub fn edit_history(&self, image: ImageId) -> Result<Vec<HistoryStepMeta>> {
+        Ok(lightbox_edit::history::list(
+            self.edits.store().catalog(),
+            image,
+        )?)
+    }
+
+    /// Named snapshots for `image` (spec §3.4).
+    pub fn snapshots(&self, image: ImageId) -> Result<Vec<SnapshotMeta>> {
+        Ok(self.edits.store().snapshots(image)?)
+    }
+
+    /// Filmstrip edit badges, same order as `images` (spec §3.4).
+    pub fn edit_badges(&self, images: &[ImageId]) -> Result<Vec<EditBadge>> {
+        Ok(self.reader.edit_badges(images)?)
+    }
+
+    /// Sidecar divergence status, keyed by image (spec §3.4/§3.5's
+    /// `xmp_status` names `AssetId` — the reader surface only resolves
+    /// image→asset, not the reverse, so this additive method takes `ImageId`
+    /// and returns each image's `AssetId` alongside its status; documented
+    /// deviation, see `E09-deviations.md` Phase B). Computed now, never
+    /// stored (no fs-watcher, spec §0 item 6).
+    pub fn xmp_status(&self, images: &[ImageId]) -> Result<Vec<(AssetId, DivergenceStatus)>> {
+        let mut out = Vec::with_capacity(images.len());
+        for &image in images {
+            let detail = self.reader.image_detail(image)?;
+            let abs = self.reader.asset_abs_path(detail.asset)?;
+            let recipe_hash = match self.edits.store().recipe_of(image)? {
+                lightbox_edit::RecipeRead::Ok(r) => r.canonical_hash(),
+                lightbox_edit::RecipeRead::NewerSchema { .. } => continue,
+            };
+            let status = self.edits.compute_status(detail.asset, &abs, recipe_hash)?;
+            out.push((detail.asset, status));
+        }
+        Ok(out)
+    }
+
+    /// Grouped, sorted develop-preset metadata (spec §3.4 `Queries::presets`).
+    pub fn presets(&self) -> Result<Vec<PresetMeta>> {
+        self.edits.preset_list()
+    }
+
+    /// Pure hover preview: `preset` applied to `image`'s current recipe
+    /// (spec §3.4; no session/store mutation).
+    pub fn preset_preview_recipe(&self, image: ImageId, preset: PresetId) -> Result<Recipe> {
+        self.edits.preset_preview(image, preset)
     }
 }
 

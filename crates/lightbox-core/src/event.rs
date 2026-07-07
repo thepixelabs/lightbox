@@ -11,8 +11,10 @@
 use std::path::PathBuf;
 
 use lightbox_catalog::BackupReport;
+use lightbox_edit::StepLabel;
 use lightbox_ingest::ImportReport;
-use lightbox_types::{ImageId, ImportSessionId};
+use lightbox_meta::xmp::sync::DivergenceStatus;
+use lightbox_types::{AssetId, ImageId, ImportSessionId};
 
 use crate::command::CommandTicket;
 
@@ -101,5 +103,32 @@ pub enum Event {
     DeviceDegraded {
         /// Driver/backend message.
         reason: String,
+    },
+    /// The in-memory working recipe changed (spec §3.4 — a gesture update).
+    /// **Not durable.** Fired synchronously, in the same call stack as
+    /// `EditHub::update_gesture` (no bus round-trip — D2); the render
+    /// scheduler re-renders from `EditHub::working_recipe` on this signal.
+    EditWorkingChanged {
+        /// The image whose working recipe changed.
+        image: ImageId,
+    },
+    /// A durable edit txn committed (spec §3.4): a gesture, preset apply,
+    /// paste, `StepTo`/undo/redo, snapshot restore, or XMP read.
+    EditCommitted {
+        /// The image the step landed on.
+        image: ImageId,
+        /// The new history position.
+        seq: u64,
+        /// The step's label.
+        label: StepLabel,
+    },
+    /// Sidecar divergence status changed for an asset (spec §3.4/§3.5):
+    /// recomputed at open, after write/read, or on `RefreshXmpStatus` —
+    /// never from a background watcher (spec §0 item 6).
+    XmpDivergenceChanged {
+        /// The asset whose sidecar status changed.
+        asset: AssetId,
+        /// The new status.
+        status: DivergenceStatus,
     },
 }

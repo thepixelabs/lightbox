@@ -31,6 +31,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use lightbox_catalog::{BackupOpts, BackupReport, Catalog, CatalogTxn};
+use lightbox_edit::EditStore;
 use lightbox_ingest::{import_add_in_place, ImportEvent, ImportOptions};
 use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
 use lightbox_preview::{AssetLocator, EmbeddedPreviewProvider, PreviewProvider};
@@ -45,8 +46,9 @@ use lightbox_render::GpuContext;
 use lightbox_types::PV_M0;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::command::{Command, CommandTicket};
+use crate::command::{Command, CommandTicket, EditCommand};
 use crate::config::CoreConfig;
+use crate::edit_hub::EditHub;
 use crate::error::Result;
 use crate::event::{ChangeSet, Event};
 use crate::previews::CatalogAssetLocator;
@@ -152,6 +154,7 @@ struct SessionInner {
     engine: Arc<Engine>,
     scheduler: Arc<RenderScheduler>,
     previews: Arc<dyn PreviewProvider>,
+    edit_hub: Arc<EditHub>,
     events: broadcast::Sender<Event>,
     cmd_tx: mpsc::UnboundedSender<Queued>,
     next_ticket: AtomicU64,
@@ -246,6 +249,16 @@ impl Session {
 
         let (events, _) = broadcast::channel::<Event>(core.cfg.event_capacity.max(16));
 
+        // E09 T8: the edit-state session registry (wraps `EditStore`, itself
+        // just an `Arc<Catalog>` handle — cheap). The preset store underneath
+        // is opened lazily on first use (see `CoreConfig::preset_dir`), so a
+        // session that never touches presets never creates the directory.
+        let edit_hub = EditHub::new(
+            EditStore::new(Arc::clone(&catalog)),
+            core.cfg.preset_dir.clone(),
+            events.clone(),
+        );
+
         // DeviceDegraded seam (spec §3.8): relay the engine's device-lost /
         // degraded-to-CPU events onto the core event bus. `ng::Engine::events`
         // is a broadcast channel (not a callback like the E01 seed's
@@ -290,6 +303,7 @@ impl Session {
             session_cancel: session_cancel.clone(),
             in_flight: Arc::clone(&in_flight),
             backup_retain: core.cfg.backup_retain,
+            edit_hub: Arc::clone(&edit_hub),
         };
         // Long-lived system task, not a class-budgeted job. It ends when the
         // last `Session` clone drops (the sole sender side of `cmd_rx`).
@@ -308,6 +322,7 @@ impl Session {
                 engine,
                 scheduler,
                 previews,
+                edit_hub,
                 events,
                 cmd_tx,
                 next_ticket: AtomicU64::new(1),
@@ -336,7 +351,19 @@ impl Session {
     /// A snapshot view for queries — executes on the calling thread against
     /// a pooled WAL-snapshot read connection (spec §5.1). Drop it promptly.
     pub fn query(&self) -> Queries {
-        Queries::new(self.inner.catalog.reader())
+        Queries::new(
+            self.inner.catalog.reader(),
+            Arc::clone(&self.inner.edit_hub),
+        )
+    }
+
+    /// The E09 edit hub (spec §3.4 `Session::edits`): the session registry +
+    /// synchronous working-recipe path (D2) the render seam (E05/E10) and
+    /// the shell's gesture wiring (E08) consume, plus the durable command
+    /// dispatcher the bus drives. Mirrors the `previews()`/`engine()`
+    /// accessor pattern.
+    pub fn edits(&self) -> Arc<EditHub> {
+        Arc::clone(&self.inner.edit_hub)
     }
 
     /// Subscribe to the event broadcast. The shell drains this once per
@@ -388,6 +415,13 @@ impl Session {
     /// skipped close forgoes.
     pub fn close(self, opts: CloseOpts) -> Result<CloseReport> {
         let inner = self.inner;
+        // E09 T8 (spec §4.2 D1 invariant): auto-commit every open gesture
+        // BEFORE the drain/backup — an edit is never held only in memory
+        // past its gesture commit, so closing (or replacing) the working
+        // set can never lose a committed edit. Direct, synchronous calls
+        // (D2); no bus round-trip needed since nothing else may begin a new
+        // gesture on this session's images once `close` has been called.
+        inner.edit_hub.close_all();
         inner.session_cancel.cancel();
         if !inner.in_flight.wait_zero(inner.cfg.close_wait) {
             tracing::warn!(
@@ -447,6 +481,7 @@ struct DispatchCtx {
     session_cancel: CancelToken,
     in_flight: Arc<InFlight>,
     backup_retain: u32,
+    edit_hub: Arc<EditHub>,
 }
 
 async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>) {
@@ -490,9 +525,101 @@ async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>
                 source_dir,
                 recursive,
             } => spawn_import(&ctx, ticket, source_dir, recursive),
+            // `SyncSettings` can span hundreds of targets (spec §3.8 T27):
+            // spawn it as a `Class::Background` job so the queue stays free
+            // for trivial commands, matching `BackupNow`/`ImportAddInPlace`.
+            // Every OTHER `EditCommand` variant — including `SyncSettings`
+            // itself, as a synchronous fallback — is handled by
+            // `EditHub::dispatch`, awaited in submission order like
+            // `SetRating` (spec T11 AC).
+            Command::Edit(EditCommand::SyncSettings {
+                source,
+                targets,
+                subset,
+            }) => spawn_edit_sync(&ctx, ticket, source, targets, subset),
+            Command::Edit(cmd) => run_edit_command(&ctx, ticket, cmd).await,
         }
     }
     tracing::debug!(target: "lightbox_core", "command dispatcher stopped");
+}
+
+/// One durable [`EditCommand`] = `EditHub::dispatch`, executed on the
+/// blocking pool and **awaited** so edit commands keep submission order
+/// (spec T11 AC, mirrors `run_txn_command`). Always emits
+/// `Event::CatalogChanged` on success — even a typed no-op (e.g. a second
+/// `CommitGesture` with nothing pending) — so a caller correlating on the
+/// touched image(s) never hangs waiting for a durable step that was never
+/// going to land.
+async fn run_edit_command(ctx: &DispatchCtx, ticket: CommandTicket, cmd: EditCommand) {
+    let hub = Arc::clone(&ctx.edit_hub);
+    let _guard = ctx.in_flight.enter();
+    let joined = tokio::task::spawn_blocking(move || hub.dispatch(cmd)).await;
+    match joined {
+        Ok(Ok((events, change))) => {
+            for ev in events {
+                let _ = ctx.events.send(ev);
+            }
+            let _ = ctx.events.send(Event::CatalogChanged { change });
+        }
+        Ok(Err(err)) => {
+            tracing::warn!(target: "lightbox_core", ticket = ticket.id(), %err, "edit command failed");
+            let _ = ctx.events.send(Event::CommandFailed {
+                ticket,
+                error: err.to_string(),
+            });
+        }
+        Err(join_err) => {
+            let _ = ctx.events.send(Event::CommandFailed {
+                ticket,
+                error: format!("edit command task failed: {join_err}"),
+            });
+        }
+    }
+}
+
+/// `SyncSettings`: a Background job (spec §3.8/T27 — batched sync can span
+/// hundreds of targets, so it must not hold the trivial-command queue).
+fn spawn_edit_sync(
+    ctx: &DispatchCtx,
+    ticket: CommandTicket,
+    source: lightbox_types::ImageId,
+    targets: Vec<lightbox_types::ImageId>,
+    subset: lightbox_edit::ParamSubset,
+) {
+    let hub = Arc::clone(&ctx.edit_hub);
+    let events = ctx.events.clone();
+    let guard = ctx.in_flight.enter();
+    let handle = ctx.jobs.spawn_blocking(
+        Class::Background,
+        "edit.sync_settings",
+        ctx.session_cancel.child(),
+        move |_cancel| {
+            let _guard = guard;
+            let cmd = EditCommand::SyncSettings {
+                source,
+                targets,
+                subset,
+            };
+            match hub.dispatch(cmd) {
+                Ok((evs, change)) => {
+                    for ev in evs {
+                        let _ = events.send(ev);
+                    }
+                    let _ = events.send(Event::CatalogChanged { change });
+                    Ok(())
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    let _ = events.send(Event::CommandFailed {
+                        ticket,
+                        error: msg.clone(),
+                    });
+                    Err(JobError::Failed(msg))
+                }
+            }
+        },
+    );
+    drop(handle); // detached; close() drains via the in-flight guard
 }
 
 /// One trivial command = one WAL transaction on the single writer, executed
