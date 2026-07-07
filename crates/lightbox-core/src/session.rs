@@ -34,7 +34,9 @@ use lightbox_catalog::{BackupOpts, BackupReport, Catalog, CatalogTxn};
 use lightbox_edit::EditStore;
 use lightbox_ingest::{import_add_in_place, ImportEvent, ImportOptions};
 use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
-use lightbox_preview::{AssetLocator, EmbeddedPreviewProvider, PreviewProvider};
+use lightbox_preview::{
+    AssetLocator, EmbeddedPreviewProvider, PreviewProvider, PreviewStoreConfig, Store,
+};
 use lightbox_render::ng::nodes::decoded::{SrcDecodedFactory, SrcDecodedNode};
 use lightbox_render::ng::nodes::display::{XformDisplayFactory, XformDisplayNode};
 use lightbox_render::ng::nodes::resize::{UtilResizeFactory, UtilResizeNode};
@@ -174,14 +176,27 @@ impl Session {
         let lbdata = catalog.lbdata_dir().to_path_buf();
         let catalog = Arc::new(catalog);
 
+        // E03 Phase B (T06-T09): the `.lbdata` preview cache store lives
+        // alongside the catalog (spec §3.2 — same directory, not a sibling
+        // tree); `Store::open` creates/adopts its reserved subdirectories
+        // idempotently (Phase A, T01).
+        let preview_store = Arc::new(Store::open(&PreviewStoreConfig::with_defaults(
+            lbdata.clone(),
+        ))?);
+
         // T21 wiring: the embedded-preview provider, LRU capped in bytes
         // per CoreConfig (spec §3.6), resolving images via the catalog.
+        // Store-backed as of E03 Phase B: every decode now ensures the
+        // asset's T0 exists in `preview_store` + the catalog (T06/T07)
+        // before decoding it (T08).
         let locator: Arc<dyn AssetLocator> =
             Arc::new(CatalogAssetLocator::new(Arc::clone(&catalog)));
         let previews: Arc<dyn PreviewProvider> = Arc::new(EmbeddedPreviewProvider::new(
             Arc::clone(&core.jobs),
             Arc::clone(&locator),
             core.cfg.preview_cache_bytes,
+            preview_store,
+            Arc::clone(&catalog),
         ));
 
         // E05 Phase F5 (M1 integration): the PV1 engine-owned nodes

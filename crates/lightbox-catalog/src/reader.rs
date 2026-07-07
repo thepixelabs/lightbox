@@ -10,7 +10,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
-use lightbox_types::{AssetId, Flag, FolderId, ImageId, ImportSessionId, Orientation, RootId};
+use lightbox_types::{
+    AssetId, ContentHash, Flag, FolderId, ImageId, ImportSessionId, Orientation, RootId,
+};
 use rusqlite::{params, params_from_iter, Connection};
 
 use crate::error::{CatalogError, Result};
@@ -282,6 +284,22 @@ impl ReaderHandle {
         }
         path.push(filename);
         Ok(path)
+    }
+
+    /// An asset's content hash (spec §3.1: the dominant component of E03's
+    /// preview store key — `lightbox-preview`'s T0 producer denormalizes it
+    /// onto every `preview` row it writes). Additive read-only accessor, not
+    /// part of E01's original §3.2 surface.
+    pub fn asset_content_hash(&self, id: AssetId) -> Result<ContentHash> {
+        let bytes: Vec<u8> = self
+            .conn()
+            .query_row(
+                "SELECT content_hash FROM asset WHERE id = ?1",
+                params![id.0],
+                |r| r.get(0),
+            )
+            .map_err(not_found_or("asset", id.0))?;
+        Ok(ContentHash(bytes.try_into().unwrap_or([0u8; 16])))
     }
 
     /// Row counts across the spine tables (spec §3.2).

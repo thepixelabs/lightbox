@@ -17,13 +17,19 @@
 
 // E03 Phase A (T01-T05): the store foundation — config, store-level errors,
 // atomic blob IO + BlobStore, the preview index + touch batcher, and the
-// tier/scope/variant-keying vocabulary. Phases B-F build the embedded
-// producer, codecs, scheduler, raw cache, and lifecycle on top of these.
+// tier/scope/variant-keying vocabulary. Phase B (T06-T09) builds the
+// embedded-preview producer (extract/producer), decode-for-display (decode),
+// and wires both — plus the decoded LRU/prefetch — into `embedded.rs`'s
+// provider. Phases C-F build codecs/T1, the scheduler, raw cache, and
+// lifecycle on top of these.
 mod config;
+mod decode;
 mod embedded;
 mod error;
+mod extract;
 mod index;
 mod pipeline;
+mod producer;
 mod pyramid;
 mod store;
 
@@ -32,9 +38,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use lightbox_jobs::Class;
-use lightbox_types::{ImageId, Orientation, SourceTier};
+use lightbox_types::{AssetId, ContentHash, ImageId, Orientation, SourceTier};
 
 pub use config::{CacheLimits, Codec, PreviewStoreConfig, Retention, StandardSize};
+pub use decode::DecodedPreview;
 pub use embedded::{EmbeddedPreviewProvider, ProviderStats};
 pub use error::StoreError;
 pub use index::{now_unix_seconds, PreviewIndex};
@@ -125,8 +132,12 @@ pub struct DecodedImage {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
-    /// Thumbnails: `true` (orientation baked on CPU); loupe source: `false`
-    /// (the display-transform node applies it — spec §3.6).
+    /// `true` for every [`PreviewClass`] as of E03 Phase B (T08):
+    /// decode-for-display always bakes EXIF orientation on the CPU (spec
+    /// §3.5), including the loupe source — see `decode.rs`'s module doc
+    /// comment. Kept as a field (rather than removed) because it is part of
+    /// the frozen §3.6 `DecodedImage` shape; a future producer that ships
+    /// pre-rotated bytes some other way could still set it accurately.
     pub orientation_applied: bool,
     /// Which tier produced the pixels (M0: embedded preview only).
     pub tier: SourceTier,
@@ -179,8 +190,21 @@ pub struct LocatedAsset {
     /// Absolute path of the original file.
     pub path: PathBuf,
     /// Effective orientation (image override or the asset's EXIF value) —
-    /// baked into thumbnails, left to the render node for the loupe source.
+    /// baked on the CPU by decode-for-display (spec §3.5, T08) for every
+    /// [`PreviewClass`], loupe included as of E03 Phase B (see `decode.rs`'s
+    /// module doc comment on why the loupe path no longer leaves this to the
+    /// render node).
     pub orientation: Orientation,
+    /// The owning asset (E03 spec §3.1: T0 is asset-scope) — added in Phase
+    /// B (T07) so [`EmbeddedPreviewProvider`] can key the on-disk store/
+    /// catalog dedupe without a catalog dependency of its own (this trait
+    /// stays the SQL-free boundary; `lightbox-core`'s `CatalogAssetLocator`
+    /// resolves it).
+    pub asset: AssetId,
+    /// The asset's content hash — the dominant component of the store key
+    /// (spec §3.1) and the denormalized column every `preview` row carries.
+    /// Added alongside `asset` in Phase B (T07).
+    pub content_hash: ContentHash,
 }
 
 /// Demand-driven preview provision (spec §3.6, frozen surface for E03).

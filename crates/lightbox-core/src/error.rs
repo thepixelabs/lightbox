@@ -32,6 +32,10 @@ pub enum CoreError {
     /// The settings-transfer engine (sync/paste/previous/reset) failed.
     #[error(transparent)]
     Transfer(#[from] lightbox_edit::TransferError),
+    /// The E03 preview store failed to open (`.lbdata`'s `previews/`
+    /// cache surface — `lightbox-preview`'s `Store::open`, Phase A/B).
+    #[error(transparent)]
+    Preview(#[from] lightbox_preview::PreviewError),
     /// Invariant violation inside the core (a bug).
     #[error("internal core error: {0}")]
     Internal(String),

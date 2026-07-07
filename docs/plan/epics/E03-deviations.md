@@ -217,3 +217,199 @@ orphaned-temp-file count as informational — sweeping them is
 `verify_store(Full)`'s job (spec §3.2, Phase F), out of Phase A's scope.
 Observed: 0 torn files, ~270 harmless orphaned temp files across 1097
 file-observations in a representative local run.
+
+---
+
+## Phase B — embedded path (T06–T09)
+
+### B-1 — T06 built as a thin wrapper over the existing E01/E02 probe surface, not new extraction logic
+
+**What.** The spec's §2 crate table and R2 both frame T06 around `rawler`
+(banned, per A-1) plus a fallback. There is no new extraction *logic* in
+Phase B: `crates/lightbox-preview/src/extract.rs::extract_largest_embedded`
+composes `lightbox_decode::probe()` + the already-existing, already-tested
+`pipeline::select_preview` (E01's T20 selection: largest-covering rendition,
+"tiny surrogate" disqualification, the Olympus E-1 case) + `read_embedded()`.
+The only genuinely new code is the byte-guard (moved here verbatim from the
+old `pipeline::decode_class`, which this phase retires — see B-4) and a
+container-level ICC-marker sniff (B-2). The 12-body fixture corpus AC is
+satisfied by the pre-existing `tests/embedded_provider.rs` suite (now
+store-backed) plus `producer.rs`'s own T07 tests, not a new dedicated T06
+test file — extraction was never separable from "does it produce T0 bytes",
+which is exactly what those tests already assert.
+
+### B-2 — colorspace tagging is ICC-marker-presence only, no EXIF `ColorSpace` sniff
+
+**What.** Spec §3.5: "tags the colorspace (sRGB default; embedded ICC/EXIF
+colorspace honored as a tag...)". `extract.rs::sniff_colorspace` scans the
+extracted JPEG's own byte stream for a well-formed `APP2 ICC_PROFILE` marker
+(bounded, never-panicking, presence-only — the profile bytes themselves are
+not parsed or copied, matching `PreviewColorspace::TaggedIcc`'s doc comment:
+"the profile bytes themselves travel with the container"). EXIF `ColorSpace`
+(tag `0xA001`) is **not** sniffed: `lightbox_decode::probe()`'s `AssetProbe`
+does not expose it, and adding that surface to `lightbox-decode` is outside
+E03 Phase B's crate boundary. A future pass (E02 seam S2, or a small
+`lightbox-decode` addition) can widen this without an API change to
+`PreviewColorspace` — it is already a two-variant enum a new detection path
+would just populate more often, not restructure.
+
+### B-3 — `DecodedPreview.pixels: Arc<[u8]>`, not the spec's literal `Arc<ImageBufU8>`
+
+**What.** Spec §5.2 names `pixels: Arc<ImageBufU8>`. `ImageBufU8` is not a
+type this crate has — it belongs to `lightbox-render` (the `Produced::Pixels`
+payload shape, spec §5.3, an E05/Phase-C concern). `DecodedPreview`
+(`crates/lightbox-preview/src/decode.rs`) carries `pixels: Arc<[u8]>`
+interleaved RGBA8 instead — exactly what the frozen `PreviewProvider` surface
+(`DecodedImage`, E01-seeded) already carries, and what
+`lightbox-core::render_source::PreviewSourceProvider` already wraps into a
+`PixelBuf` at the one call site that matters. Reconciling the two types (or
+introducing `ImageBufU8` in a shared crate) is left as an open question for
+whichever phase first needs both shapes to interoperate directly (Phase C's
+`PreviewCodec`, most likely).
+
+### B-4 — the E01-seeded `pipeline::decode_class` is retired, not extended in place
+
+**What.** The task prompt says "extend/refactor them into the T06-T09 path".
+`pipeline.rs`'s higher-level `decode_class` orchestration function (probe →
+select → read → decode → resize → bake, all from the *original* file, every
+request) is deleted; its constituent pure functions
+(`select_preview`/`decode_jpeg_rgba`/`resize_to_fit`/`bake_orientation`) are
+kept and now composed differently: `extract.rs` (T06) owns
+probe+select+read+guard, `decode.rs` (T08) owns decode+resize+bake, and
+`embedded.rs`'s new `decode_via_store` free function is the T06-T09
+orchestrator that replaces `decode_class`'s role, but reads from the
+*stored* T0 (spec §3.5) instead of the original file on every request. This
+is a straight refactor with no behavior loss for the pieces that survive
+(same tests, `pipeline::tests::*`, still pass unmodified) and a deliberate
+behavior gain for the piece that changes (B-5).
+
+### B-5 — decode-for-display always bakes orientation, including the loupe class (spec-mandated; closes an E05-F5 gap)
+
+**What.** The E01-seeded pipeline left the loupe class's pixels unrotated
+(`orientation_applied: false`) on the theory that "the display-transform
+node applies it" — true for the E01 seed, but **not** true for the `ng`
+engine (E05) that replaced it at M1: `lightbox-core/src/render_source.rs`'s
+own doc comment documents this as a known gap ("the `ng` engine's
+`xform.display` node does not apply orientation... portrait sources render
+sideways until E11 lands"). E03 spec §3.5 is unconditional ("bakes EXIF
+orientation") and T08's AC explicitly wants an orientation corpus that
+"renders upright" — there is no class-conditional carve-out in the spec
+text. `decode.rs::decode_for_display` now always bakes orientation, for
+every `PreviewClass` including `Loupe`, and `embedded.rs::decode_via_store`
+always sets `orientation_applied: true`. Net effect: the loupe source handed
+to `PreviewSourceProvider`/the `ng` engine is upright *before* it reaches
+`ng` — the documented sideways-portrait gap is closed for the
+embedded-preview path specifically (verified indirectly: all fixtures in
+`tests/embedded_provider.rs` are claimed at `Orientation::O1`, so this
+doesn't show up as a dimension change there, but `decode.rs`'s own
+`decode_for_display_transposes_dims_for_the_90_degree_family` test proves
+the transpose happens end-to-end through the real JPEG-decode path). E11's
+own geometry nodes remain the systematic, in-graph fix for rendered (not
+embedded-preview) sources; this is a narrower, immediate win that falls out
+of building T08 to spec.
+
+### B-6 — no dedicated 8-orientation JPEG fixture pack; T08's golden test reuses the existing corpus + the pre-proven transform matrix
+
+**What.** Spec §8 names an "8-orientation JPEG set" as part of the pinned
+fixture pack (Open Question Q5, never resolved/built by any prior phase —
+`fixtures/manifest.toml` has no such entries). `decode.rs`'s
+`decode_for_display_renders_upright_across_all_eight_orientations` test
+instead decodes a real fixture (`lightbox-tiny.jpg`) once and claims each of
+the 8 `Orientation` values for it in turn, through the actual
+`decode_for_display` path (zune-jpeg decode + resize + bake, not just the
+pure transform) — the per-orientation pixel-correctness proof itself lives
+in `pipeline::tests::orientation_bakes_match_exif_semantics` (unchanged,
+still covers all 8 cases against known-good expected output on synthetic
+pixel data). `decode_for_display_transposes_dims_for_the_90_degree_family`
+adds a real, non-square fixture (`fujifilm-x100.raf`'s embedded preview) to
+prove the transpose case specifically. This is judged sufficient for T08's
+AC in spirit (upright rendering across all 8 orientations, proven against
+real decoded bytes) without inventing new binary fixtures outside the
+xtask-managed, hash-pinned corpus process.
+
+### B-7 — T09's `set_viewport` is a Phase-B-scoped prefetch, not Phase D's scheduler
+
+**What.** Spec §3.4/§5.2 describes `set_viewport` in the context of the full
+priority scheduler (Visible/Neighbor/Bulk classes, cooperative cancellation,
+bounded queues) that is explicitly Phase D's (T13/T15). T09 is listed under
+Phase B in the spec's own task table (§7), so this phase ships a narrower,
+self-contained reading of it:
+`EmbeddedPreviewProvider::set_viewport(visible, neighbors)` fires a
+`Class::Background` request per neighbor not already tracked/cached, tracks
+each still-pending ticket in its own map (separate mutex from the
+request/poll/cancel ticket table, so viewport churn never contends with
+interactive traffic), and — on every call — reaps entries that either fell
+out of `visible ∪ neighbors` or have since resolved (both released via the
+existing `cancel` path). `visible` is consulted only to avoid demoting
+currently-visible images; it does not itself enqueue anything (the grid/
+loupe already requests visible cells through the normal path at
+Visible/Interactive priority). This delivers T09's AC (prefetched swaps hit
+the byte-capped LRU, p95 ≤ 50 ms, cap never exceeded — see
+`tests/embedded_provider.rs::set_viewport_prefetch_delivers_sub_50ms_swaps_over_200_images`)
+without building Phase D's dedup/priority/backpressure machinery early.
+Self-reaping (not just reaping-on-supersede) was added after the first
+version of this method left resolved prefetch tickets pinned in
+`state.tickets` forever on a static viewport — see the method's own doc
+comment.
+
+### B-8 — `EmbeddedPreviewProvider::new` signature change (additive, in-place)
+
+**What.** `EmbeddedPreviewProvider::new` gained two required parameters,
+`store: Arc<Store>` and `catalog: Arc<Catalog>` — the T06/T07 write path's
+dependencies. This is a breaking change to that one constructor (not a new
+type), touching every call site: `lightbox-core::session.rs` (opens the
+store via `Store::open(&PreviewStoreConfig::with_defaults(lbdata.clone()))`
+right next to the catalog, per spec §3.2's "same directory") and
+`lightbox-preview`'s own `tests/embedded_provider.rs` (every provider
+construction now threads a fresh tempdir-rooted store + catalog + a real
+`asset` row, since `ensure_t0`'s catalog write needs the `preview.asset_id`
+foreign key to resolve). No other crate constructs `EmbeddedPreviewProvider`
+directly (`lightbox-shell` only sees it through `Arc<dyn PreviewProvider>`),
+so this did not ripple further. Index hydration (`PreviewIndex::load`)
+inside `new` is non-fatal-on-error by design (falls back to an empty index,
+logged) — see the constructor's own doc comment — so `new` stays infallible;
+only `Store::open` (called by the caller, e.g. `Session::open`) can fail.
+
+### B-9 — added `ReaderHandle::asset_content_hash` to `lightbox-catalog` (additive)
+
+**What.** T07's write path needs an asset's `content_hash` (the dominant
+component of the spec §3.1 store key) at the point `AssetLocator::locate`
+resolves an image — no existing reader method returned it (`ImageDetail`
+carries plenty about an image but not its asset's content hash;
+`asset_abs_path` resolves a path, not a hash). Added
+`ReaderHandle::asset_content_hash(&self, id: AssetId) -> Result<ContentHash>`
+in `crates/lightbox-catalog/src/reader.rs`, following the existing
+`asset_abs_path`/`not_found_or` pattern exactly. `lightbox-core`'s
+`CatalogAssetLocator::locate` (`previews.rs`) calls it and populates the two
+new `LocatedAsset` fields (`asset`, `content_hash` — B-8's sibling change on
+the `lightbox-preview` side). No schema/migration change; this is a plain
+read-only query addition.
+
+### B-10 — thumbnail decode cost: no persisted downscaled cache until Phase C's T1
+
+**What.** With T0-only landed (Phase B), every `PreviewClass::Thumb` request
+decodes the **same** stored T0 JPEG (the largest embedded preview) and
+downscales in RAM — there is no smaller, separately-cached rendition yet
+(that's T1, spec §3.1: "At M0, built by downscaling the embedded JPEG",
+Phase C's T10-T12). For raw bodies whose original file embeds *both* a
+large preview and a much smaller separate thumbnail (many do), this is a
+real, spec-acknowledged M0 characteristic, not a bug: `decode-for-display`
+(§3.5) is explicitly framed as "decode a stored preview... optionally
+downscale to the caller's target", and only T1's producer pipeline (Phase C)
+persists the downscaled result. T09's decoded LRU + prefetch mitigate
+repeat cost within a session (the same thumb, once decoded, is a cache hit
+until evicted); Phase C's exit bar is expected to replace this interim
+behavior, not this phase's.
+
+### B-11 — Phase C/D/E/F seams confirmed untouched
+
+**What.** Named here for the record, not because anything unusual happened:
+`PreviewProducer`/`Produced`/`PreviewCodec` (Phase C), the scheduler /
+`PreviewService` facade / core `Command`/`Query` additions (Phase D),
+`RawCache` (Phase E), and eviction/relocation/T2/thumbcache (Phase F) are
+**not** implemented by this phase — no trait stubs were added for them
+either, since none of Phase B's code needed to reference them. T1/T2 build
+on top of `derive_store_key`/`t1_rel_path`/`t2_rel_dir` (Phase A, unchanged)
+and the `PreviewIndex`/`upsert_preview` primitives this phase's `ensure_t0`
+already exercises for T0 — Phase C's `EmbeddedProducer`/T1 pipeline should
+be a straightforward sibling to `producer::ensure_t0`, not a rewrite of it.

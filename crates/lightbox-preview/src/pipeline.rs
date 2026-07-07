@@ -1,23 +1,24 @@
 // SPDX-FileCopyrightText: 2026 Lightbox contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The embedded-preview decode pipeline (spec §5 T20): pick a probed
-//! embedded JPEG → ranged read → `zune-jpeg` decode to RGBA8 →
-//! `fast_image_resize` downscale (thumbs) → CPU EXIF-orientation bake
-//! (thumbs only — the loupe source stays unrotated; the display-transform
-//! node applies orientation, spec §3.6).
+//! Building blocks of the embedded-preview decode pipeline: rendition
+//! selection ([`select_preview`]), `zune-jpeg` decode to RGBA8
+//! ([`decode_jpeg_rgba`]), `fast_image_resize` downscale
+//! ([`resize_to_fit`]), and CPU EXIF-orientation bake ([`bake_orientation`]).
 //!
-//! Pure functions, no scheduling — [`crate::EmbeddedPreviewProvider`] (T21)
-//! owns jobs/dedup/caching on top of this.
+//! Pure functions, no scheduling, no store/catalog IO —
+//! [`crate::extract::extract_largest_embedded`] (T06) composes
+//! [`select_preview`] with `lightbox_decode::read_embedded`;
+//! [`crate::decode::decode_for_display`] (T08) composes the other three.
+//! This split (E03 Phase B) replaces the E01 seed's single `decode_class`
+//! orchestration function, which read directly from the original file on
+//! every request; the T06-T09 path reads the *stored* T0 instead (spec
+//! §3.5) — see `embedded.rs`'s module doc comment.
 
-use std::path::Path;
-use std::sync::Arc;
+use lightbox_decode::{AssetProbe, EmbeddedPreviewInfo, ProbeError};
+use lightbox_types::Orientation;
 
-use lightbox_decode::{read_embedded, AssetProbe, EmbeddedPreviewInfo, ProbeError};
-use lightbox_jobs::CancelToken;
-use lightbox_types::{Orientation, SourceTier};
-
-use crate::{DecodedImage, PreviewClass, PreviewError};
+use crate::{PreviewClass, PreviewError};
 
 /// Below this long-edge size an embedded preview is "tiny" and worthless
 /// beyond micro-thumbnails: the provider reports
@@ -25,10 +26,6 @@ use crate::{DecodedImage, PreviewClass, PreviewError};
 /// Olympus E-1 fixture with its 160 px thumbnail is the canonical case),
 /// unless the request itself asks for less.
 pub(crate) const MIN_USABLE_LONG_EDGE: u32 = 256;
-
-/// Guard against absurd probe ranges: an embedded preview larger than this
-/// is treated as malformed rather than read into memory.
-const MAX_EMBEDDED_BYTES: u64 = 256 * 1024 * 1024;
 
 impl From<ProbeError> for PreviewError {
     fn from(e: ProbeError) -> PreviewError {
@@ -75,65 +72,6 @@ pub(crate) fn select_preview(
             .filter(|p| long_edge(p) >= max_px)
             .min_by_key(|p| u64::from(p.width) * u64::from(p.height))
             .or(Some(largest)),
-    }
-}
-
-/// Runs the whole pipeline for one request. Checkpoints on `cancel` between
-/// stages (spec §3.6: cancel wired through).
-pub(crate) fn decode_class(
-    path: &Path,
-    orientation: Orientation,
-    class: PreviewClass,
-    cancel: &CancelToken,
-) -> Result<DecodedImage, PreviewError> {
-    let check = |c: &CancelToken| -> Result<(), PreviewError> {
-        if c.is_cancelled() {
-            Err(PreviewError::Cancelled)
-        } else {
-            Ok(())
-        }
-    };
-
-    check(cancel)?;
-    let probe = lightbox_decode::probe(path)?;
-    let info = select_preview(&probe, class)
-        .ok_or(PreviewError::NoEmbedded)?
-        .clone();
-    let range_len = info.byte_range.end.saturating_sub(info.byte_range.start);
-    if range_len > MAX_EMBEDDED_BYTES {
-        return Err(PreviewError::Decode(format!(
-            "embedded preview claims {range_len} bytes"
-        )));
-    }
-
-    check(cancel)?;
-    let jpeg = read_embedded(path, &info)?;
-
-    check(cancel)?;
-    let (px, w, h) = decode_jpeg_rgba(&jpeg)?;
-    drop(jpeg);
-
-    check(cancel)?;
-    match class {
-        PreviewClass::Loupe => Ok(DecodedImage {
-            px: Arc::from(px.into_boxed_slice()),
-            width: w,
-            height: h,
-            orientation_applied: false, // the display-transform node applies it
-            tier: SourceTier::EmbeddedPreview,
-        }),
-        PreviewClass::Thumb { max_px } => {
-            let (px, w, h) = resize_to_fit(px, w, h, max_px)?;
-            check(cancel)?;
-            let (px, w, h) = bake_orientation(&px, w, h, orientation);
-            Ok(DecodedImage {
-                px: Arc::from(px.into_boxed_slice()),
-                width: w,
-                height: h,
-                orientation_applied: true,
-                tier: SourceTier::EmbeddedPreview,
-            })
-        }
     }
 }
 

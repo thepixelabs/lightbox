@@ -2,14 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! [`EmbeddedPreviewProvider`] — the M0 [`crate::PreviewProvider`]
-//! implementation (spec §3.6, T21).
+//! implementation (spec §3.6, T21; store-backed as of E03 Phase B T06-T09).
 //!
 //! Demand-driven and cancellable: each request becomes (at most) one
 //! blocking job on the [`JobSystem`] under the caller-chosen [`Class`]
 //! (thumbs: `Background`; loupe source: `Interactive` — spec §3.6).
 //! Concurrent requests for the same `(image, class)` share one job
 //! (dedup); decoded results land in an **in-memory LRU capped in bytes**
-//! (default 256 MiB via `CoreConfig::preview_cache_bytes`).
+//! (default 256 MiB via `CoreConfig::preview_cache_bytes`) — this is the
+//! spec §3.5/T09 "RAM LRU of decoded buffers" (`ByteLru`, below).
+//!
+//! **E03 Phase B wiring (T06-T09).** Each decode job now runs
+//! [`crate::producer::ensure_t0`] (T06 extraction + T07 store/catalog write,
+//! asset-scope deduped and memoized in the RAM [`crate::PreviewIndex`])
+//! before [`crate::decode::open_pixels`] (T08: decode the *stored* T0 JPEG,
+//! always baking orientation — see `decode.rs`'s module doc comment). The
+//! source of decoded bytes moved from "re-read a byte range of the original
+//! file every request" (the E01 seed) to "ensure the on-disk T0 exists once,
+//! then decode from it" — the pipeline this crate's spec §3.5 describes as
+//! the M0 loupe path. [`EmbeddedPreviewProvider::set_viewport`] (T09) adds
+//! filmstrip-neighbor prefetch on top of the same request/dedup/LRU
+//! machinery that already existed.
 //!
 //! Ticket lifecycle: [`cancel`](crate::PreviewProvider::cancel) both cancels
 //! outstanding work *and releases the ticket's state* — callers that stop
@@ -17,17 +30,17 @@
 //! §5.3). Polling an unknown/cancelled ticket reports
 //! [`PreviewError::Cancelled`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use lightbox_catalog::Catalog;
 use lightbox_jobs::{CancelToken, Class, JobSystem};
-use lightbox_types::ImageId;
+use lightbox_types::{ImageId, SourceTier};
 
-use crate::pipeline;
 use crate::{
-    AssetLocator, DecodedImage, PreviewClass, PreviewError, PreviewProvider, PreviewState,
-    PreviewTicket,
+    decode, producer, AssetLocator, DecodedImage, LocatedAsset, PreviewClass, PreviewError,
+    PreviewIndex, PreviewProvider, PreviewState, PreviewTicket, Store,
 };
 
 /// Dedup key (spec §3.6: one decode per concurrent `(image, class)`;
@@ -122,38 +135,151 @@ pub struct ProviderStats {
     pub decodes_started: u64,
 }
 
-/// The M0 preview provider: embedded JPEG → decode → (resize+orient) →
-/// byte-capped LRU (spec §3.6). E03's tiered on-disk store replaces it
-/// behind the same trait.
+/// The M0 preview provider: `ensure_t0` (extract + store, T06/T07) → decode
+/// the stored T0 (T08) → byte-capped LRU + neighbor prefetch (T09, spec
+/// §3.5/§3.6). E03's tiered on-disk store IS this provider's backing store
+/// as of Phase B — the "E03's tiered store replaces it behind the same
+/// trait" seam this doc comment used to name is now this file.
 pub struct EmbeddedPreviewProvider {
     jobs: Arc<JobSystem>,
     locator: Arc<dyn AssetLocator>,
+    /// The `.lbdata` cache store (spec §3.2, Phase A) — T0 files land here.
+    store: Arc<Store>,
+    /// The catalog — `ensure_t0`'s write path (T07) upserts `preview` rows
+    /// through it; the RAM index below is hydrated from it at construction.
+    catalog: Arc<Catalog>,
+    /// The in-RAM preview index (Phase A, T04): `ensure_t0`'s IO-free fast
+    /// path, kept current by every successful `ensure_t0` call.
+    index: Arc<Mutex<PreviewIndex>>,
     /// Behind its own `Arc` so decode jobs retire themselves through a weak
     /// handle to the *state*, never extending the provider's lifetime.
     state: Arc<Mutex<ProviderState>>,
+    /// Live neighbor-prefetch tickets, keyed by image (T09
+    /// `set_viewport`) — separate from `state`'s ticket table so viewport
+    /// churn never contends with request/poll/cancel traffic.
+    prefetch: Mutex<HashMap<ImageId, PreviewTicket>>,
     next_ticket: AtomicU64,
     decodes_started: Arc<AtomicU64>,
 }
 
 impl EmbeddedPreviewProvider {
-    /// `cache_bytes`: the LRU budget (`CoreConfig::preview_cache_bytes`,
-    /// default 256 MiB).
+    /// `cache_bytes`: the decoded-preview LRU budget (spec §3.5/§5.7
+    /// `decoded_lru_bytes`; `CoreConfig::preview_cache_bytes` at M0, default
+    /// 256 MiB — the core config's own default, not yet reconciled with the
+    /// store config's 512 MiB default; both are pre-existing M0 knobs, not
+    /// something Phase B changes). `store`/`catalog` back the T06/T07
+    /// extraction+write path; opening the store is the caller's job (spec
+    /// §5.2 `PreviewService::open` composes `Store::open` — Phase A's
+    /// `Store::open` today, `lightbox-core`'s `Session::open` calls it,
+    /// see `E03-deviations.md`).
+    ///
+    /// Index hydration (`PreviewIndex::load`) failure is non-fatal: the RAM
+    /// index is a disposable cache over the catalog (spec §3.2's "caches are
+    /// disposable by contract"), so a hydration error starts this provider
+    /// with an empty index (logged) rather than making construction
+    /// fallible — every `ensure_t0` call still works correctly against a
+    /// cold index, just without the fast-path skip.
     pub fn new(
         jobs: Arc<JobSystem>,
         locator: Arc<dyn AssetLocator>,
         cache_bytes: u64,
+        store: Arc<Store>,
+        catalog: Arc<Catalog>,
     ) -> EmbeddedPreviewProvider {
+        let index = match PreviewIndex::load(&catalog.reader()) {
+            Ok(index) => index,
+            Err(err) => {
+                tracing::warn!(
+                    target: "lightbox_preview",
+                    %err,
+                    "preview index hydration failed; starting empty (the index is a disposable cache)"
+                );
+                PreviewIndex::empty()
+            }
+        };
         EmbeddedPreviewProvider {
             jobs,
             locator,
+            store,
+            catalog,
+            index: Arc::new(Mutex::new(index)),
             state: Arc::new(Mutex::new(ProviderState {
                 tickets: HashMap::new(),
                 inflight: HashMap::new(),
                 cache: ByteLru::new(cache_bytes.max(1)),
             })),
+            prefetch: Mutex::new(HashMap::new()),
             next_ticket: AtomicU64::new(1),
             decodes_started: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Neighbor prefetch (spec §3.5/§5.2 `set_viewport`, T09): warms the
+    /// decoded LRU for `neighbors` at `Class::Background` priority (the job
+    /// system's own doc comment names this class for exactly this:
+    /// "opportunistic work nobody is waiting for... prefetch"). `visible`
+    /// is not actively requested here (the grid/loupe already requests
+    /// visible cells through the normal path, spec's Visible priority) — it
+    /// is only consulted so this call never demotes/cancels a currently
+    /// visible image's prefetch tracking.
+    ///
+    /// A Phase B reading of the spec's fuller "visible-first, cancel/demote
+    /// off-screen work" scheduler behavior (§3.4, Phase D's T13/T15): any
+    /// previously-tracked prefetch whose image fell out of `visible ∪
+    /// neighbors` is cancelled immediately (releasing its ticket and, if it
+    /// was the last waiter, its job); every image in `neighbors` not already
+    /// tracked gets a fresh `Class::Background` request. A request that
+    /// resolves synchronously (an LRU hit) is not tracked — its pixels are
+    /// already cached, there is nothing left to cancel later.
+    ///
+    /// **Self-reaping.** A tracked ticket whose job has since *finished* (not
+    /// just gone out of view) is released too, on every call — otherwise a
+    /// long-lived viewport that never changes would pin every prefetched
+    /// `DecodedImage` in `state.tickets` forever via its `TicketEntry::Ready`
+    /// upgrade (see `poll`), bypassing the whole point of the byte-capped
+    /// LRU it's supposed to just be a warm-up for. Reaping happens here
+    /// (call-driven) rather than via a background sweep — Phase D's
+    /// scheduler is the natural home for a proactive one; a UI that drives
+    /// `set_viewport` on every scroll/frame reaps promptly in practice.
+    pub fn set_viewport(&self, visible: &[ImageId], neighbors: &[ImageId]) {
+        let wanted: HashSet<ImageId> = visible.iter().chain(neighbors.iter()).copied().collect();
+        let mut prefetch = self.lock_prefetch();
+
+        let done_or_stale: Vec<ImageId> = prefetch
+            .iter()
+            .filter(|(image, ticket)| {
+                !wanted.contains(*image) || !matches!(self.poll(ticket), PreviewState::Pending)
+            })
+            .map(|(image, _)| *image)
+            .collect();
+        for image in done_or_stale {
+            if let Some(ticket) = prefetch.remove(&image) {
+                self.cancel(&ticket);
+            }
+        }
+
+        for &image in neighbors {
+            if prefetch.contains_key(&image) {
+                continue;
+            }
+            let ticket = self.request(image, PreviewClass::Loupe, Class::Background);
+            if matches!(self.poll(&ticket), PreviewState::Pending) {
+                prefetch.insert(image, ticket);
+            } else {
+                self.cancel(&ticket); // already resolved (or failed): nothing to track
+            }
+        }
+    }
+
+    /// Live prefetch-tracked tickets (diagnostics/tests, T09 AC).
+    pub fn prefetch_len(&self) -> usize {
+        self.lock_prefetch().len()
+    }
+
+    fn lock_prefetch(&self) -> std::sync::MutexGuard<'_, HashMap<ImageId, PreviewTicket>> {
+        self.prefetch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Diagnostic counters (T21 AC: after a cancel storm, `tickets`,
@@ -185,6 +311,9 @@ impl EmbeddedPreviewProvider {
         let locator = Arc::clone(&self.locator);
         let decodes = Arc::clone(&self.decodes_started);
         let provider_state = SharedState(Arc::clone(&self.state));
+        let store = Arc::clone(&self.store);
+        let catalog = Arc::clone(&self.catalog);
+        let index = Arc::clone(&self.index);
         let handle = self.jobs.spawn_blocking(
             prio,
             "preview.embedded.decode",
@@ -193,7 +322,7 @@ impl EmbeddedPreviewProvider {
                 decodes.fetch_add(1, Ordering::Relaxed);
                 let (image, class) = job.key;
                 let out = locator.locate(image).and_then(|src| {
-                    pipeline::decode_class(&src.path, src.orientation, class, cancel)
+                    decode_via_store(&store, &catalog, &index, image, &src, class, cancel)
                 });
                 let out = out.map(Arc::new);
                 // Publish, then (under the lock) cache + retire from the
@@ -233,6 +362,58 @@ impl EmbeddedPreviewProvider {
         drop(handle); // detached: lifecycle is tracked via `inflight`
         inflight
     }
+}
+
+/// One request's worth of work through the T06-T09 pipeline: `ensure_t0`
+/// (extract + store/catalog write, memoized) → decode the stored T0,
+/// downscaling for thumbs and always baking orientation (T08). Checkpoints
+/// on `cancel` between the two coarse stages, matching the granularity the
+/// E01-seeded pipeline this replaces already used (spec §3.4's fully
+/// cooperative, between-every-substep cancellation is Phase D's scheduler,
+/// not Phase B's).
+fn decode_via_store(
+    store: &Store,
+    catalog: &Catalog,
+    index: &Mutex<PreviewIndex>,
+    image: ImageId,
+    src: &LocatedAsset,
+    class: PreviewClass,
+    cancel: &CancelToken,
+) -> Result<DecodedImage, PreviewError> {
+    let check = |c: &CancelToken| -> Result<(), PreviewError> {
+        if c.is_cancelled() {
+            Err(PreviewError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+
+    check(cancel)?;
+    let desc = producer::ensure_t0(
+        store,
+        catalog,
+        index,
+        image,
+        src.asset,
+        src.content_hash,
+        &src.path,
+    )?;
+
+    check(cancel)?;
+    let max_long_edge = match class {
+        PreviewClass::Loupe => None,
+        PreviewClass::Thumb { max_px } => Some(max_px),
+    };
+    let decoded = decode::open_pixels(store, &desc, src.orientation, max_long_edge)?;
+
+    check(cancel)?;
+    Ok(DecodedImage {
+        px: decoded.pixels,
+        width: decoded.width,
+        height: decoded.height,
+        orientation_applied: true, // T08: decode-for-display always bakes it
+        tier: SourceTier::EmbeddedPreview,
+    })
 }
 
 /// Newtype so the closure only captures the state mutex, not the provider.

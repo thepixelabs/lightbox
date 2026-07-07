@@ -35,9 +35,18 @@ impl AssetLocator for CatalogAssetLocator {
         let path = reader
             .asset_abs_path(detail.asset)
             .map_err(|e| PreviewError::Io(format!("asset path for image {}: {e}", image.0)))?;
+        // E03 Phase B (T07): the T0 store/catalog write path is keyed on the
+        // owning asset + its content hash (spec §3.1) — resolved here so
+        // `lightbox-preview` stays free of a catalog dependency of its own
+        // for this lookup (this impl is the SQL-free boundary).
+        let content_hash = reader.asset_content_hash(detail.asset).map_err(|e| {
+            PreviewError::Io(format!("content hash for asset {}: {e}", detail.asset.0))
+        })?;
         Ok(LocatedAsset {
             path,
             orientation: detail.orientation,
+            asset: detail.asset,
+            content_hash,
         })
     }
 }
