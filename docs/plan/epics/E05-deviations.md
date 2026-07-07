@@ -393,3 +393,75 @@ what make it tear-free. Integration into a **live** egui-wgpu compositor pass ri
 `RenderScheduler::canvas()` stays `unimplemented!` until **B6** gives the scheduler its publisher
 field (the scheduler struct body is B6-owned). The double-buffer/tear-free **mechanism is proven
 now** on the real device; only the shell-side live compositing wiring is deferred to F5.
+
+## Wave A — MERGE integration (e05-core + e05-gpu → main) — 2026-07-07
+
+Merge agent, single-process on `main` (real Metal adapter). Both phase branches merged `--no-ff`
+in order (`e05-core`, then `e05-gpu`). Full five-gate exit bar green on `main` after the merge +
+the integration wiring below. `rawler`/`dnglab` confirmed absent from `Cargo.lock`.
+
+### Conflict resolutions (merge commit `merge E05 e05-gpu`)
+
+- **`ng/tile.rs` `TileHandle` (frozen seam, D-A-core-1 × D-tile).** Both waves inhabited the frozen
+  handle with **incompatible** representations: A-core added a `cpu: Option<Arc<PixelBuf>>` field;
+  A-gpu made it a `storage: Option<TileStorage{Gpu|Cpu}>` variant. The A-gpu representation is the
+  **superset** (it carries the GPU pooled-texture payload the CPU-only shape cannot), so it wins;
+  A-gpu's `cpu_pixels()` accessor was **renamed `cpu()`** to satisfy A-core's four callsites
+  (`engine.rs`, `exec/cpu`, testkit `corpus.rs`). A-core's unused-by-callers `from_cpu_arc`/`cpu_arc`
+  were dropped (no test referenced them; the `Cpu(Arc<PixelBuf>)` variant subsumes them). `half::f16`
+  import kept (the merged A-core `PixelBuf` body uses it). Seam SHAPE unchanged (opaque,
+  `#[non_exhaustive]`, `Clone + Default`, CacheKey-in/TileHandle-out).
+- **`crates/lightbox-render/Cargo.toml` dev-deps.** Union: `serde_json` + `proptest` (A-core) and
+  `half` (A-gpu integration tests).
+- **`E05-deviations.md`.** Append-only union of both waves' sections.
+- `Cargo.lock` / `ng/node/mod.rs` auto-merged (disjoint `GpuEvalCtx` (A-gpu) vs `CpuEvalCtx`
+  (A-core) fills, exactly as the D-gpuctx note predicted).
+
+### Integration wiring (commit `E05 Wave A integration: wire GPU/CPU backend seam + prove A9/A16`)
+
+The A9 **engine-level** gate and full GPU render path span both agents and could not be tested in
+either worktree alone (A-core deferred A9 GPU readback + backend selection to "the A-gpu merge";
+A-gpu's `GainProbe::eval_gpu` / testkit gain kernel is deferred to "the A-gpu executor merge"). The
+smallest-correct wiring, all in the exec↔backend seam owned jointly at merge (Risk R8):
+
+- **`engine.rs` — backend selection.** `Engine::with_compiler` now selects the backend per
+  `BackendPref`: `ForceCpu` → `CpuBackend`; `Auto` → build a `DeviceCtx` from `dp.current()` and a
+  `GpuBackend` on the shell's shared device, retaining the `DeviceCtx` on `Shared` for source upload
+  + terminal readback. This replaces the A-core `let _ = cfg.backend == Auto; CpuBackend` seam stub
+  (D-A-core-3). Backend provenance (`RenderOutput.backend`) reflects the actual backend.
+- **`engine.rs` — source injection.** `Shared::process` locates the source stage (`src.decoded`) via
+  the new `RenderGraph::node_index`, fetches decoded pixels through the `SourceProvider` seam
+  (`pollster::block_on`, `SourceWant::DecodedFull`), and lifts them to a working tile — a pooled GPU
+  texture (`Uploader::upload`, A10) on the GPU path or an **identical-bytes** host buffer
+  (`source::to_working_tile_cpu`, new) on the CPU path. Graphs without a source stage (probe
+  generators like `test.const`/`test.checker`) render with no fetch, so all A-core `NullSource`
+  tests are unaffected.
+- **`exec/mod.rs` — `Executor::evaluate` gains `source: Option<(NodeIndex, TileHandle)>`.** The
+  named source node receives the injected tile as its sole input (it declares zero graph inputs;
+  `nodes::decoded` documents the executor pre-populating the source stage). Every other node draws
+  inputs from upstream — the topo walk is otherwise unchanged. Two callers updated (`engine.rs`,
+  testkit `corpus.rs` → `None`).
+- **`engine.rs` — GPU readback.** The `Buffer`-target `readback` now copies a GPU-resident terminal
+  tile back via `exec::gpu::readback_tile` (was: CPU-only, erroring "GPU readback is wired by
+  A-gpu"). The CPU path is unchanged.
+- **A-core engine test builder** switched to `BackendPref::ForceCpu` (its `NullDevice`'s `current()`
+  is `unimplemented!`; `Auto` would now ask it for handles). These are CPU-path probe tests, so
+  ForceCpu is faithful.
+
+### A9 (engine-level) — PROVEN on `main`
+
+`tests/ng_gpu.rs::a9_engine_gpu_two_node_graph_equals_cpu_reference_exactly` (real Metal): a 2-node
+`src.decoded → test.gain` graph is driven through `Engine::submit` twice — `Auto` (→ `GpuBackend`,
+provenance `BackendId::Gpu`) and `ForceCpu` (→ `CpuBackend`) — and the two `Buffer(Rgba16)`
+readbacks are asserted **byte-for-byte identical**. Gain is ×2 on an `f16` gradient: `2·v` is exactly
+representable in `f16` for these values, so the equality is exact by construction (not merely within
+ΔE2000 ≤ 1.0). The test carries a self-contained GPU+CPU `test.gain` node — the testkit `GainProbe`
+GPU kernel remains the deferred E6 parity work; this proves the engine's GPU render path end-to-end
+without pre-empting it. This is the A9 acceptance criterion realized at the `Engine` level (the
+worktree `a9_gpu_backend_src_decoded_copies_source` proved only the backend in isolation).
+
+### A16 (first single-node golden) — GREEN on `main`
+
+`lightbox-render-testkit corpus::tests::first_single_node_golden_within_tolerance` passes against
+the committed `goldens/test.gain/pv1/checker-gain.png` within ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB (CPU
+reference path, landed by A-core; unaffected by the merge). PR-blocking golden gate live.

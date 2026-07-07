@@ -30,6 +30,21 @@ use lightbox_render::ng::tile::{PixelBuf, PixelFormat, TileHandle, TileView};
 use lightbox_render::ng::types::{Extent, Roi, TilePrecision};
 use lightbox_render::ng::OutputQuality;
 use lightbox_render::ng::{SourceColorimetry, SourceQuality};
+// A9 engine-level integration: drive a 2-node graph through `Engine::submit` on
+// both backends and compare readbacks (single-backend determinism).
+use lightbox_edit::Recipe;
+use lightbox_render::ng::node::{ParamsSchema, ParamsSchemaRef};
+use lightbox_render::ng::nodes::decoded::SrcDecodedFactory;
+use lightbox_render::ng::source::DeviceHandles;
+use lightbox_render::ng::BoxFuture;
+use lightbox_render::ng::{
+    BackendId, BackendPref, CpuEvalCtx, CpuTileView, DeviceError, DeviceProvider, Engine,
+    EngineConfig, GraphTemplate, KernelSalt, NodeDescriptor, NodeError, NodeFactory, NodeId,
+    NodeRegistry, OutFormat, OutputPayload, PortDecl, PortType, PvRange, RecipeCompiler,
+    RenderPriority, RenderRequest, RenderScale, RenderState, RenderTarget, SourceError,
+    SourceProvider, SourceWant,
+};
+use lightbox_types::{ImageId, PV_M0};
 
 /// Acquire a headless device/queue, or `None` when no adapter is available.
 fn device() -> Option<DeviceCtx> {
@@ -433,6 +448,274 @@ fn display_gpu_matches_cpu_lightbox_color() {
     assert!(
         max_diff <= 2,
         "display CPU/GPU parity: max byte diff {max_diff} > 2"
+    );
+}
+
+// ── A9 (engine-level): Engine selects the GpuBackend via the frozen seam ──────
+//
+// The worktree A9 test above proves the *backend* drives `src.decoded` in
+// isolation. This spans both agents: the A-core `Engine` (backend selection,
+// source injection, terminal readback) driving the A-gpu `GpuBackend` end to
+// end. A 2-node graph `src.decoded → test.gain` is rendered through
+// `Engine::submit` on the GPU backend and on the CPU backend, and the two
+// readbacks must be **byte-for-byte identical** — the single-backend
+// determinism claim (spec A9). Gain is ×2 on an `f16` gradient: `2·v` is exactly
+// representable in `f16` for these values, so the match is exact by
+// construction, not merely within the ΔE tolerance.
+
+/// A GPU+CPU `test.gain` (×2) node — the A-core testkit `GainProbe` defers its
+/// GPU kernel to this merge (parity gate E6), so the engine-level A9 proof
+/// carries a self-contained gain node with both kernels.
+const GAIN2X_WGSL: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(1) @binding(0) var dst: texture_storage_2d<rgba16float, write>;
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(dst);
+    if gid.x >= dims.x || gid.y >= dims.y {
+        return;
+    }
+    let c = textureLoad(src, vec2<i32>(gid.xy), 0);
+    textureStore(dst, vec2<i32>(gid.xy), vec4<f32>(c.rgb * 2.0, c.a));
+}
+"#;
+
+static GAIN_SCHEMA: ParamsSchema = ParamsSchema::EMPTY;
+static GAIN_DESC: NodeDescriptor = NodeDescriptor {
+    id: NodeId("test.gain"),
+    inputs: &[PortDecl {
+        name: "in",
+        ty: PortType::LinearRgbaF16,
+    }],
+    output: PortDecl {
+        name: "out",
+        ty: PortType::LinearRgbaF16,
+    },
+    params_schema: ParamsSchemaRef(&GAIN_SCHEMA),
+};
+
+struct Gain2x;
+
+impl RenderNode for Gain2x {
+    fn descriptor(&self) -> &NodeDescriptor {
+        &GAIN_DESC
+    }
+
+    fn eval_gpu(
+        &self,
+        ctx: &mut GpuEvalCtx<'_>,
+        inputs: &[TileView<'_>],
+        _params: &ParamBlock,
+    ) -> Result<(), NodeError> {
+        let input = inputs
+            .first()
+            .ok_or_else(|| NodeError::Other("test.gain: no input tile".into()))?;
+        let out_view = ctx
+            .output()
+            .texture_view()
+            .ok_or_else(|| NodeError::Gpu("test.gain: output is not a GPU tile".into()))?
+            .clone();
+        let extent = ctx.output().extent().unwrap_or(Extent { w: 1, h: 1 });
+        let pipeline = ctx.kernels.compute_pipeline(GAIN2X_WGSL, "main")?;
+        let bg_in = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("test.gain in"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(input.view),
+            }],
+        });
+        let bg_out = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("test.gain out"),
+            layout: &pipeline.get_bind_group_layout(1),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&out_view),
+            }],
+        });
+        dispatch_compute(
+            ctx.device,
+            ctx.queue,
+            &pipeline,
+            &[&bg_in, &bg_out],
+            extent,
+            "test.gain",
+        );
+        Ok(())
+    }
+
+    fn eval_cpu(
+        &self,
+        ctx: &mut CpuEvalCtx<'_>,
+        inputs: &[CpuTileView<'_>],
+        _params: &ParamBlock,
+    ) -> Result<(), NodeError> {
+        let input = inputs
+            .first()
+            .ok_or_else(|| NodeError::Cpu("test.gain: no input tile".into()))?
+            .pixels;
+        let out = ctx.output();
+        let (w, fmt, bpp) = (
+            out.extent.w,
+            out.format,
+            out.format.bytes_per_pixel() as usize,
+        );
+        out.par_fill_rows(|y, row| {
+            for x in 0..w {
+                let p = input.get_rgba_f32(x, y);
+                PixelBuf::encode_pixel(
+                    fmt,
+                    &mut row[x as usize * bpp..],
+                    [p[0] * 2.0, p[1] * 2.0, p[2] * 2.0, p[3]],
+                );
+            }
+        });
+        Ok(())
+    }
+}
+
+struct Gain2xFactory;
+impl NodeFactory for Gain2xFactory {
+    fn instantiate(&self) -> Arc<dyn RenderNode> {
+        Arc::new(Gain2x)
+    }
+    fn kernel_salt(&self) -> KernelSalt {
+        KernelSalt(blake3::hash(b"test.gain2x@v1"))
+    }
+}
+
+/// A `DeviceProvider` over an already-acquired shared device (the shell owns the
+/// device; the engine renders on it — §2.3 seam 2 / §3.8).
+struct SharedDevice {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+}
+impl DeviceProvider for SharedDevice {
+    fn current(&self) -> DeviceHandles {
+        (Arc::clone(&self.device), Arc::clone(&self.queue))
+    }
+    fn rebuild(&self) -> BoxFuture<'static, Result<DeviceHandles, DeviceError>> {
+        let handles = (Arc::clone(&self.device), Arc::clone(&self.queue));
+        Box::pin(async move { Ok(handles) })
+    }
+}
+
+/// A `SourceProvider` returning a fixed decoded gradient (E02 seam; the engine
+/// never decodes).
+struct SynthSource {
+    pixels: PixelBuf,
+}
+impl SourceProvider for SynthSource {
+    fn fetch(
+        &self,
+        _: ImageId,
+        _: SourceWant,
+        _: &CancelToken,
+    ) -> BoxFuture<'static, Result<SourceImage, SourceError>> {
+        let image = as_source_image(self.pixels.clone());
+        Box::pin(async move { Ok(image) })
+    }
+}
+
+fn build_engine(backend: BackendPref, device: Arc<dyn DeviceProvider>, w: u32, h: u32) -> Engine {
+    let mut reg = NodeRegistry::new();
+    reg.register(
+        SrcDecodedNode::ID,
+        PvRange::from_open(PV_M0),
+        Arc::new(SrcDecodedFactory::default()),
+    )
+    .expect("register src.decoded");
+    reg.register(
+        NodeId("test.gain"),
+        PvRange::from_open(PV_M0),
+        Arc::new(Gain2xFactory),
+    )
+    .expect("register test.gain");
+    let mut compiler = RecipeCompiler::with_registry(Arc::new(reg));
+    compiler
+        .register_template(
+            PV_M0,
+            GraphTemplate::linear(vec![SrcDecodedNode::ID, NodeId("test.gain")]),
+        )
+        .expect("register template");
+    let source: Arc<dyn SourceProvider> = Arc::new(SynthSource {
+        pixels: source_f16_gradient(w, h),
+    });
+    Engine::with_compiler(
+        device,
+        source,
+        compiler,
+        EngineConfig {
+            backend,
+            ..EngineConfig::default()
+        },
+    )
+    .expect("engine builds")
+}
+
+/// Submit a full-ROI `Buffer(Rgba16)` render, poll to `Complete`, and return the
+/// terminal pixels — asserting the recorded backend provenance.
+fn render_pixels(engine: &Engine, w: u32, h: u32, expect: BackendId) -> PixelBuf {
+    let req = RenderRequest {
+        image: ImageId(1),
+        recipe: Recipe::identity(PV_M0),
+        pv: PV_M0,
+        roi: Roi { x: 0, y: 0, w, h },
+        scale: RenderScale::OneToOne,
+        target: RenderTarget::Buffer {
+            format: OutFormat::Rgba16,
+        },
+        priority: RenderPriority::Interactive,
+        cancel: CancelToken::new(),
+    };
+    let ticket = engine.submit(req);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match engine.poll(&ticket) {
+            RenderState::Complete(out) => {
+                assert_eq!(out.backend, expect, "backend provenance mismatch");
+                match out.payload {
+                    OutputPayload::Pixels(px) => return px,
+                    other => panic!("expected Pixels payload, got {other:?}"),
+                }
+            }
+            RenderState::Failed(e) => panic!("render failed: {e}"),
+            RenderState::Cancelled => panic!("render cancelled unexpectedly"),
+            _ => {
+                if std::time::Instant::now() > deadline {
+                    panic!("render did not complete within 10s");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+}
+
+#[test]
+fn a9_engine_gpu_two_node_graph_equals_cpu_reference_exactly() {
+    let dev = gpu_or_skip!("a9-engine");
+    let (w, h) = (24u32, 16u32);
+    let dp: Arc<dyn DeviceProvider> = Arc::new(SharedDevice {
+        device: Arc::clone(&dev.device),
+        queue: Arc::clone(&dev.queue),
+    });
+
+    // Auto selects the GpuBackend on the shared device; ForceCpu is the CPU
+    // reference. Both drive the identical `src.decoded → test.gain` graph.
+    // Auto builds a GpuBackend on the shared device (proven by the Gpu backend
+    // provenance stamped on the completed output below); ForceCpu is the CPU
+    // reference.
+    let gpu_engine = build_engine(BackendPref::Auto, Arc::clone(&dp), w, h);
+    let cpu_engine = build_engine(BackendPref::ForceCpu, Arc::clone(&dp), w, h);
+
+    let gpu_px = render_pixels(&gpu_engine, w, h, BackendId::Gpu);
+    let cpu_px = render_pixels(&cpu_engine, w, h, BackendId::Cpu);
+
+    assert_eq!(gpu_px.extent, cpu_px.extent, "extent mismatch");
+    assert_eq!(gpu_px.format, cpu_px.format, "format mismatch");
+    assert_eq!(
+        gpu_px.bytes, cpu_px.bytes,
+        "GPU 2-node render must equal the CPU reference byte-for-byte (single-backend determinism)"
     );
 }
 

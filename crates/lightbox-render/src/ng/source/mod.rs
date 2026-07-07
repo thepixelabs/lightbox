@@ -159,6 +159,22 @@ impl Uploader {
     }
 }
 
+/// Lifts a decoded [`SourceImage`] into a CPU working tile — the CPU-path
+/// counterpart of [`Uploader::upload`]. Produces the **identical** `rgba16float`
+/// bytes the GPU uploader writes (same [`to_working_f16`] packing), so the CPU
+/// and GPU source stages carry byte-for-byte identical working pixels (the
+/// single-backend-determinism anchor of the A9 gate). No color math (E02).
+pub fn to_working_tile_cpu(src: &SourceImage) -> PixelBuf {
+    let w = src.pixels.extent.w.max(1);
+    let h = src.pixels.extent.h.max(1);
+    PixelBuf {
+        bytes: to_working_f16(&src.pixels),
+        format: PixelFormat::Rgba16F,
+        extent: Extent { w, h },
+        stride: w * 8, // rgba16float = 8 bytes/px
+    }
+}
+
 /// Packs a source [`PixelBuf`] (8-bit / 16-bit-float / 32-bit-float) into tightly
 /// packed `rgba16float` bytes, honoring the source row `stride`. Values are
 /// carried through as-is (8-bit unorm normalized by /255); **no color math**.

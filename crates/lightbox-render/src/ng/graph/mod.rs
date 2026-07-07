@@ -140,6 +140,15 @@ impl RenderGraph {
         self.g[idx].node.descriptor().id
     }
 
+    /// The index of the first node with identity `id`, if any. A linear
+    /// template emits at most one node per stage id, so this unambiguously
+    /// locates the engine-owned source stage (`src.decoded`) for injection.
+    pub fn node_index(&self, id: NodeId) -> Option<NodeIndex> {
+        self.g
+            .node_indices()
+            .find(|&i| self.g[i].node.descriptor().id == id)
+    }
+
     /// The validated params at `idx`.
     pub fn params(&self, idx: NodeIndex) -> &ParamBlock {
         &self.g[idx].params

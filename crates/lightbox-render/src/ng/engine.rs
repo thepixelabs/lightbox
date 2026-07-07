@@ -24,9 +24,12 @@ use crate::ng::compile::{GraphTemplate, RecipeCompiler, SourceDesc};
 use crate::ng::config::{BackendPref, EngineConfig};
 use crate::ng::error::{EngineInitError, RenderError};
 use crate::ng::exec::cpu::CpuBackend;
+use crate::ng::exec::gpu::{readback_tile, GpuBackend};
 use crate::ng::exec::{Backend, Executor};
+use crate::ng::gpu::DeviceCtx;
 use crate::ng::node::NodeRegistry;
-use crate::ng::source::{DeviceProvider, SourceProvider};
+use crate::ng::nodes::decoded::SrcDecodedNode;
+use crate::ng::source::{DeviceProvider, SourceProvider, SourceWant, Uploader};
 use crate::ng::stats::EngineStats;
 use crate::ng::tile::{PixelBuf, PixelFormat, TileHandle};
 use crate::ng::types::{Extent, ProcessVersion, RenderScale, Roi};
@@ -208,10 +211,14 @@ struct Shared {
     compiler: RecipeCompiler,
     executor: Executor,
     cache: NodeCache,
-    #[allow(dead_code)] // consumed by src.decoded source injection at A-gpu merge
     source: Arc<dyn SourceProvider>,
-    #[allow(dead_code)] // consumed by the GPU backend + device-lost recovery (A-gpu / E)
+    #[allow(dead_code)] // consumed by device-lost recovery (E); backend built at construction
     device: Arc<dyn DeviceProvider>,
+    /// The shared GPU device context when a GPU backend was selected (`Auto` +
+    /// an available device) — used to upload the source stage and to read the
+    /// terminal tile back on the `Buffer` path. `None` under `ForceCpu` / no
+    /// device (the CPU path uploads/reads back in host memory).
+    gpu: Option<Arc<DeviceCtx>>,
 }
 
 impl Shared {
@@ -263,11 +270,35 @@ impl Shared {
             }
         };
 
-        // Evaluate. A node panic (e.g. an A-gpu stub reached on the CPU-only
-        // path) is caught and surfaced typed rather than aborting the worker.
+        // Source-stage injection: if the compiled graph has the engine-owned
+        // source stage (`src.decoded`), fetch the decoded source through the
+        // `SourceProvider` seam and lift it to a working tile — a pooled GPU
+        // texture on the GPU path (via `Uploader`) or an identical-bytes host
+        // buffer on the CPU path. Graphs without a source stage (probe
+        // generators) render without a fetch.
+        let source_inject = match graph.node_index(SrcDecodedNode::ID) {
+            Some(src_idx) => match self.fetch_source_tile(&req, &cancel) {
+                Ok(tile) => Some((src_idx, tile)),
+                Err(e) => {
+                    self.set_state(ticket, RenderState::Failed(e));
+                    return;
+                }
+            },
+            None => None,
+        };
+
+        // Evaluate. A node panic (e.g. a still-stubbed kernel reached off the
+        // wired path) is caught and surfaced typed rather than aborting the
+        // worker.
         let eval = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.executor
-                .evaluate(&graph, req.roi, req.scale, &self.cache, &cancel)
+            self.executor.evaluate(
+                &graph,
+                req.roi,
+                req.scale,
+                &self.cache,
+                &cancel,
+                source_inject.clone(),
+            )
         }));
         let tile = match eval {
             Ok(Ok(tile)) => tile,
@@ -300,12 +331,36 @@ impl Shared {
         self.set_state(ticket, RenderState::Complete(output));
     }
 
+    /// Fetch the decoded source for `req` and lift it to a working tile on the
+    /// active backend: a pooled GPU texture (via [`Uploader`]) on the GPU path,
+    /// or an identical-bytes host buffer on the CPU path. The engine never
+    /// decodes — pixels arrive through the [`SourceProvider`] seam (§3.8).
+    fn fetch_source_tile(
+        &self,
+        req: &RenderRequest,
+        cancel: &CancelToken,
+    ) -> Result<TileHandle, RenderError> {
+        let image = pollster::block_on(self.source.fetch(
+            req.image,
+            SourceWant::DecodedFull,
+            cancel,
+        ))?;
+        match &self.gpu {
+            Some(ctx) => Ok(Uploader::new().upload(ctx.as_ref(), &image)),
+            None => Ok(TileHandle::from_cpu(
+                crate::ng::source::to_working_tile_cpu(&image),
+            )),
+        }
+    }
+
     /// Turn a terminal tile into a [`RenderOutput`] for the request's target.
     fn finish(&self, req: &RenderRequest, tile: TileHandle) -> Result<RenderOutput, RenderError> {
         let backend = self.executor.backend_kind();
         let quality = OutputQuality::FullRes;
         let payload = match req.target {
-            RenderTarget::Buffer { format } => OutputPayload::Pixels(readback(&tile, format)?),
+            RenderTarget::Buffer { format } => {
+                OutputPayload::Pixels(readback(&tile, format, self.gpu.as_deref())?)
+            }
             RenderTarget::Canvas => {
                 // The engine-owned double-buffered canvas texture pair is wired
                 // by A-gpu (task A13). The CPU-only A-core path renders to a
@@ -367,11 +422,21 @@ impl Engine {
         compiler: RecipeCompiler,
         cfg: EngineConfig,
     ) -> Result<Engine, EngineInitError> {
-        // A-core builds the CPU backend regardless of `BackendPref`; A-gpu adds
-        // GPU-backend selection (device ctx from `dp`) at merge. `ForceCpu` is
-        // already honored today.
-        let _ = cfg.backend == BackendPref::Auto;
-        let backend: Arc<dyn Backend> = Arc::new(CpuBackend::new(cfg.cpu_threads));
+        // Backend selection across the frozen exec↔backend seam (spec §3.6):
+        // `ForceCpu` always takes the rayon CPU path; `Auto` builds the GPU
+        // backend on the shell's shared device (via the `DeviceProvider` seam)
+        // and keeps the device context for source upload + terminal readback.
+        // (Device-lost fallback GPU→CPU is task E; the CPU path is fully wired
+        // here.)
+        let (backend, gpu): (Arc<dyn Backend>, Option<Arc<DeviceCtx>>) = match cfg.backend {
+            BackendPref::ForceCpu => (Arc::new(CpuBackend::new(cfg.cpu_threads)), None),
+            BackendPref::Auto => {
+                let (device, queue) = dp.current();
+                let ctx = Arc::new(DeviceCtx::new(device, queue));
+                let backend: Arc<dyn Backend> = Arc::new(GpuBackend::new(&ctx));
+                (backend, Some(ctx))
+            }
+        };
         let executor = Executor::with_probe(
             backend,
             cfg.tile_size,
@@ -385,6 +450,7 @@ impl Engine {
             cache: NodeCache::new(),
             source: sp,
             device: dp,
+            gpu,
         });
 
         let (job_tx, job_rx) = mpsc::channel::<Job>();
@@ -499,15 +565,26 @@ impl Drop for Engine {
 }
 
 /// Read a terminal working tile back into a CPU [`PixelBuf`] of `format`
-/// (Buffer target; spec §3.6). The pack is **linear** — display encoding
+/// (Buffer target; spec §3.6). The tile lives on whichever backend produced it:
+/// a host buffer on the CPU path, or a pooled GPU texture copied back via
+/// [`readback_tile`] on the GPU path. The pack is **linear** — display encoding
 /// (sRGB/ICC) is the `xform.display` node's output, not the engine's job
 /// (E02 guardrail); a PV1 graph's terminal is already `DisplayRgba8`.
-fn readback(tile: &TileHandle, format: OutFormat) -> Result<PixelBuf, RenderError> {
-    let src = tile.cpu().ok_or_else(|| {
-        RenderError::Readback(
-            "terminal tile has no CPU pixels (GPU readback is wired by A-gpu)".to_owned(),
-        )
-    })?;
+fn readback(
+    tile: &TileHandle,
+    format: OutFormat,
+    gpu: Option<&DeviceCtx>,
+) -> Result<PixelBuf, RenderError> {
+    let src: PixelBuf = if let Some(px) = tile.cpu() {
+        px.clone()
+    } else if let Some(ctx) = gpu {
+        readback_tile(&ctx.device, &ctx.queue, tile)?
+    } else {
+        return Err(RenderError::Readback(
+            "terminal tile is GPU-resident but no device context is available for readback"
+                .to_owned(),
+        ));
+    };
     let target = match format {
         OutFormat::Rgba8Srgb => PixelFormat::Rgba8Srgb,
         // No 16-bit-unorm working format in the engine; the float tier carries
@@ -516,7 +593,7 @@ fn readback(tile: &TileHandle, format: OutFormat) -> Result<PixelBuf, RenderErro
         OutFormat::Rgba32F => PixelFormat::Rgba32F,
     };
     if src.format == target {
-        return Ok(src.clone());
+        return Ok(src);
     }
     let mut out = PixelBuf::new_zeroed(target, src.extent);
     for y in 0..src.extent.h {
@@ -735,11 +812,16 @@ mod tests {
         }
         let mut compiler = RecipeCompiler::with_registry(Arc::new(reg));
         compiler.register_template(PV_M0, template).unwrap();
+        // These probe graphs render on the CPU path over a `NullDevice`, so
+        // force the CPU backend (`Auto` would ask the null device for handles).
         Engine::with_compiler(
             Arc::new(NullDevice),
             Arc::new(NullSource),
             compiler,
-            EngineConfig::default(),
+            EngineConfig {
+                backend: BackendPref::ForceCpu,
+                ..EngineConfig::default()
+            },
         )
         .unwrap()
     }

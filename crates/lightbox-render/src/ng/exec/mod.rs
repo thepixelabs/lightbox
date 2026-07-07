@@ -92,6 +92,13 @@ impl Executor {
 
     /// Evaluate `graph` over `roi` at `scale`, threading `cache` and `cancel`
     /// through the topo walk; returns the terminal node's output tile.
+    ///
+    /// `source` optionally pre-populates the engine-owned source stage: its
+    /// `(index, tile)` names the graph node (`src.decoded`) whose single input
+    /// is the uploaded/decoded working tile. `src.decoded` declares zero graph
+    /// inputs but consumes the source as its one input (see `nodes::decoded`);
+    /// graphs without a source stage (probe generators like `test.const`) pass
+    /// `None` and generate their own root tile.
     pub fn evaluate(
         &self,
         graph: &RenderGraph,
@@ -99,6 +106,7 @@ impl Executor {
         scale: RenderScale,
         cache: &NodeCache,
         cancel: &CancelToken,
+        source: Option<(NodeIndex, TileHandle)>,
     ) -> Result<TileHandle, RenderError> {
         // Caching (get/put, tail invalidation) is task B; the v1 walk always
         // recomputes. Accept the handle so the signature is stable for B.
@@ -116,16 +124,25 @@ impl Executor {
             let node_id = node.descriptor().id;
             let _span = tracing::debug_span!("eval_node", node = %node_id).entered();
 
-            let input_idxs = graph.inputs_of(idx);
-            let mut inputs: Vec<TileHandle> = Vec::with_capacity(input_idxs.len());
-            for src in input_idxs {
-                let tile = outputs.get(&src).cloned().ok_or_else(|| {
-                    RenderError::Internal(format!(
-                        "node {node_id}: upstream output for {src:?} not yet evaluated"
-                    ))
-                })?;
-                inputs.push(tile);
-            }
+            // Source-stage injection: the pre-populated source node takes the
+            // uploaded/decoded tile as its sole input; every other node draws
+            // its inputs from upstream tiles already evaluated in this walk.
+            let inputs: Vec<TileHandle> = match &source {
+                Some((src_idx, src_tile)) if *src_idx == idx => vec![src_tile.clone()],
+                _ => {
+                    let input_idxs = graph.inputs_of(idx);
+                    let mut inputs = Vec::with_capacity(input_idxs.len());
+                    for src in input_idxs {
+                        let tile = outputs.get(&src).cloned().ok_or_else(|| {
+                            RenderError::Internal(format!(
+                                "node {node_id}: upstream output for {src:?} not yet evaluated"
+                            ))
+                        })?;
+                        inputs.push(tile);
+                    }
+                    inputs
+                }
+            };
 
             let params = graph.params(idx);
             let precision = node.precision();
