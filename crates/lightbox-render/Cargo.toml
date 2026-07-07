@@ -54,6 +54,16 @@ serde_json.workspace = true
 proptest.workspace = true
 # A-gpu integration tests (ng_gpu.rs) construct f16 working-format pixels.
 half.workspace = true
+# E05 Phase B cache integration tests (ng_cache.rs) + benches build KernelSalts
+# and content keys directly.
+blake3.workspace = true
+# E05 Phase B micro-benches (task B8): tail-only recompute vs full-graph,
+# cache hit rate under slider churn.
+criterion.workspace = true
+
+[[bench]]
+name = "cache"
+harness = false
 
 [lints]
 workspace = true

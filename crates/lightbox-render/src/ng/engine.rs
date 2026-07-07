@@ -18,21 +18,22 @@ use lightbox_jobs::CancelToken;
 use lightbox_types::ImageId;
 use tokio::sync::broadcast;
 
-use crate::ng::cache::NodeCache;
+use crate::ng::cache::{CacheKey, CacheKeyInputs, NodeCache, PinLabel};
 use crate::ng::colorimetry::{OutputColorimetry, SourceColorimetry, SourceKind};
 use crate::ng::compile::{GraphTemplate, RecipeCompiler, SourceDesc};
-use crate::ng::config::{BackendPref, EngineConfig};
+use crate::ng::config::{BackendPref, EngineConfig, VramBudget};
 use crate::ng::error::{EngineInitError, RenderError};
 use crate::ng::exec::cpu::CpuBackend;
 use crate::ng::exec::gpu::{readback_tile, GpuBackend};
-use crate::ng::exec::{Backend, Executor};
+use crate::ng::exec::{Backend, Executor, SourceInject};
 use crate::ng::gpu::DeviceCtx;
+use crate::ng::graph::{NodeIndex, RenderGraph};
 use crate::ng::node::NodeRegistry;
 use crate::ng::nodes::decoded::SrcDecodedNode;
 use crate::ng::source::{DeviceProvider, SourceProvider, SourceWant, Uploader};
-use crate::ng::stats::EngineStats;
+use crate::ng::stats::{EngineStats, RecomputeProbe};
 use crate::ng::tile::{PixelBuf, PixelFormat, TileHandle};
-use crate::ng::types::{Extent, ProcessVersion, RenderScale, Roi};
+use crate::ng::types::{Extent, ProcessVersion, RenderScale, Roi, TileCoord, TilePrecision};
 
 /// Which backend produced an output — provenance stamped on every
 /// [`RenderOutput`] (spec §3.6/§4.4). Returned by [`crate::ng::Backend::kind`].
@@ -271,19 +272,36 @@ impl Shared {
         };
 
         // Source-stage injection: if the compiled graph has the engine-owned
-        // source stage (`src.decoded`), fetch the decoded source through the
-        // `SourceProvider` seam and lift it to a working tile — a pooled GPU
-        // texture on the GPU path (via `Uploader`) or an identical-bytes host
-        // buffer on the CPU path. Graphs without a source stage (probe
-        // generators) render without a fetch.
+        // source stage (`src.decoded`), derive its (image-discriminated,
+        // scale-independent) content key and check whether it is already
+        // resident — a warm RAM pin means **zero** `SourceProvider::fetch`
+        // (task B4). On a miss, fetch the decoded source through the
+        // `SourceProvider` seam, lift it to a working tile, and RAM-pin it so
+        // later renders and device-loss re-warm skip the fetch. Graphs without a
+        // source stage (probe generators) render without a fetch.
         let source_inject = match graph.node_index(SrcDecodedNode::ID) {
-            Some(src_idx) => match self.fetch_source_tile(&req, &cancel) {
-                Ok(tile) => Some((src_idx, tile)),
-                Err(e) => {
-                    self.set_state(ticket, RenderState::Failed(e));
-                    return;
-                }
-            },
+            Some(src_idx) => {
+                let src_key = self.source_key(&req, &graph, src_idx);
+                let tile = match self.cache.peek(&src_key) {
+                    Some(hit) => hit.tile,
+                    None => match self.fetch_source_tile(&req, &cancel) {
+                        Ok(tile) => {
+                            self.cache
+                                .pin_tile(src_key, tile.clone(), PinLabel::SourceStage);
+                            tile
+                        }
+                        Err(e) => {
+                            self.set_state(ticket, RenderState::Failed(e));
+                            return;
+                        }
+                    },
+                };
+                Some(SourceInject {
+                    idx: src_idx,
+                    tile,
+                    key: src_key,
+                })
+            }
             None => None,
         };
 
@@ -293,6 +311,7 @@ impl Shared {
         let eval = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.executor.evaluate(
                 &graph,
+                req.pv,
                 req.roi,
                 req.scale,
                 &self.cache,
@@ -329,6 +348,35 @@ impl Shared {
             }
         };
         self.set_state(ticket, RenderState::Complete(output));
+    }
+
+    /// The content key for the engine-owned source stage (`src.decoded`).
+    ///
+    /// Discriminated by image (so a shared cache never confuses two images' sources)
+    /// and **scale-independent** — `DecodedFull` is the full source regardless of
+    /// preview scale, so the RAM pin is keyed per `(image, pv, kernel_salt,
+    /// params)`, not per render scale. Downstream nodes fold `scale_q` into their
+    /// own keys, so a scale change still invalidates the tail while the source
+    /// stays pinned (zero re-fetch — task B4).
+    fn source_key(&self, req: &RenderRequest, graph: &RenderGraph, src_idx: NodeIndex) -> CacheKey {
+        let mut seed = blake3::Hasher::new();
+        seed.update(b"lbx.src-image");
+        seed.update(&req.image.0.to_le_bytes());
+        let image_seed = CacheKey(seed.finalize());
+        CacheKey::derive(&CacheKeyInputs {
+            node_id: SrcDecodedNode::ID,
+            pv: req.pv,
+            kernel_salt: graph.salt(src_idx),
+            param_hash: graph.params(src_idx).hash(),
+            input_keys: &[image_seed],
+            tile: TileCoord {
+                tx: 0,
+                ty: 0,
+                scale_q: 0,
+            },
+            scale_q: 0,
+            precision: TilePrecision::F16,
+        })
     }
 
     /// Fetch the decoded source for `req` and lift it to a working tile on the
@@ -437,17 +485,18 @@ impl Engine {
                 (backend, Some(ctx))
             }
         };
-        let executor = Executor::with_probe(
-            backend,
-            cfg.tile_size,
-            Arc::new(crate::ng::stats::RecomputeProbe::new()),
-        );
+        // One shared recompute probe: the executor counts nodes_evaluated /
+        // cache hits+misses during the walk, and the cache mirrors its
+        // resident-byte gauge into it (Engine::stats reads both).
+        let probe = Arc::new(RecomputeProbe::new());
+        let executor = Executor::with_probe(backend, cfg.tile_size, Arc::clone(&probe));
+        let cache = NodeCache::with_budget_and_probe(vram_budget_bytes(&cfg), Arc::clone(&probe));
 
         let shared = Arc::new(Shared {
             tickets: Mutex::new(HashMap::new()),
             compiler,
             executor,
-            cache: NodeCache::new(),
+            cache,
             source: sp,
             device: dp,
             gpu,
@@ -549,8 +598,27 @@ impl Engine {
     }
 
     /// Engine counters, including the recompute-count probe (spec §3.6).
+    ///
+    /// `nodes_evaluated` and cache hits/misses come from the executor probe
+    /// (which decides hit vs miss during the walk); `cache_evictions` and
+    /// `vram_bytes` come from the cache's own accounting.
     pub fn stats(&self) -> EngineStats {
-        self.shared.executor.probe().snapshot()
+        let mut s = self.shared.executor.probe().snapshot();
+        let cs = self.shared.cache.stats();
+        s.cache_evictions = cs.evictions;
+        s.vram_bytes = cs.bytes;
+        s
+    }
+}
+
+/// Resolve a [`VramBudget`] policy to a concrete byte budget for the node cache.
+/// `Bytes(n)` is used verbatim; `Auto` uses the cache's default cap (adapter
+/// probing lands with the GPU device-lost work — the CPU-reference path has no
+/// adapter memory to probe).
+fn vram_budget_bytes(cfg: &EngineConfig) -> u64 {
+    match cfg.vram_budget {
+        VramBudget::Bytes(n) => n,
+        VramBudget::Auto => crate::ng::cache::DEFAULT_VRAM_BUDGET,
     }
 }
 

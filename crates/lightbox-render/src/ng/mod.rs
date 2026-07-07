@@ -75,7 +75,7 @@ pub use types::{
     Extent, NodeId, PortType, ProcessVersion, RenderScale, Roi, TileCoord, TilePrecision,
 };
 
-pub use cache::{Bytes, CacheKey, CacheStats, CachedTile, NodeCache, PinLabel};
+pub use cache::{Bytes, CacheKey, CacheKeyInputs, CacheStats, CachedTile, NodeCache, PinLabel};
 pub use compile::{GraphTemplate, RecipeCompiler, SourceDesc};
 pub use engine::{
     ActiveBackend, BackendId, Engine, EngineEvent, OutFormat, OutputPayload, OutputQuality,
@@ -83,7 +83,7 @@ pub use engine::{
 };
 pub use exec::backend::{Backend, BackendEvalRequest};
 pub use exec::cpu::CpuBackend;
-pub use exec::Executor;
+pub use exec::{Executor, SourceInject};
 pub use gpu::{DeviceCtx, KernelBuilder, TilePool};
 pub use graph::RenderGraph;
 pub use node::{
@@ -92,7 +92,7 @@ pub use node::{
     ParamValue, PortDecl, PvRange, RenderNode,
 };
 pub use recover::{DegradeState, RecoverStateMachine};
-pub use sched::{CanvasFrame, JobsHandle, RenderScheduler, ViewState, Zoom};
+pub use sched::{CanvasFrame, Coalescer, JobsHandle, RenderScheduler, ViewState, Zoom};
 pub use source::{DeviceProvider, SourceImage, SourceProvider, SourceWant, TileSink};
 pub use stats::{EngineStats, RecomputeProbe};
 

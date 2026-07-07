@@ -161,7 +161,15 @@ fn render_checker_gain(width: u32, height: u32, gain: f64) -> Vec<[u8; 4]> {
         h: height,
     };
     let tile = exec
-        .evaluate(&graph, roi, RenderScale::OneToOne, &cache, &cancel, None)
+        .evaluate(
+            &graph,
+            ProcessVersion(1),
+            roi,
+            RenderScale::OneToOne,
+            &cache,
+            &cancel,
+            None,
+        )
         .expect("reference render succeeds");
     let px = tile
         .cpu()

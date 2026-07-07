@@ -15,16 +15,29 @@ use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 
 use crate::ng::error::CompileError;
-use crate::ng::node::{ParamBlock, RenderNode};
+use crate::ng::node::{KernelSalt, ParamBlock, RenderNode};
 use crate::ng::types::NodeId;
 
 /// Index of a node within a [`RenderGraph`] (petgraph node handle).
 pub use petgraph::graph::NodeIndex;
 
-/// One node in the graph: its instance and validated params.
+/// One node in the graph: its instance, validated params, and the kernel salt
+/// that keys its cache output (spec §3.5). The salt is the WGSL/CPU algorithm
+/// revision the [`crate::ng::NodeFactory`] reports; the compiler stamps the
+/// registry salt at build (`registry.kernel_salt(id, pv)`), while directly-built
+/// graphs (tests, probes) get a deterministic per-node-id default so distinct
+/// node kinds still key distinctly.
 struct NodeEntry {
     node: Arc<dyn RenderNode>,
     params: ParamBlock,
+    salt: KernelSalt,
+}
+
+/// The default kernel salt for a node added without an explicit factory salt —
+/// a stable hash of the node id, so two distinct node kinds never collide on a
+/// cache key while an unchanged node id is deterministic across builds.
+fn default_salt(id: NodeId) -> KernelSalt {
+    KernelSalt(blake3::hash(id.0.as_bytes()))
 }
 
 /// A compiled, typed render DAG (spec §2.2/§3.1): a `petgraph` digraph of node
@@ -57,17 +70,32 @@ impl RenderGraph {
     }
 
     /// Adds a node instance with default (empty) params, returning its index.
+    /// The kernel salt defaults to a stable hash of the node id.
     pub fn add_node(&mut self, node: Arc<dyn RenderNode>) -> NodeIndex {
         self.add_node_with_params(node, ParamBlock::default())
     }
 
-    /// Adds a node instance with explicit `params`, returning its index.
+    /// Adds a node instance with explicit `params` and a default (id-derived)
+    /// kernel salt, returning its index.
     pub fn add_node_with_params(
         &mut self,
         node: Arc<dyn RenderNode>,
         params: ParamBlock,
     ) -> NodeIndex {
-        self.g.add_node(NodeEntry { node, params })
+        let salt = default_salt(node.descriptor().id);
+        self.add_node_full(node, params, salt)
+    }
+
+    /// Adds a node instance with explicit `params` and kernel `salt` — the
+    /// compiler stamps the registry salt (`registry.kernel_salt(id, pv)`) here so
+    /// a shipped-kernel change flips the content key (spec §3.5; task B2).
+    pub fn add_node_full(
+        &mut self,
+        node: Arc<dyn RenderNode>,
+        params: ParamBlock,
+        salt: KernelSalt,
+    ) -> NodeIndex {
+        self.g.add_node(NodeEntry { node, params, salt })
     }
 
     /// Connects `from`'s output to `to`'s input named `to_port`, type-checking
@@ -152,6 +180,12 @@ impl RenderGraph {
     /// The validated params at `idx`.
     pub fn params(&self, idx: NodeIndex) -> &ParamBlock {
         &self.g[idx].params
+    }
+
+    /// The kernel salt at `idx` — the WGSL/CPU algorithm revision folded into the
+    /// node's [`crate::ng::CacheKey`] (spec §3.5; task B2).
+    pub fn salt(&self, idx: NodeIndex) -> KernelSalt {
+        self.g[idx].salt
     }
 
     /// The upstream node feeding each of `idx`'s input ports, in port-declaration
