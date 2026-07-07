@@ -175,7 +175,7 @@ pub struct CpuTileView<'a> {
 
 /// An owned CPU pixel buffer — the currency of the `Buffer` render target,
 /// the source seam, and CPU readback (spec §3.6/§3.8).
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PixelBuf {
     /// Tightly/`stride`-packed pixel bytes.
     pub bytes: Vec<u8>,

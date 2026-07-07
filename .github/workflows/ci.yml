@@ -8,6 +8,19 @@
 # The 50-iteration kill -9 fault-injection subset (E01 T13, Risk-5 gate) runs
 # inside `cargo test`; the 1000-iteration leg is in nightly.yml (perf harness
 # T28 joins it in Phase 8).
+#
+# E05 Phase F2 (cross-platform golden subset, §8 DoD #8): this SAME 3-OS
+# `cargo test --workspace` step is also E05's cross-platform gate — it
+# carries the E05.1/E05.2/E05.3 phase gates (A16 single-node golden, B5
+# tail-invalidation, C2 fit-view ≤~8 MP), the D3 fast per-PV golden subset,
+# the E6 CPU/GPU parity + determinism gates, the F4 compiler-fuzz/
+# concurrency-stress subset, and the F5 headless CLI render→golden E2E, once
+# per OS/backend (Metal / DX12-WARP / Vulkan-lavapipe) with the single §4.4
+# ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB tolerance — no platform carve-outs. Only the
+# macOS/Metal leg has actually been observed green from this workstation (no
+# lavapipe/WARP installed here); the Windows/Linux legs are configured and
+# committed but unverified from this sandbox — see
+# `docs/plan/epics/E05-deviations.md` (F2).
 
 name: CI
 

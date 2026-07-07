@@ -1,11 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Lightbox contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end render through the headless session (E01 spec §5 T23 AC:
-//! "Engine renders fixture previews end-to-end"): catalog → import real
-//! fixtures → `Session::engine()` → `Engine::submit`/`poll` with
-//! `RenderTarget::CpuBuffer` — the exact path `lightbox-cli render` (T27)
-//! and the shell's loupe (T26) ride on. No UI type anywhere (seam 1).
+//! End-to-end render through the headless session (E01 spec §5 T23 AC,
+//! carried forward by E05 Phase F5: "Engine renders fixture previews
+//! end-to-end"): catalog → import real fixtures → `Session::engine()` →
+//! `Engine::submit`/`poll` with `RenderTarget::Buffer` — the exact path
+//! `lightbox-cli render` and the shell's loupe/canvas ride on. No UI type
+//! anywhere (seam 1).
+//!
+//! **F5 note:** this now drives `lightbox_render::ng::Engine` (the E05
+//! node-graph engine), not the E01 seed — see
+//! `docs/plan/epics/E05-deviations.md`.
 //!
 //! Requires the fixture corpus: `cargo xtask fixtures` (CI fetches it
 //! before `cargo test`, same as the decode/ingest fixture tests).
@@ -17,9 +22,10 @@ use lightbox_core::{
     CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, ImageQuery, Session, SortOrder,
 };
 use lightbox_edit::Recipe;
-use lightbox_render::{
-    RenderError, RenderOutput, RenderRequest, RenderScale, RenderState, RenderTarget, RenderTicket,
-    Roi, ViewportId,
+use lightbox_jobs::CancelToken;
+use lightbox_render::ng::{
+    Extent, OutFormat, OutputPayload, RenderError, RenderPriority, RenderRequest, RenderScale,
+    RenderState, RenderTarget, RenderTicket, Roi, SourceError,
 };
 use lightbox_types::{ImageId, PV_M0};
 use tempfile::TempDir;
@@ -90,15 +96,18 @@ fn image_by_filename(session: &Session, filename: &str) -> ImageId {
         .id
 }
 
-fn request(image: ImageId, scale: RenderScale, viewport: u64) -> RenderRequest {
+fn request(image: ImageId, w: u32, h: u32) -> RenderRequest {
     RenderRequest {
         image,
         recipe: Recipe::identity(PV_M0),
         pv: PV_M0,
-        roi: Roi::Full,
-        scale,
-        target: RenderTarget::CpuBuffer,
-        viewport: ViewportId(viewport),
+        roi: Roi { x: 0, y: 0, w, h },
+        scale: RenderScale::Fit(Extent { w, h }),
+        target: RenderTarget::Buffer {
+            format: OutFormat::Rgba8Srgb,
+        },
+        priority: RenderPriority::Interactive,
+        cancel: CancelToken::new(),
     }
 }
 
@@ -107,7 +116,7 @@ fn wait_terminal(session: &Session, ticket: &RenderTicket) -> RenderState {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match engine.poll(ticket) {
-            RenderState::Pending | RenderState::Running => {
+            RenderState::Queued | RenderState::Rendering { .. } => {
                 assert!(Instant::now() < deadline, "render never became terminal");
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -133,77 +142,67 @@ fn session_renders_fixture_previews_through_the_engine() {
         .expect("create catalog");
     import_dir(&session, &import_src);
 
-    // --- The raw: 3408×2272 (orientation 1) fit into 240×160 exactly. ---
+    // --- The raw: renders at the requested fit extent. ---
     let cr3 = image_by_filename(&session, "canon-eos-r6.cr3");
-    let ticket =
-        session
-            .engine()
-            .submit(request(cr3, RenderScale::FitWithin { w: 240, h: 160 }, 1));
+    let ticket = session.engine().submit(request(cr3, 240, 160));
     let buf = match wait_terminal(&session, &ticket) {
-        RenderState::Ready(RenderOutput::Cpu(buf)) => buf,
-        other => panic!("expected Ready(Cpu) for the CR3, got {other:?}"),
+        RenderState::Complete(out) => match out.payload {
+            OutputPayload::Pixels(px) => px,
+            other => panic!("expected Pixels for a Buffer target, got {other:?}"),
+        },
+        other => panic!("expected Complete for the CR3, got {other:?}"),
     };
     assert_eq!(
-        (buf.width, buf.height),
+        (buf.extent.w, buf.extent.h),
         (240, 160),
-        "3:2 fit within 240×160"
+        "renders at the requested extent"
     );
-    assert_eq!(buf.px.len(), 240 * 160 * 4);
+    assert_eq!(buf.bytes.len(), 240 * 160 * 4);
     assert!(
-        buf.px.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]),
+        buf.bytes.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]),
         "rendered preview has content"
     );
     assert!(
-        buf.px.chunks_exact(4).all(|p| p[3] == 255),
+        buf.bytes.chunks_exact(4).all(|p| p[3] == 255),
         "JPEG-sourced render is opaque"
     );
 
     // Byte-stable across runs on the same machine (T24 determinism AC — the
     // `lightbox-cli render --cpu` byte-stability check rides on this path).
-    let ticket =
-        session
-            .engine()
-            .submit(request(cr3, RenderScale::FitWithin { w: 240, h: 160 }, 2));
+    let ticket = session.engine().submit(request(cr3, 240, 160));
     match wait_terminal(&session, &ticket) {
-        RenderState::Ready(RenderOutput::Cpu(again)) => {
-            assert_eq!(again, buf, "CPU render must be byte-stable");
-        }
-        other => panic!("expected Ready(Cpu) on re-render, got {other:?}"),
+        RenderState::Complete(out) => match out.payload {
+            OutputPayload::Pixels(again) => {
+                assert_eq!(again.bytes, buf.bytes, "CPU render must be byte-stable");
+            }
+            other => panic!("expected Pixels, got {other:?}"),
+        },
+        other => panic!("expected Complete on re-render, got {other:?}"),
     }
 
     // --- The JPEG original serves as its own preview (16×16 → fit 8×8). ---
     let jpg = image_by_filename(&session, "lightbox-tiny.jpg");
-    let ticket = session
-        .engine()
-        .submit(request(jpg, RenderScale::FitWithin { w: 8, h: 8 }, 3));
+    let ticket = session.engine().submit(request(jpg, 8, 8));
     match wait_terminal(&session, &ticket) {
-        RenderState::Ready(RenderOutput::Cpu(buf)) => {
-            assert_eq!((buf.width, buf.height), (8, 8));
-        }
-        other => panic!("expected Ready(Cpu) for the JPEG, got {other:?}"),
+        RenderState::Complete(out) => match out.payload {
+            OutputPayload::Pixels(px) => {
+                assert_eq!((px.extent.w, px.extent.h), (8, 8));
+            }
+            other => panic!("expected Pixels, got {other:?}"),
+        },
+        other => panic!("expected Complete for the JPEG, got {other:?}"),
     }
 
     // --- No usable embedded preview → a Source failure, never a crash. ---
     let dng = image_by_filename(&session, "sigma-fp.dng");
-    let ticket = session
-        .engine()
-        .submit(request(dng, RenderScale::FitWithin { w: 64, h: 64 }, 4));
+    let ticket = session.engine().submit(request(dng, 64, 64));
     match wait_terminal(&session, &ticket) {
-        RenderState::Failed(RenderError::Source(msg)) => {
-            assert!(
-                msg.contains("no source pixels"),
-                "expected NotFound-shaped source error, got {msg:?}"
-            );
-        }
-        other => panic!("expected Failed(Source) for the previewless DNG, got {other:?}"),
+        RenderState::Failed(RenderError::Source(SourceError::NotFound)) => {}
+        other => panic!("expected Failed(Source(NotFound)) for the previewless DNG, got {other:?}"),
     }
 
     // --- Unknown image id → a Source failure through the same lifecycle. ---
-    let ticket = session.engine().submit(request(
-        ImageId(9_999_999),
-        RenderScale::FitWithin { w: 64, h: 64 },
-        5,
-    ));
+    let ticket = session.engine().submit(request(ImageId(9_999_999), 64, 64));
     assert!(
         matches!(
             wait_terminal(&session, &ticket),

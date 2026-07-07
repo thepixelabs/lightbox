@@ -15,6 +15,9 @@ publish.workspace = true
 lightbox-render.workspace = true
 lightbox-types.workspace = true
 lightbox-jobs.workspace = true
+# Recipe::identity for the F1 slider-latency harness (drives Engine::submit
+# through the same RenderRequest shape the scheduler/session façade use).
+lightbox-edit.workspace = true
 # f16 working-tile pixels; content hashing for recipe/manifest keys.
 half.workspace = true
 blake3.workspace = true
@@ -23,6 +26,8 @@ png.workspace = true
 # Corpus manifest (de)serialization.
 serde.workspace = true
 serde_json.workspace = true
+# The F1 harness's `DeviceProvider` impl names `wgpu::Device`/`Queue` directly.
+wgpu.workspace = true
 
 [lints]
 workspace = true

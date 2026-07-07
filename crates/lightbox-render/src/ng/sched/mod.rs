@@ -24,7 +24,7 @@ pub mod canvas;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use lightbox_jobs::{CancelToken, JobSystem};
 use lightbox_types::{ImageId, ProcessVersion};
 use tokio::sync::watch;
 
+use self::canvas::CanvasPublisher;
 use crate::ng::engine::{
     Engine, OutFormat, OutputQuality, RenderOutput, RenderPriority, RenderRequest, RenderState,
     RenderTarget, RenderTicket,
@@ -170,6 +171,10 @@ struct ImageState {
     last_recipe: Option<(Recipe, ProcessVersion)>,
     /// The most recently completed `(seq, output)` — proves final-wins.
     last_output: Option<(u64, RenderOutput)>,
+    /// The most recent terminal failure, if the latest completed attempt for
+    /// this image failed (F5: surfaced to the shell for an error badge; a
+    /// later success clears it). Cleared on the next `Complete`/`PreviewReady`.
+    last_error: Option<String>,
 }
 
 impl Default for ImageState {
@@ -181,6 +186,7 @@ impl Default for ImageState {
             last_view: None,
             last_recipe: None,
             last_output: None,
+            last_error: None,
         }
     }
 }
@@ -194,21 +200,33 @@ struct SchedShared {
     shutdown: AtomicBool,
     #[allow(dead_code)] // real Interactive-class registration is B/F wiring
     jobs: JobsHandle,
+    /// The GPU canvas double-buffer publisher, once enabled (task **F5**;
+    /// spec §3.7). `None` for headless/CPU-only/test schedulers — those keep
+    /// dispatching `Buffer`-target requests observable via
+    /// [`RenderScheduler::last_output`].
+    canvas: OnceLock<Arc<CanvasPublisher>>,
 }
 
 impl SchedShared {
-    /// Build a `Buffer`-target Interactive request from a job (the headless,
-    /// CPU-provable path; the canvas double-buffer wiring is task A13).
-    fn to_request(image: ImageId, job: &RenderJob) -> RenderRequest {
+    /// Build a render request from a job: a `Canvas` target once
+    /// [`RenderScheduler::enable_canvas`] has installed a publisher (the live
+    /// shell path, zero-copy), else a `Buffer` target (headless/CPU-only/test
+    /// path, observable via [`RenderScheduler::last_output`]).
+    fn to_request(&self, image: ImageId, job: &RenderJob) -> RenderRequest {
+        let target = if self.canvas.get().is_some() {
+            RenderTarget::Canvas
+        } else {
+            RenderTarget::Buffer {
+                format: OutFormat::Rgba8Srgb,
+            }
+        };
         RenderRequest {
             image,
             recipe: job.recipe.clone(),
             pv: job.pv,
             roi: job.view.pan,
             scale: RenderScale::Fit(job.view.viewport),
-            target: RenderTarget::Buffer {
-                format: OutFormat::Rgba8Srgb,
-            },
+            target,
             priority: RenderPriority::Interactive,
             cancel: CancelToken::new(),
         }
@@ -217,7 +235,7 @@ impl SchedShared {
     /// Dispatch `job` to the engine, recording the in-flight ticket + seq and
     /// bumping the submission counter. Caller holds the `images` lock.
     fn dispatch(&self, image: ImageId, st: &mut ImageState, job: RenderJob) {
-        let req = Self::to_request(image, &job);
+        let req = self.to_request(image, &job);
         let ticket = self.engine.submit(req);
         st.inflight_ticket = Some(ticket);
         st.inflight_seq = job.seq;
@@ -240,12 +258,24 @@ impl SchedShared {
                 match self.engine.poll(&ticket) {
                     RenderState::Complete(out) | RenderState::PreviewReady(out) => {
                         st.last_output = Some((st.inflight_seq, out));
+                        st.last_error = None;
                         st.inflight_ticket = None;
                         if let Some(next) = st.coalescer.complete() {
                             self.dispatch(id, st, next);
                         }
                     }
-                    RenderState::Failed(_) | RenderState::Cancelled => {
+                    RenderState::Failed(err) => {
+                        // Keep the last good `last_output` displayed (F5: the
+                        // shell composites the last successful generation
+                        // rather than blanking on a transient failure); record
+                        // the error for a status badge.
+                        st.last_error = Some(err.to_string());
+                        st.inflight_ticket = None;
+                        if let Some(next) = st.coalescer.complete() {
+                            self.dispatch(id, st, next);
+                        }
+                    }
+                    RenderState::Cancelled => {
                         st.inflight_ticket = None;
                         if let Some(next) = st.coalescer.complete() {
                             self.dispatch(id, st, next);
@@ -281,6 +311,7 @@ impl RenderScheduler {
             submissions: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             jobs,
+            canvas: OnceLock::new(),
         });
         let driver_shared = Arc::clone(&shared);
         let driver = std::thread::Builder::new()
@@ -382,6 +413,43 @@ impl RenderScheduler {
             .and_then(|s| s.last_output.as_ref().map(|(_, out)| out.clone()))
     }
 
+    /// The most recent terminal failure for `image`, if the latest completed
+    /// attempt failed (task F5: a shell error badge — the last *good* frame
+    /// stays composited via [`RenderScheduler::canvas`]/[`RenderScheduler::last_output`]
+    /// regardless). Cleared by the next successful render.
+    pub fn last_error(&self, image: ImageId) -> Option<String> {
+        let images = self
+            .shared
+            .images
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        images.get(&image).and_then(|s| s.last_error.clone())
+    }
+
+    /// Enables GPU canvas compositing (task **F5** M1 integration; spec §3.7):
+    /// builds a [`CanvasPublisher`] on `device`/`queue` (the shell's shared
+    /// device — §2.3 seam 2) sized to `extent`, installs it on the engine so
+    /// `RenderTarget::Canvas` requests publish through it, and switches this
+    /// scheduler's future dispatches from `Buffer` to `Canvas` targets.
+    /// Idempotent — a second call is a no-op (call once, at session-open,
+    /// with the shell's shared device). Headless engines (CLI, tests) simply
+    /// never call this and keep observing `Buffer` output via
+    /// [`RenderScheduler::last_output`].
+    pub fn enable_canvas(
+        &self,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        extent: Extent,
+    ) {
+        if self.shared.canvas.get().is_some() {
+            return;
+        }
+        let (publisher, _rx) = CanvasPublisher::new(device, queue, extent);
+        let publisher = Arc::new(publisher);
+        self.shared.engine.install_canvas(Arc::clone(&publisher));
+        let _ = self.shared.canvas.set(publisher);
+    }
+
     /// Block until every image is idle (no in-flight, no pending) or `timeout`
     /// elapses; returns `true` if it reached quiescence. A test/soak helper.
     pub fn wait_idle(&self, timeout: Duration) -> bool {
@@ -407,16 +475,20 @@ impl RenderScheduler {
         }
     }
 
-    /// Subscribe to completed canvas frames (spec §3.7; task A13). The canvas
-    /// double-buffer publisher requires the shell's shared GPU device and is
-    /// wired by **A-gpu (A13)** / M1 integration (**F5**); the headless
-    /// coalescing path (B6) drives `Buffer`-target renders observable via
-    /// [`RenderScheduler::last_output`].
-    pub fn canvas(&self) -> watch::Receiver<CanvasFrame> {
-        unimplemented!(
-            "A13 (A-gpu)/F5: RenderScheduler::canvas — GPU canvas double-buffer publisher \
-             (needs the shell device); B6 coalescing is observable via last_output/submissions"
-        )
+    /// Subscribe to completed canvas frames (spec §3.7), once
+    /// [`RenderScheduler::enable_canvas`] has installed a publisher.
+    ///
+    /// **F5 deviation from the spec's unconditional signature:** the spec
+    /// shows `canvas() -> watch::Receiver<CanvasFrame>`; this returns
+    /// `Option` instead of fabricating a placeholder `wgpu::TextureView`
+    /// (which needs a live device to construct) for schedulers that never
+    /// enabled a canvas — headless engines (CLI, perf harness, tests) have no
+    /// GPU compositing surface and correctly observe `None` rather than a
+    /// receiver that could never update. Nothing in-tree called the old
+    /// signature (it was an `unimplemented!()` stub); see
+    /// `docs/plan/epics/E05-deviations.md`.
+    pub fn canvas(&self) -> Option<watch::Receiver<CanvasFrame>> {
+        self.shared.canvas.get().map(|p| p.subscribe())
     }
 }
 

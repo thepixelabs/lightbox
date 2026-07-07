@@ -38,10 +38,12 @@ use lightbox_core::{
     CoreError, Event, ImageQuery, ImageSummary, IntegrityStatus, Session, SortOrder,
 };
 use lightbox_edit::Recipe;
-use lightbox_render::{
-    BackendKind, GpuContext, RenderOutput, RenderRequest, RenderScale, RenderState, RenderTarget,
-    Roi, ViewportId,
+use lightbox_jobs::CancelToken;
+use lightbox_render::ng::{
+    ActiveBackend, Extent, OutFormat, OutputPayload, RenderPriority, RenderRequest, RenderScale,
+    RenderState, RenderTarget, Roi,
 };
+use lightbox_render::GpuContext;
 use lightbox_types::{FolderId, ImageId, PV_M0};
 
 // E02 Phase H (H2): the decode → color → look reference subcommands.
@@ -458,54 +460,89 @@ fn cmd_render(args: &[String]) -> anyhow::Result<u8> {
         let session = core.open_catalog(&catalog, gpu)?;
 
         let image = ImageId(image);
-        // A clear "no such image" beats a source error out of the engine.
-        session
+        // A clear "no such image" beats a source error out of the engine —
+        // and its width/height double as the render's real "full extent"
+        // (see the roi/scale note just below).
+        let detail = session
             .query()
             .image_detail(image)
             .with_context(|| format!("image {} not found in the catalog", image.0))?;
 
-        // The SAME Engine::submit/poll path as the shell's loupe (T27).
+        // The SAME `ng::Engine::submit`/`poll` path as the shell's loupe/canvas
+        // (E05 Phase F5 — replaces the E01 seed's `Engine::submit`).
+        //
+        // F5 deviation (see `docs/plan/epics/E05-deviations.md`): the M1
+        // executor wired to `Engine::submit` is Phase A/B/E's untiled base
+        // walk, not Phase C's tiling/scale executor — Phase C's
+        // `ng::exec::scale::derive` is built and gated in `lightbox-render`'s
+        // own test suite but not yet threaded into the live per-render path.
+        // On the CPU backend the **request `roi`, not `RenderScale`**, is
+        // what actually sizes every node's output tile at M1
+        // (`exec/cpu/mod.rs` allocates `Extent{w: req.roi.w, h: req.roi.h}`
+        // unconditionally). So `roi` is computed here from the catalog's
+        // known dimensions via the *same* fit-ratio math Phase C ships
+        // (`ng::exec::scale::derive`) — not a placeholder — to get a
+        // correctly-sized, bounded render; `scale` is still passed through
+        // correctly for when the live path picks up Phase C's decimation.
+        // Leaving `roi` at an arbitrary/oversized placeholder here previously
+        // asked the CPU backend to allocate one absurd (unbounded) tile per
+        // node — a real resource-exhaustion bug, not just a cosmetic gap.
+        let full = lightbox_render::ng::Extent {
+            w: detail.width.max(1),
+            h: detail.height.max(1),
+        };
+        let scale = match width {
+            Some(w) => RenderScale::Fit(Extent { w, h: w }),
+            None => RenderScale::OneToOne,
+        };
+        let resolution = lightbox_render::ng::exec::scale::derive(scale, full);
+
         let engine = session.engine();
         let ticket = engine.submit(RenderRequest {
             image,
             recipe: Recipe::identity(PV_M0),
             pv: PV_M0,
-            roi: Roi::Full,
-            scale: match width {
-                Some(w) => RenderScale::FitWithin { w, h: w },
-                None => RenderScale::Native,
+            roi: Roi {
+                x: 0,
+                y: 0,
+                w: resolution.extent.w,
+                h: resolution.extent.h,
             },
-            target: RenderTarget::CpuBuffer,
-            viewport: ViewportId(1),
+            scale,
+            target: RenderTarget::Buffer {
+                format: OutFormat::Rgba8Srgb,
+            },
+            priority: RenderPriority::Batch,
+            cancel: CancelToken::new(),
         });
         let deadline = Instant::now() + Duration::from_secs(300);
         let buf = loop {
             match engine.poll(&ticket) {
-                RenderState::Pending | RenderState::Running => {
+                RenderState::Queued | RenderState::Rendering { .. } => {
                     if Instant::now() > deadline {
                         bail!("render timed out");
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                RenderState::Ready(RenderOutput::Cpu(buf)) => break buf,
-                RenderState::Ready(RenderOutput::Texture { .. }) => {
-                    bail!("engine returned a texture for a CpuBuffer request (bug)")
-                }
+                RenderState::Complete(out) | RenderState::PreviewReady(out) => match out.payload {
+                    OutputPayload::Pixels(px) => break px,
+                    OutputPayload::CanvasGeneration(_) => {
+                        bail!("engine returned a canvas generation for a Buffer request (bug)")
+                    }
+                },
                 RenderState::Failed(err) => bail!("render failed: {err}"),
-                RenderState::Cancelled | RenderState::Superseded => {
-                    bail!("render did not complete (cancelled/superseded)")
-                }
+                RenderState::Cancelled => bail!("render did not complete (cancelled)"),
             }
         };
 
-        let (w, h) = (buf.width, buf.height);
-        lbx_image_compare::Rgba8Image::new(w, h, buf.px)
+        let (w, h) = (buf.extent.w, buf.extent.h);
+        lbx_image_compare::Rgba8Image::new(w, h, buf.bytes)
             .map_err(|e| anyhow!("render output malformed: {e}"))?
             .write_png(&out)
             .map_err(|e| anyhow!("writing {}: {e}", out.display()))?;
-        let backend = match engine.backend_kind() {
-            BackendKind::Gpu(b) => format!("gpu ({b:?})"),
-            BackendKind::CpuOnly => "cpu".to_owned(),
+        let backend = match engine.active_backend() {
+            ActiveBackend::Gpu(info) => format!("gpu ({:?})", info.backend),
+            ActiveBackend::CpuPreviewOnly => "cpu".to_owned(),
         };
         println!("wrote {} ({w}x{h}, {backend})", out.display());
         session.close(CloseOpts::with_backup(ClosePolicy::Skip))?;

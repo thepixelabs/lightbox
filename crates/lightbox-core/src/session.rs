@@ -34,8 +34,14 @@ use lightbox_catalog::{BackupOpts, BackupReport, Catalog, CatalogTxn};
 use lightbox_ingest::{import_add_in_place, ImportEvent, ImportOptions};
 use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
 use lightbox_preview::{AssetLocator, EmbeddedPreviewProvider, PreviewProvider};
-use lightbox_render::nodes::display_transform::{DisplayTransformNode, DisplayTransformPlanner};
-use lightbox_render::{Engine, GpuContext, NodeRegistry};
+use lightbox_render::ng::nodes::decoded::{SrcDecodedFactory, SrcDecodedNode};
+use lightbox_render::ng::nodes::display::{XformDisplayFactory, XformDisplayNode};
+use lightbox_render::ng::nodes::resize::{UtilResizeFactory, UtilResizeNode};
+use lightbox_render::ng::{
+    BackendPref, DeviceProvider, Engine, EngineConfig, EngineEvent, JobsHandle, NodeRegistry,
+    PvRange, RenderScheduler, SourceProvider,
+};
+use lightbox_render::GpuContext;
 use lightbox_types::PV_M0;
 use tokio::sync::{broadcast, mpsc};
 
@@ -45,7 +51,7 @@ use crate::error::Result;
 use crate::event::{ChangeSet, Event};
 use crate::previews::CatalogAssetLocator;
 use crate::queries::Queries;
-use crate::render_source::PreviewSourceResolver;
+use crate::render_source::{NullDeviceProvider, PreviewSourceProvider, SharedDeviceProvider};
 
 /// The headless core (spec §3.8): owns the job system; opens sessions.
 pub struct Core {
@@ -144,6 +150,7 @@ pub struct Session {
 struct SessionInner {
     catalog: Arc<Catalog>,
     engine: Arc<Engine>,
+    scheduler: Arc<RenderScheduler>,
     previews: Arc<dyn PreviewProvider>,
     events: broadcast::Sender<Event>,
     cmd_tx: mpsc::UnboundedSender<Queued>,
@@ -174,32 +181,103 @@ impl Session {
             core.cfg.preview_cache_bytes,
         ));
 
-        // T23 wiring: `display.transform` under PV_M0, planned over the
-        // embedded-preview SourceResolver — the loupe image is produced by
-        // Engine::submit, never a blit path that bypasses the engine
-        // (spec §9 M0, verbatim requirement).
+        // E05 Phase F5 (M1 integration): the PV1 engine-owned nodes
+        // (`src.decoded → util.resize → xform.display`) registered against
+        // the `ng` engine — the loupe/canvas is produced by
+        // `RenderScheduler`/`Engine::submit` through `lightbox-render::ng`,
+        // never a blit path that bypasses the engine (spec §9 M0 verbatim
+        // requirement, now satisfied by the E05 engine rather than the E01
+        // seed — see `docs/plan/epics/E05-deviations.md`).
         let mut registry = NodeRegistry::new();
-        registry.register(PV_M0, Arc::new(DisplayTransformNode::new()));
+        registry
+            .register(
+                SrcDecodedNode::ID,
+                PvRange::from_open(PV_M0),
+                Arc::new(SrcDecodedFactory::default()),
+            )
+            .map_err(|e| crate::error::CoreError::Internal(format!("node registry: {e}")))?;
+        registry
+            .register(
+                UtilResizeNode::ID,
+                PvRange::from_open(PV_M0),
+                Arc::new(UtilResizeFactory::default()),
+            )
+            .map_err(|e| crate::error::CoreError::Internal(format!("node registry: {e}")))?;
+        registry
+            .register(
+                XformDisplayNode::ID,
+                PvRange::from_open(PV_M0),
+                Arc::new(XformDisplayFactory::default()),
+            )
+            .map_err(|e| crate::error::CoreError::Internal(format!("node registry: {e}")))?;
+
+        let device_provider: Arc<dyn DeviceProvider> = match &gpu {
+            Some(gpu) => Arc::new(SharedDeviceProvider::new(gpu.clone())),
+            // No adapter: `ForceCpu` below never calls `DeviceProvider`.
+            None => Arc::new(NullDeviceProvider),
+        };
+        let source_provider: Arc<dyn SourceProvider> =
+            Arc::new(PreviewSourceProvider::new(Arc::clone(&previews)));
+        let backend = if gpu.is_some() {
+            BackendPref::Auto
+        } else {
+            BackendPref::ForceCpu
+        };
         let engine = Arc::new(Engine::new(
-            gpu,
+            device_provider,
+            source_provider,
             registry,
-            Arc::new(PreviewSourceResolver::new(
-                Arc::clone(&previews),
-                Arc::clone(&locator),
-            )),
+            EngineConfig {
+                backend,
+                ..EngineConfig::default()
+            },
         )?);
-        engine.set_planner(Arc::new(DisplayTransformPlanner));
+        let scheduler = Arc::new(RenderScheduler::new(
+            Arc::clone(&engine),
+            JobsHandle(Arc::clone(&core.jobs)),
+        ));
+        if let Some(gpu) = &gpu {
+            scheduler.enable_canvas(
+                gpu.device.clone(),
+                gpu.queue.clone(),
+                lightbox_render::ng::Extent { w: 64, h: 64 },
+            );
+        }
 
         let (events, _) = broadcast::channel::<Event>(core.cfg.event_capacity.max(16));
 
-        // DeviceDegraded seam (spec §3.8): M0 wiring is a straight relay of
-        // the engine's degenerate device-lost handling (E05.5 owns recovery).
+        // DeviceDegraded seam (spec §3.8): relay the engine's device-lost /
+        // degraded-to-CPU events onto the core event bus. `ng::Engine::events`
+        // is a broadcast channel (not a callback like the E01 seed's
+        // `on_device_lost`), so this is a long-lived relay task rather than a
+        // registered closure; it ends when the engine drops (the channel
+        // closes) or the session's last clone drops the `events` sender.
+        let mut engine_events = engine.events();
         let degraded_events = events.clone();
-        engine.on_device_lost(Box::new(move |reason| {
-            let _ = degraded_events.send(Event::DeviceDegraded {
-                reason: reason.message().to_owned(),
-            });
-        }));
+        core.jobs.handle().spawn(async move {
+            loop {
+                match engine_events.recv().await {
+                    Ok(ev) => {
+                        let reason = match ev {
+                            EngineEvent::DeviceLost { reason } => Some(reason),
+                            EngineEvent::DegradedToCpu => {
+                                Some("degraded to CPU preview-only".to_owned())
+                            }
+                            // EngineEvent is #[non_exhaustive]; future engine
+                            // events get core translations when they get core
+                            // meaning (same convention as `ImportEvent` below).
+                            EngineEvent::GpuReenabled | EngineEvent::VramPressure { .. } => None,
+                            _ => None,
+                        };
+                        if let Some(reason) = reason {
+                            let _ = degraded_events.send(Event::DeviceDegraded { reason });
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Queued>();
         let session_cancel = CancelToken::new();
@@ -228,6 +306,7 @@ impl Session {
             inner: Arc::new(SessionInner {
                 catalog,
                 engine,
+                scheduler,
                 previews,
                 events,
                 cmd_tx,
@@ -275,9 +354,21 @@ impl Session {
         Arc::clone(&self.inner.previews)
     }
 
-    /// The render engine (spec §3.4 seam).
+    /// The render engine (spec §3.4 seam). **E05 Phase F5:** this is now
+    /// `lightbox_render::ng::Engine` — the full E05 node-graph engine, not
+    /// the E01 seed (which remains at the `lightbox-render` crate root,
+    /// unused by the live app; see `docs/plan/epics/E05-deviations.md`).
     pub fn engine(&self) -> Arc<Engine> {
         Arc::clone(&self.inner.engine)
+    }
+
+    /// The render scheduler (spec §3.7): latest-wins coalescing + the canvas
+    /// double-buffer publisher (task F5 M1 integration). The shell subscribes
+    /// to [`RenderScheduler::canvas`] for zero-copy composited frames; a
+    /// headless caller (CLI) may submit directly through [`Session::engine`]
+    /// instead.
+    pub fn render_scheduler(&self) -> Arc<RenderScheduler> {
+        Arc::clone(&self.inner.scheduler)
     }
 
     /// The catalog's schema version (all pending migrations were applied at

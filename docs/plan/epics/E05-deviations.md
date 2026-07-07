@@ -820,3 +820,310 @@ warnings` · `cargo fmt --all --check` · `cargo deny check` — all green (test
 merge report). The four §10.1 phase gates (A16 golden, B5 tail-invalidation, C2 fit-view ≤~8 MP, E5
 degrade-keeps-editing) and the E6 CPU/GPU parity + determinism gates all pass on the real Metal
 adapter post-merge.
+
+## Phase F — Cross-cutting & M1 integration (F1–F5) — 2026-07-07, branch `e05-f`
+
+Worktree branched from `main` at `c7d01eb` (merge E05 e05-e). Phase D (per-PV registry) lands on a
+separate branch `e05-d` and is **not** included here per the task assignment — this phase's own
+work touches none of D's territory (`compile/` per-PV template selection). Tasks landed: **F5 F3
+F4 F1 F2**, in that priority order. Full five-gate exit bar green in the worktree on the real Metal
+adapter throughout (re-verified after every task, final re-verification below).
+
+### F5 — M1 integration: the app now renders through `ng`, not the E01 seed
+
+**The non-negotiable part is done: `lightbox-core`, `lightbox-shell`, and `lightbox-cli` all render
+through `lightbox_render::ng::Engine`/`RenderScheduler`. The E01 seed is no longer on any live
+canvas path.** Proof commands, actual output:
+
+```
+$ cargo run -p lightbox-shell -- --smoke 60
+...
+seam-2 smoke: frames=95 texture_swaps=1 seam_proven=true
+OK: import → grid → loupe drove an engine texture zero-copy on the shared wgpu device
+$ echo $?
+0
+
+$ cargo test -p lightbox-cli --test e2e create_import_list_render_check_backup_flow
+test create_import_list_render_check_backup_flow ... ok
+```
+
+The CLI e2e test (`crates/lightbox-cli/tests/e2e.rs`) **is** the headless E2E "renders
+image+recipe+pv → PNG matching a committed golden" proof the task asks for — it already drove
+`create → import → render → golden-compare → determinism → unknown-image-failure` before this
+phase; F5 rewired its render path to `ng` and re-blessed the golden (see "golden re-bless" below).
+A dedicated new test was judged redundant with this one and not added separately.
+
+**Seed promotion+deletion: DEFERRED, not done.** Full `ng` → crate-root promotion + physical seed
+deletion (DoD #5's literal text) was assessed and **not** attempted: the seed's own 4 tests
+(`adapter_smoke`, `gpu_context`, `engine_lifecycle`, `display_transform`) and 3 external consumers
+(now down to informational-only, since F5 rewired all 3 real consumers off it) would need to move
+or delete in the same pass as the rewiring above, and the risk of a large simultaneous
+rename+delete+rewire landing broken outweighed the benefit — the task's own text names this
+tradeoff as acceptable ("if full promotion+deletion balloons into a large risky change, it is
+ACCEPTABLE to instead make ng the ACTIVE engine"). **What's true today:** `lightbox_render::Engine`
+(seed) still exists at the crate root, its 4 tests still pass, but **zero non-test, non-seed code
+references it** — grep `lightbox_render::Engine\b` outside `crates/lightbox-render/src/{engine,planner,pool,node,source,error}.rs` and its own test files, and check
+`crates/lightbox-render/tests/{adapter_smoke,gpu_context,engine_lifecycle,display_transform}.rs`;
+nothing else resolves. **Follow-up (named, not done):** promote `ng` → crate root, delete
+`engine.rs`/`node.rs`/`planner.rs`/`gpu.rs`/`pool.rs`/`source.rs`/`error.rs` (root) and their 4
+test files, drop the `pub mod ng;` line. A future phase agent doing this has zero remaining live
+consumers to coordinate — it is now a pure rename+delete inside `lightbox-render`, materially
+smaller than it would have been mid-rewire.
+
+#### What changed, file by file
+
+- **`crates/lightbox-render/src/ng/engine.rs`** — `Shared` gains a `canvas: RwLock<Option<Arc<CanvasPublisher>>>`
+  field; `Engine::install_canvas(&self, publisher: Arc<CanvasPublisher>)` added (mirrors the seed's
+  `set_planner`/`on_device_lost` pattern). `RenderTarget::Canvas`'s `finish()` branch — previously a
+  hardcoded "wired by A-gpu" error — now publishes the GPU-resident terminal tile through the
+  installed publisher (zero-copy `copy_texture_to_texture`, no readback) or fails typed if no
+  publisher is installed or the tile is CPU-resident (degraded-to-CPU sessions must use a `Buffer`
+  target — noted, not solved, below).
+- **`crates/lightbox-render/src/ng/sched/mod.rs`** — `SchedShared` gains `canvas: OnceLock<Arc<CanvasPublisher>>`
+  and `ImageState` gains `last_error: Option<String>`. New `RenderScheduler::enable_canvas(device,
+  queue, extent)` (idempotent — builds the publisher once, installs it on the engine, switches
+  future dispatches from `Buffer` to `Canvas` targets) and `RenderScheduler::last_error(image)`.
+  **Deviation from the spec's literal signature:** `canvas() -> watch::Receiver<CanvasFrame>`
+  becomes **`canvas() -> Option<watch::Receiver<CanvasFrame>>`**. The spec's unconditional signature
+  cannot be honestly implemented without either (a) requiring every scheduler to have a live GPU
+  device at construction (breaks every existing CPU-only test/CLI use) or (b) fabricating a
+  placeholder `wgpu::TextureView`, which needs a live device to construct in the first place —
+  there is no way to manufacture one. Nothing in-tree called the old signature (it was
+  `unimplemented!()`, never exercised), so this is a free, zero-blast-radius correction, not a
+  breaking change to a working caller. Proven end-to-end by
+  `crates/lightbox-render/tests/ng_f5_canvas.rs` (2 new tests, real Metal device): enabling canvas
+  publishes real generations through a PV1 render; a scheduler that never enables canvas stays on
+  `Buffer` targets and `canvas()` stays `None` throughout.
+- **`crates/lightbox-core/src/render_source.rs`** — fully rewritten (was the E01 seed's
+  `SourceResolver`/`PreviewSourceResolver`; now `ng::DeviceProvider`/`ng::SourceProvider` impls):
+  `SharedDeviceProvider` wraps the session's `GpuContext`; `PreviewSourceProvider` adapts
+  `lightbox-preview`'s `EmbeddedPreviewProvider` to the async `ng::SourceProvider::fetch` seam;
+  `NullDeviceProvider` satisfies the CPU-only (`ForceCpu`) constructor path (its methods are
+  `unreachable!()` — `ForceCpu` never calls `DeviceProvider` at all, verified by reading
+  `Engine::with_compiler`'s backend-selection branch).
+- **`crates/lightbox-core/src/session.rs`** — `SessionInner` gains a `scheduler: Arc<RenderScheduler>`
+  field alongside `engine: Arc<ng::Engine>` (was the seed's `Engine`). `Session::open` builds the
+  PV1 registry (`SrcDecodedFactory`/`UtilResizeFactory`/`XformDisplayFactory`, each
+  `PvRange::from_open(PV_M0)`), the device/source providers, `Engine::new`, `RenderScheduler::new`,
+  and — when a GPU is present — `scheduler.enable_canvas(...)`. The E01 seed's synchronous
+  `engine.on_device_lost(callback)` relay becomes an async task (`core.jobs.handle().spawn(...)`)
+  subscribing to `ng::Engine::events()` (a broadcast channel, not a callback) and translating
+  `DeviceLost`/`DegradedToCpu` into the same `Event::DeviceDegraded` the shell already handles — no
+  shell-side change needed for that path. New `Session::render_scheduler()` accessor alongside the
+  existing `Session::engine()` (now typed `Arc<ng::Engine>`).
+- **`crates/lightbox-core/src/error.rs`** — `CoreError::Engine` now wraps `ng::EngineInitError`
+  (was the seed's `EngineError`).
+- **`crates/lightbox-core/tests/render_end_to_end.rs`** — rewritten for the `ng` `RenderRequest`/
+  `RenderState`/`OutputPayload` shapes (was `RenderTarget::CpuBuffer`/`RenderOutput::Cpu`/
+  `RenderScale::FitWithin`). Still renders the **real CR3/JPEG/DNG fixtures** end-to-end through
+  `Session::engine()` and asserts the same four cases the seed-era test did (successful render,
+  byte-stable re-render, JPEG-as-own-preview, previewless-DNG typed failure, unknown-image typed
+  failure) — now via `ng`.
+- **`crates/lightbox-core/tests/session.rs`** — one assertion updated (`engine.backend_kind()` →
+  `engine.active_backend()`, `BackendKind::CpuOnly` → `ActiveBackend::CpuPreviewOnly`).
+- **`crates/lightbox-shell/src/loupe.rs`** — rewritten from the pull model (`Engine::submit`/`poll`
+  per `ViewportId`) to the push model (`RenderScheduler::set_view`/`set_recipe` dispatch,
+  `watch::Receiver<CanvasFrame>` sampled each frame via `borrow_and_update`). `LoupeView::ui` now
+  takes `&RenderScheduler` + `max_tex_dim: u32` instead of `&Engine` (the device-limits query moved
+  to the caller, `lib.rs`, since `ng::Engine` doesn't expose `.gpu()`). The info overlay now shows a
+  live `OutputQuality` badge (`preview` / `preview-res` / `full-res`) instead of the old static
+  "embedded preview" label — the task's "progressive `OutputQuality` badge states" requirement,
+  satisfied honestly: it reflects the real `CanvasFrame.quality` on every observed generation, but
+  see the progressive-ladder note below for what it does *not* yet show (multiple intermediate
+  qualities per navigation).
+- **`crates/lightbox-shell/src/lib.rs`** — `LoupeView::new` takes `&session.render_scheduler()`;
+  the Loupe branch of `ui()` passes `&scheduler` + `self.gpu.limits.max_texture_dimension_2d`
+  instead of `&engine`. The T7/T26 same-device debug assertion changes from an `Arc::ptr_eq` proof
+  (needed `Engine::gpu()`, which `ng::Engine` doesn't expose) to `matches!(active_backend(),
+  ActiveBackend::Gpu(_))` — a structural argument replaces the runtime pointer check (documented
+  inline: `Session::open` builds `SharedDeviceProvider` from exactly the `gpu.clone()` passed to
+  it, and `Engine::with_compiler`'s `Auto` branch has no other device-creation path).
+- **`crates/lightbox-cli/src/main.rs`** (`cmd_render`) — rewired to `ng::Engine::submit`/`poll` with
+  a `Buffer` target (CLI is headless, no canvas). See "the roi/scale sizing bug" below for the
+  most consequential change here.
+- **`tools/lbx-perf/src/scenarios.rs`, `Cargo.toml`** — `nav_swap`/`nav_request`/`wait_terminal`
+  rewired to `ng` types; added the `lightbox-jobs` dependency (`CancelToken`). `session.engine().backend_kind()`
+  → `.active_backend()`.
+- **`crates/lightbox-render/src/ng/tile.rs`** — `PixelBuf` gains `#[derive(PartialEq, Eq)]`
+  (additive; needed for the rewritten `render_end_to_end.rs` byte-stability assertion, and
+  generally useful — nothing else changed shape).
+
+#### A real bug found and fixed while wiring the CLI: unbounded `roi` on the CPU backend
+
+While proving `lightbox-cli render` end-to-end against the real `canon-eos-r6.cr3` fixture, a first
+pass (a placeholder `roi: {w: u16::MAX, h: u16::MAX}` for the no-`--width` case) **hung for 3+
+minutes and grew to 5+ GB RSS** before being killed. Root cause, confirmed by reading
+`ng::exec::cpu::CpuBackend::eval_node`: **the CPU backend allocates every node's output tile as
+`Extent { w: req.roi.w, h: req.roi.h }` — the request's `roi`, unconditionally** (not
+`node.output_extent(inputs, params)`, which is what the trait default and the GPU backend use).
+`roi` is not a cosmetic/unused field on the CPU path — it is **the actual output-size control** at
+M1. This is undocumented in the spec text (which describes `roi` primarily as an apron/ROI-planning
+concept) and is a **real inconsistency between the two backends** the spec doesn't call out (the
+GPU backend ignores `roi` and always uses `output_extent()`, i.e., native/identity size — see the
+next section). **Fix applied (`cmd_render`):** the CLI now queries the catalog's known
+`width`/`height` (already fetched for the "image exists" check) and derives the correct target
+extent via `ng::exec::scale::derive(scale, full_extent)` — the **same** Phase-C fit-ratio math,
+reused as a library call rather than duplicated — before submitting. Verified: `--width 240` on the
+CR3 fixture now produces exactly `240×160` (matches the pre-E05 CLI's `FitWithin` behavior
+byte-for-byte in *shape*, confirmed via the e2e test); no `--width` now renders at the CR3's real
+native `3408×2272` in **9.6 s** (release-equivalent-ish debug build), not 3+ minutes / 5+ GB. This
+is recorded here because it is a genuine resource-exhaustion bug a naive F5 integration would have
+shipped, not a style note — **any future caller of `ng::Engine::submit` on the CPU backend must
+size `roi` to the real intended output, never a sentinel/placeholder.**
+
+#### DEFERRED / known gaps surfaced by making the app actually render (all real, none fixed here)
+
+| # | Gap | Why it's out of scope for F5 | Where it's recorded |
+|---|---|---|---|
+| 1 | **Phase C's tiling/scale/progressive executor is not wired into the live `Engine::submit` path.** The base (Phase A/B/E) untiled walk is what `Shared::process` actually calls; `ng::exec::scale::derive`, `ng::exec::tiling::TileRender`, and `ng::exec::progressive::Ladder` are fully built and gated **in isolation** (`lightbox-render`'s own test suite: `tests/scale.rs`, `tests/tiling.rs`, `tests/progressive.rs` — all green) but never invoked from `Shared::process`. Consequence: (a) on the **GPU** backend, every node's output is sized by `output_extent()` (identity) — `RenderScale::Fit`/`Ratio` are accepted but not enforced by decimation, so a GPU render is always native-resolution regardless of requested scale; (b) the shell's progressive badge shows only `FullRes` in practice (the ladder's multi-stage `PreviewReady` sequence never fires on the live path); (c) 256² visible-first tiling and apron-correct neighborhood nodes are inert on the live path (correct today only because no shipped node yet needs an apron > 0). | This is Phase C's own unfinished integration debt, not new work generated by F5 — F5's job was "wire `ng` in," not "finish wiring `ng`'s internals to each other." Doing it properly means replacing `Shared::process`'s call to `Executor::evaluate` with `TileRender`, handling the ladder's multi-state `RenderState` transitions, and re-verifying every existing E05 gate against the new live path — a change of Phase-C-sized scope, not a small integration touch, and too risky to attempt blind alongside F1–F4 in the same pass. | This table; follow-up task should be filed against E05 (or picked up first-thing by E10, which needs real decimation for its own perf budget). |
+| 2 | **CPU-backend `roi`-drives-size vs GPU-backend `output_extent()`-drives-size inconsistency** (see previous section) is real and undocumented in the spec. | Reconciling the two backends is part of gap #1 (the real fix is wiring Phase C's executor, which sizes both backends identically via the derived `RenderResolution`). | This table; `docs/engine-book/01-node-author-guide.md` does not yet mention it — a follow-up should add a callout once #1 lands. |
+| 3 | **Orientation is not applied by `ng`'s `xform.display`.** The E01 seed's `display.transform` node took an `orientation: u8` param and rotated/flipped accordingly; `ng`'s `xform.display` (per the A-gpu `D-display-srgb` deviation above) applies only `lightbox_color::display::build_display_transform` — no geometry. `PreviewSourceProvider` (this phase) does not even fetch orientation from the catalog anymore (dropped the `AssetLocator`/`locate()` call the seed-era resolver made, since there is nowhere to feed it). Portrait-shot sources render sideways under `ng` at M1. | Spec-sanctioned: crop/rotate/orientation is explicitly E11's job (`output_extent` coordinate-frame changes, §1.1 non-goals table) — building geometry support into `xform.display` here would cross that seam. | This table. E11 planning should note orientation is a **regression from the pre-E05 app**, not a net-new gap, when scoping its geometry work. |
+| 4 | **One shared canvas surface per session** — `RenderScheduler` owns exactly one `CanvasPublisher`; `CanvasFrame` carries no `image` tag. Correct for the one-pane loupe this crate ships (only one image ever targets `Canvas` at a time in practice); a future multi-pane/compare view (E12/E16) would need either per-pane engines or an `image` field added to `CanvasFrame`. | Out of scope — no multi-pane UI exists yet to need it. | This table; `crates/lightbox-shell/src/loupe.rs` module docs. |
+| 5 | **`DeviceProvider::rebuild()` is not really implemented** for the shell (`SharedDeviceProvider::rebuild` returns a typed `DeviceError::Rebuild` unconditionally). The shell's `wgpu::Device` is owned by eframe's `egui-wgpu` integration, created once at `CreationContext` time; there is no API surface today to ask eframe for a fresh device after loss. Phase E's device-lost recovery state machine (rebuild → re-warm → degrade-to-CPU) is fully implemented and gated **against a real, swappable `DeviceProvider`** in `lightbox-render`'s own test suite (`tests/ng_recover.rs`, all green) — the mechanism is proven; only the shell's specific seam implementation is a stub. | Wiring a live shell-side device reacquisition needs deeper eframe/winit integration (recreating the surface, re-registering with egui) than an M1 integration pass scopes; a real device loss on this seam today correctly degrades the session to CPU-preview-only (§4.4 contract) rather than silently hanging or panicking — it just never recovers back to GPU without an app restart. | This table; `crates/lightbox-core/src/render_source.rs` doc comment on `SharedDeviceProvider::rebuild`. |
+| 6 | **Scheduler `ViewState.zoom`/`RenderScale::OneToOne` distinction is not honored by `to_request`.** `SchedShared::to_request` always builds `scale: RenderScale::Fit(job.view.viewport)`, even when the loupe is in 100% (`OneToOne`) mode — harmless today only because gap #1 means neither variant is enforced by decimation anyway. | Pre-existing (Phase B's `to_request`, unchanged by F5) — noted here because F5 is the first phase to actually exercise it live. | This table; will self-resolve when gap #1 is fixed (scale must then be threaded correctly). |
+
+#### Golden re-bless: `cli.render/pv1/canon-eos-r6-fit240`
+
+The existing e2e golden (`crates/lightbox-cli/goldens/cli.render/pv1/canon-eos-r6-fit240.png`,
+committed pre-E05 against the seed's `display.transform`) fails hard against `ng`'s output — ΔE2000
+mean 20.3 / PSNR 13.2 dB, **every** pixel outside tolerance — because the color pipeline is
+genuinely different code (`ng::xform.display` calls `lightbox_color::display::build_display_transform`
+directly; the seed's node had its own, separately-written display-transform path). Visual
+inspection of both (see the failure artifacts this run produced, or re-run
+`LIGHTBOX_BLESS=1 cargo test -p lightbox-cli --test e2e create_import_list_render_check_backup_flow`
+to regenerate) shows **the same photo, same orientation, same framing** — a genuine warmer→lighter
+tone shift, not a corrupted/garbage render. Re-blessed (`LIGHTBOX_BLESS=1`, then verified the
+un-blessed re-run passes clean) and committed as the new `ng`-era baseline. This is an expected,
+one-time consequence of moving the live render path to a different (correct, in-progress-per-E02/E10)
+color pipeline — not silently accepted: it is recorded here, and a color-focused reviewer (E10/E02)
+should sanity-check the new committed PNG.
+
+### F3 — Engine book (node-author guide)
+
+`docs/engine-book/{00-overview,01-node-author-guide,02-testing-and-gates,03-add-a-node}.md`.
+Covers: the `RenderNode` trait method-by-method (defaults vs. what to override), kernel conventions
+(bind-group layout, WGSL restrictions, build-time naga validation), the param ABI (`ParamsSchema`/
+`ParamBlock`, canonical encoding), apron/`plan()` rules for neighborhood nodes, cache-key mechanics
+and `KernelSalt` discipline, PV append-only discipline, and the seams a node must not cross.
+
+**The "add a node" walkthrough is a real, compiling, passing test**, not a documentation-only
+snippet: `crates/lightbox-render/tests/engine_book_walkthrough.rs` (3 tests, all green on the real
+Metal adapter) builds `tone.exposure` — descriptor, WGSL kernel, CPU parity twin, real (non-`EMPTY`)
+param schema, factory with a real `KernelSalt`, registration into a template — and drives it through
+`Engine::submit` on both backends plus a direct `RenderGraph`/`Executor` call proving a non-default
+param actually reaches the kernel (`+1 EV` doubles output, exactly).
+
+**"Reviewed by one prospective node author (E10 planner)" — not literally done.** No E10 planner
+agent/session exists yet to perform a real review. Substituted with the strongest available proxy:
+every code sample in the book is lifted verbatim from (or directly mirrors) the walkthrough test,
+which compiles and passes for real — nothing in the book describes an API that doesn't exist or
+behavior not actually exercised. This should still get an E10-planner pass when that work starts.
+
+### F4 — Fuzz/property hardening (in-gate bounded subset; 24 h run DEFERRED)
+
+- **`crates/lightbox-render/tests/fuzz_compile.rs`** — 2 proptest properties, `RecipeCompiler::compile`
+  fed arbitrary `(pv, source-extent-incl-0×0, Raw/Rgb source kind)` against a fully-registered PV1
+  compiler and one with a deliberately-missing node: **never panics**, always exactly `Ok(graph with
+  one sink)` or a typed `CompileError`, and the missing-node registry always hits
+  `NodeNotRegistered` at PV_M0 / `UnsupportedPv` elsewhere. 2000 cases by default (PR-blocking,
+  ~10 ms); `PROPTEST_CASES` env override for a much larger nightly run.
+- **`crates/lightbox-render/tests/concurrency_stress.rs`** — 8 threads × 60 submissions hammering
+  one shared `Arc<Engine>` (ticket store + content-keyed cache) with concurrent submit/poll/cancel;
+  asserts every ticket id is globally unique, every non-cancelled completion carries the exact
+  expected deterministic pixel value (proving the ticket store never cross-delivers one thread's
+  result for another's ticket), and the engine is still usable after the burst. Green, stable across
+  5 repeat local runs.
+- **`.github/workflows/nightly.yml`** gained an `e05-extended` job: the same fuzz target at
+  `PROPTEST_CASES=200000`, the concurrency stress test repeated 50×, and the full 10k-iteration soak
+  (new `#[ignore]`d test, see below) — a practical, bounded stand-in for "run longer," explicitly
+  **not** equivalent to real coverage-guided fuzzing (documented in both the test's module doc and
+  the workflow comment). **DEFERRED, honestly:** a true 24 h continuous cargo-fuzz/libFuzzer harness
+  with a persisted corpus is not set up — it needs a nightly Rust toolchain + libFuzzer target,
+  materially different infrastructure from `cargo test`, and 24 h of wall-clock this pass does not
+  have. Nothing here claims to be that.
+- **Bonus, found while wiring the nightly job:** the existing C10 soak test (`crates/lightbox-render-testkit/tests/soak.rs`)
+  had **no** `#[ignore]`d full-10k variant — a first draft of the nightly job referenced `cargo test
+  ... -- --ignored` against nothing, which would have silently run **zero** tests (a fake-looking
+  green nightly step). Caught and fixed: added `full_10k_soak_is_clean_and_deterministic` (`#[ignore]`d,
+  real 10 000 iterations). **Run once locally to confirm it's real, not just wired:** clean, 0 errors,
+  peak per-eval working set 49 536 px (bounded), **13.7 s** in release. This means the spec's actual
+  C10 gate (10k iterations, not the 250-iteration in-gate subset) has now been verified to pass —
+  upgrade from "deferred" to "verified, just not PR-blocking" for C10 specifically.
+
+### F1 — Perf scenario harness (built + run locally; reference-runner gate still DEFERRED)
+
+`crates/lightbox-render-testkit/src/scenario.rs::run_slider_latency` — was `unimplemented!()`, now
+real: scripts a burst of rapid `set_view` pan events (a slider-drag proxy — see the note below on
+why not a literal develop-slider) through the exact `Coalescer` state machine `RenderScheduler`
+drives internally, against a real `Engine` over the PV1 scaffold-node graph
+(`src.decoded → util.resize → xform.display`), GPU when an adapter exists. Times every render
+**actually dispatched** (coalescing drops the rest, by design) from submit to terminal state.
+
+**Why not a literal `RenderScheduler` call:** `RenderScheduler` deliberately does not expose a
+per-dispatch completion timestamp (only the latest output — the shell never needs per-frame
+timing), so a literal call can't produce a p95 across many samples. Driving the same `Coalescer`
+(exported, tested, the exact B6 state machine) directly against `Engine::submit`/`poll` gets the
+real per-render latency while faithfully reproducing the scheduler's own coalescing behavior.
+Documented in the module's doc comment.
+
+**Why `set_view` pan events, not develop-tool params:** `Recipe` is still E01's `{schema, pv}`
+placeholder at M1 (E09 owns real recipe params) — there is no develop slider to script yet. Panning
+the fit-view viewport is the closest available "rapid interactive churn" proxy and exercises the
+identical coalescing/dispatch/cache-miss path a real slider will use once E09/E10 land.
+
+**Actual p95 observed on this machine (Apple M5 Max, real Metal adapter), 150 scripted events at
+1024×768, a 4000×3000 (12 MP) synthetic gradient source (chosen to match the ~7–12 MP scale of a
+real camera's embedded preview — e.g. the CR3 fixture's actual 3408×2272 embedded preview,
+confirmed while fixing the CLI roi bug above):**
+
+| Build | samples (of 150 events) | p50 | p95 | max |
+|---|---:|---:|---:|---:|
+| **debug** (`cargo test`) | 2 | 1209 ms | 2981 ms | 2981 ms |
+| **release** (`cargo test --release`) | 31–35 | ~42 ms | **52–79 ms** | 161–181 ms |
+
+**Release-mode p95 (52–79 ms) is under the spec's <100 ms budget on this box** — but this is
+explicitly **not** the gate of record: the spec's F1 acceptance criterion is a nightly run on a
+**self-hosted reference GPU runner** (RTX 3060 / M-series-base class, §7), which does not exist —
+this Mac is a dev workstation, not that runner (per the §0 disposition established at the start of
+E05 and unchanged since). The debug-mode numbers are reported too, honestly, precisely because they
+illustrate why "run it and see" matters: an unoptimized build misses the budget by ~30×, driven
+almost entirely by gap #1 above (GPU native-resolution rendering, no decimation) — release-mode
+optimization alone does not fully hide that architectural gap, it just makes the constant-factor
+tolerable on a 12 MP source today. **DEFERRED (unchanged):** the nightly reference-runner leg
+itself; `.github/workflows/nightly.yml`'s new `e05-extended` job publishes this same indicative
+number per-OS to the job summary, explicitly labelled non-authoritative.
+
+### F2 — Cross-platform CI (already substantially in place from E01; verified locally on macOS only)
+
+**Finding: `.github/workflows/ci.yml` already runs a macOS/Metal + Windows/DX12-WARP +
+Linux/Vulkan-lavapipe 3-OS matrix, PR-blocking, via `cargo test --workspace`** (committed since
+E01; lavapipe install step present for Linux, WARP is wgpu's automatic DX12 software fallback on
+Windows). Because E05's entire golden/parity/tiling/soak/fuzz/stress test suite lives inside
+`cargo test --workspace` (no separate slow-test job), **this pre-existing job already is E05's F2
+cross-platform golden-subset gate** — nothing new needed to be built, only recognized and
+documented. Added a comment block to `ci.yml` making this explicit (§8 DoD #8's "no platform
+carve-outs" requirement is satisfied by construction: it's the literal same test binary run per
+OS, same ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB tolerance, no `#[cfg(target_os)]` gate anywhere in the E05
+test suite).
+
+**DEFERRED (unchanged from the original disposition): only the macOS/Metal leg has actually been
+observed green from this sandbox.** No lavapipe or WARP is installed on this workstation, so the
+Windows/Linux legs of `ci.yml` (and the new `nightly.yml` `e05-extended` job) are committed and
+believed correct (they reuse the exact install steps the pre-existing `ci.yml`/`nightly.yml` jobs
+already use successfully) but genuinely unverified from here. Lights up with no code change once
+run on the real 3-OS runner fleet.
+
+### Final exit bar (worktree `e05-f`, all five, after every task above)
+
+```
+cargo build --workspace                                       — green
+cargo test --workspace                                        — green (73 test-result blocks, 0 failed)
+cargo clippy --workspace --all-targets -- -D warnings          — green, 0 warnings
+cargo fmt --all --check                                        — green
+cargo deny check                                                — green (advisories/bans/licenses/sources ok)
+```
+
+Fixtures fetched via `cargo xtask fixtures` (9 downloaded raws + 5 generated, 0 cached — first run
+in this worktree); `render_end_to_end.rs` and the CLI e2e suite both exercise the real fixture
+corpus (CR3/JPEG/DNG), not just synthetic sources. `rawler`/`dnglab` confirmed absent from
+`Cargo.lock` (grep, unchanged from prior phases).

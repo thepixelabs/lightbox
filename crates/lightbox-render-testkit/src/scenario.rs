@@ -6,11 +6,54 @@
 //! Owner: **F** (F1 p95 slider-to-screen at fit-view) and **C** (C10 10k-iteration
 //! interactive soak). Drives the engine end-to-end through the scheduler; the
 //! p95<100 ms gate of record is nightly on the reference GPU runner (§8).
+//!
+//! # F1 design note
+//!
+//! [`run_slider_latency`] scripts a burst of rapid interactive events (a
+//! slider drag proxy: `scenario.events` `set_view` pan deltas fired faster
+//! than a render completes) against a real [`lightbox_render::ng::Engine`]
+//! (GPU when an adapter is available — `RenderScheduler`'s coalescing
+//! semantics are backend-agnostic) over the PV1 engine-owned node graph
+//! (`src.decoded → util.resize → xform.display`, spec §1's "scaffold-node
+//! graphs"). It reuses [`lightbox_render::ng::Coalescer`] — the exact pure
+//! latest-wins state machine `RenderScheduler` drives internally (spec §3.7
+//! task B6) — rather than going through `RenderScheduler` itself, because the
+//! scheduler does not expose a per-dispatch completion timestamp (it only
+//! surfaces the *latest* output, by design — the shell never needs
+//! per-frame timing). Driving the same coalescer directly against
+//! `Engine::submit`/`poll` gets the per-render **submit→complete** latency —
+//! the "slider-to-screen" quantity the spec's p95 budget is about, since
+//! latest-wins coalescing means the perceived lag during a churn burst is
+//! bounded by one render's own latency, not the event count (that is the
+//! entire point of coalescing — see `ng::sched` module docs). Percentiles are
+//! computed over every render actually dispatched during the burst (not
+//! synthesized).
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use lightbox_edit::Recipe;
+use lightbox_jobs::CancelToken;
+use lightbox_render::ng::nodes::decoded::{SrcDecodedFactory, SrcDecodedNode};
+use lightbox_render::ng::nodes::display::{XformDisplayFactory, XformDisplayNode};
+use lightbox_render::ng::nodes::resize::{UtilResizeFactory, UtilResizeNode};
+use lightbox_render::ng::source::DeviceHandles;
+use lightbox_render::ng::{
+    ActiveBackend, BackendPref, BoxFuture, Coalescer, DeviceError, DeviceProvider, Engine,
+    EngineConfig, Extent, NodeRegistry, OutFormat, PixelBuf, PvRange, RenderPriority,
+    RenderRequest, RenderScale, RenderState, RenderTarget, Roi, SourceColorimetry, SourceError,
+    SourceImage, SourceProvider, SourceQuality, SourceWant,
+};
+use lightbox_types::{ImageId, PV_M0};
+
+use crate::corpus::{synth_source, CorpusKind};
 
 /// A scripted slider-churn scenario (spec F1).
 #[derive(Clone, Debug)]
 pub struct SliderScenario {
-    /// Corpus source name to edit.
+    /// Corpus source name to edit (`"gradient"`, `"checker"`, `"low-key"`,
+    /// `"high-key"`, `"high-frequency"`, `"wide-gamut"`; unrecognized names
+    /// fall back to `"gradient"`).
     pub source: String,
     /// Number of rapid param events to fire.
     pub events: u32,
@@ -20,6 +63,16 @@ pub struct SliderScenario {
     pub viewport_h: u32,
 }
 
+/// Which backend actually ran the scenario (recorded so a CPU fallback run
+/// is never mistaken for the GPU number — spec: "do NOT fake a number").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScenarioBackend {
+    /// Ran on a real GPU adapter.
+    Gpu,
+    /// No adapter was available; ran on the CPU reference path.
+    Cpu,
+}
+
 /// End-to-end slider-to-screen latency percentiles (spec F1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LatencyReport {
@@ -27,14 +80,253 @@ pub struct LatencyReport {
     pub p50_ms: f64,
     /// 95th-percentile latency, ms (the <100 ms gate).
     pub p95_ms: f64,
-    /// Sample count.
+    /// Worst observed latency, ms.
+    pub max_ms: f64,
+    /// Sample count (one per render actually dispatched — coalescing means
+    /// this is normally « `scenario.events`).
     pub samples: usize,
+    /// Which backend produced these numbers.
+    pub backend: ScenarioBackend,
 }
 
-/// Measure slider-to-screen p95 for `scenario` (spec F1). **F1 wires it.**
+fn parse_kind(name: &str) -> CorpusKind {
+    match name {
+        "checker" => CorpusKind::Checker,
+        "low-key" => CorpusKind::LowKey,
+        "high-key" => CorpusKind::HighKey,
+        "high-frequency" => CorpusKind::HighFrequency,
+        "wide-gamut" => CorpusKind::WideGamut,
+        _ => CorpusKind::Gradient,
+    }
+}
+
+struct HeadlessDevice {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+}
+impl DeviceProvider for HeadlessDevice {
+    fn current(&self) -> DeviceHandles {
+        (Arc::clone(&self.device), Arc::clone(&self.queue))
+    }
+    fn rebuild(&self) -> BoxFuture<'static, Result<DeviceHandles, DeviceError>> {
+        let h = (Arc::clone(&self.device), Arc::clone(&self.queue));
+        Box::pin(async move { Ok(h) })
+    }
+}
+struct NullDevice;
+impl DeviceProvider for NullDevice {
+    fn current(&self) -> DeviceHandles {
+        unreachable!("ForceCpu never calls DeviceProvider::current")
+    }
+    fn rebuild(&self) -> BoxFuture<'static, Result<DeviceHandles, DeviceError>> {
+        Box::pin(async {
+            Err(DeviceError::Rebuild(
+                "no device in the F1 harness".to_owned(),
+            ))
+        })
+    }
+}
+
+/// A fixed synthetic-corpus source (the F1 "over the corpus" requirement,
+/// spec §6 — the engine never decodes).
+struct SynthSource {
+    pixels: PixelBuf,
+}
+impl SourceProvider for SynthSource {
+    fn fetch(
+        &self,
+        _: ImageId,
+        _: SourceWant,
+        _: &CancelToken,
+    ) -> BoxFuture<'static, Result<SourceImage, SourceError>> {
+        let pixels = self.pixels.clone();
+        Box::pin(async move {
+            let full_extent = pixels.extent;
+            Ok(SourceImage {
+                pixels,
+                colorimetry: SourceColorimetry::default(),
+                full_extent,
+                quality: SourceQuality::Full,
+            })
+        })
+    }
+}
+
+/// Builds a real `ng::Engine` over the PV1 scaffold-node graph
+/// (`src.decoded → util.resize → xform.display`) on a GPU device when one is
+/// available, else the CPU reference path — never fakes a GPU number.
+fn build_engine(source: PixelBuf) -> (Engine, ScenarioBackend) {
+    let mut reg = NodeRegistry::new();
+    reg.register(
+        SrcDecodedNode::ID,
+        PvRange::from_open(PV_M0),
+        Arc::new(SrcDecodedFactory::default()),
+    )
+    .expect("register src.decoded");
+    reg.register(
+        UtilResizeNode::ID,
+        PvRange::from_open(PV_M0),
+        Arc::new(UtilResizeFactory::default()),
+    )
+    .expect("register util.resize");
+    reg.register(
+        XformDisplayNode::ID,
+        PvRange::from_open(PV_M0),
+        Arc::new(XformDisplayFactory::default()),
+    )
+    .expect("register xform.display");
+
+    let sp: Arc<dyn SourceProvider> = Arc::new(SynthSource { pixels: source });
+
+    match lightbox_render::GpuContext::headless() {
+        Some(ctx) => {
+            let dp: Arc<dyn DeviceProvider> = Arc::new(HeadlessDevice {
+                device: ctx.device.clone(),
+                queue: ctx.queue.clone(),
+            });
+            let engine = Engine::new(
+                dp,
+                sp,
+                reg,
+                EngineConfig {
+                    backend: BackendPref::Auto,
+                    ..EngineConfig::default()
+                },
+            )
+            .expect("engine builds on the real adapter");
+            let backend = match engine.active_backend() {
+                ActiveBackend::Gpu(_) => ScenarioBackend::Gpu,
+                ActiveBackend::CpuPreviewOnly => ScenarioBackend::Cpu,
+            };
+            (engine, backend)
+        }
+        None => {
+            let engine = Engine::new(
+                Arc::new(NullDevice),
+                sp,
+                reg,
+                EngineConfig {
+                    backend: BackendPref::ForceCpu,
+                    ..EngineConfig::default()
+                },
+            )
+            .expect("CPU-only engine builds");
+            (engine, ScenarioBackend::Cpu)
+        }
+    }
+}
+
+/// One scripted "slider" event: a fit-view render request at a slightly
+/// panned viewport (a drag proxy — see the module docs on why M1's
+/// param-less `Recipe` makes a literal develop-slider unrepresentable).
+fn churn_request(image: ImageId, viewport: Extent, pan_x: i32) -> RenderRequest {
+    RenderRequest {
+        image,
+        recipe: Recipe::identity(PV_M0),
+        pv: PV_M0,
+        roi: Roi {
+            x: pan_x,
+            y: 0,
+            w: viewport.w,
+            h: viewport.h,
+        },
+        scale: RenderScale::Fit(viewport),
+        target: RenderTarget::Buffer {
+            format: OutFormat::Rgba8Srgb,
+        },
+        priority: RenderPriority::Interactive,
+        cancel: CancelToken::new(),
+    }
+}
+
+/// Measure slider-to-screen p95 for `scenario` (spec F1): fires
+/// `scenario.events` rapid churn events (spaced faster than a render
+/// completes — a real drag) through [`Coalescer`] + `Engine::submit`/`poll`,
+/// timing every render actually dispatched from its submit to its terminal
+/// state. See the module docs for why this — not a literal
+/// `RenderScheduler` call — is the faithful "through the scheduler" measure
+/// at M1.
 pub fn run_slider_latency(scenario: &SliderScenario) -> LatencyReport {
-    let _ = scenario;
-    unimplemented!("F1 (F): slider-latency scenario harness (p95 slider-to-screen)")
+    let viewport = Extent {
+        w: scenario.viewport_w.max(1),
+        h: scenario.viewport_h.max(1),
+    };
+    let source = synth_source(parse_kind(&scenario.source), 4000, 3000);
+    let (engine, backend) = build_engine(source);
+    let image = ImageId(1);
+
+    let mut coalescer: Coalescer<i32> = Coalescer::new();
+    let mut latencies: Vec<Duration> = Vec::new();
+    let mut inflight: Option<(lightbox_render::ng::RenderTicket, Instant)> = None;
+
+    // Drains any terminal in-flight ticket, records its latency, and
+    // promotes the pending slot (mirrors `RenderScheduler`'s own
+    // `drive_once`, task B6).
+    let drain = |engine: &Engine,
+                 coalescer: &mut Coalescer<i32>,
+                 inflight: &mut Option<(lightbox_render::ng::RenderTicket, Instant)>,
+                 latencies: &mut Vec<Duration>| {
+        if let Some((ticket, started)) = inflight.take() {
+            match engine.poll(&ticket) {
+                RenderState::Complete(_) | RenderState::PreviewReady(_) => {
+                    latencies.push(started.elapsed());
+                    if let Some(pan) = coalescer.complete() {
+                        let t = Instant::now();
+                        let ticket = engine.submit(churn_request(image, viewport, pan));
+                        *inflight = Some((ticket, t));
+                    }
+                }
+                RenderState::Failed(_) | RenderState::Cancelled => {
+                    if let Some(pan) = coalescer.complete() {
+                        let t = Instant::now();
+                        let ticket = engine.submit(churn_request(image, viewport, pan));
+                        *inflight = Some((ticket, t));
+                    }
+                }
+                RenderState::Queued | RenderState::Rendering { .. } => {
+                    *inflight = Some((ticket, started));
+                }
+            }
+        }
+    };
+
+    // Fire events at ~120 Hz (8 ms apart) — faster than a typical render
+    // completes, so coalescing actually engages (a real slider drag).
+    for i in 0..scenario.events {
+        drain(&engine, &mut coalescer, &mut inflight, &mut latencies);
+        let pan = i as i32;
+        if let Some(pan) = coalescer.submit(pan) {
+            let t = Instant::now();
+            let ticket = engine.submit(churn_request(image, viewport, pan));
+            inflight = Some((ticket, t));
+        }
+        std::thread::sleep(Duration::from_millis(8));
+    }
+
+    // Drain whatever is left (in-flight + any promoted pending) to quiescence.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while (inflight.is_some() || coalescer.has_work()) && Instant::now() < deadline {
+        drain(&engine, &mut coalescer, &mut inflight, &mut latencies);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let mut ms: Vec<f64> = latencies.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
+    ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pct = |p: f64| -> f64 {
+        if ms.is_empty() {
+            return 0.0;
+        }
+        let rank = ((p * ms.len() as f64).ceil() as usize).clamp(1, ms.len());
+        ms[rank - 1]
+    };
+
+    LatencyReport {
+        p50_ms: pct(0.5),
+        p95_ms: pct(0.95),
+        max_ms: ms.last().copied().unwrap_or(0.0),
+        samples: ms.len(),
+        backend,
+    }
 }
 
 /// A randomized param/zoom/pan soak configuration (spec C10).
@@ -218,5 +510,42 @@ pub fn run_soak(cfg: &SoakConfig) -> SoakReport {
         validation_errors: errors,
         peak_tile_pixels: peak,
         final_matches_fresh,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **F1 harness proof, run for real on this box's Metal adapter (or the
+    /// CPU path if no adapter is momentarily available).** This does **not**
+    /// assert the < 100 ms budget — that gate of record is nightly on the
+    /// self-hosted reference GPU runner (§8; this dev box is not that
+    /// runner, per `docs/plan/epics/E05-deviations.md`). It asserts the
+    /// harness itself is sound (real samples, backend recorded honestly) and
+    /// prints the observed numbers so a local run is always visible, never
+    /// silently skipped.
+    #[test]
+    fn f1_slider_latency_harness_runs_for_real_and_reports_actuals() {
+        let scenario = SliderScenario {
+            source: "gradient".to_owned(),
+            events: 150,
+            viewport_w: 1024,
+            viewport_h: 768,
+        };
+        let report = run_slider_latency(&scenario);
+        eprintln!(
+            "[F1] backend={:?} samples={} p50={:.2}ms p95={:.2}ms max={:.2}ms \
+             (local dev-box number; NOT the §8 nightly reference-runner gate of record)",
+            report.backend, report.samples, report.p50_ms, report.p95_ms, report.max_ms
+        );
+        assert!(report.samples > 0, "the churn burst must dispatch renders");
+        assert!(
+            report.samples < scenario.events as usize,
+            "coalescing must drop at least some of a {}-event burst (got {} dispatches)",
+            scenario.events,
+            report.samples
+        );
+        assert!(report.p95_ms.is_finite() && report.p95_ms >= report.p50_ms);
     }
 }
