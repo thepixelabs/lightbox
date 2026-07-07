@@ -15,10 +15,10 @@
 
 use std::sync::Arc;
 
-use lightbox_render::ng::node::{NodeFactory, ParamsSchema, ParamsSchemaRef};
+use lightbox_render::ng::node::{InputRois, NodeFactory, ParamsSchema, ParamsSchemaRef};
 use lightbox_render::ng::{
     CpuEvalCtx, CpuTileView, GpuEvalCtx, KernelSalt, NodeDescriptor, NodeError, NodeId, ParamBlock,
-    PixelBuf, PortDecl, PortType, RenderNode, TilePrecision, TileView,
+    PixelBuf, PortDecl, PortType, RenderNode, Roi, TilePrecision, TileView,
 };
 
 static SCHEMA: ParamsSchema = ParamsSchema::EMPTY;
@@ -103,10 +103,29 @@ impl NodeFactory for GainFactory {
     }
 }
 
-/// `test.blur_r` — a radius-`r` box blur with the apron `plan()` back-propagation
-/// the tiling gate exercises (spec C1/C3). **C1 fills the bodies + `plan`.**
+/// `test.blur_r` — a radius-`r` box blur with the radius-dependent apron
+/// `plan()` back-propagation the ROI/tiling gates exercise (spec C1/C3).
+///
+/// The effective working-pixel radius is `ceil(radius * scale)`; `plan()` grows
+/// the required input ROI by exactly that margin, and `eval_cpu` averages the
+/// `(2r+1)²` neighbourhood. The kernel is **ROI-aware** — it maps absolute
+/// working-pixel coordinates through the input view's covered ROI and
+/// edge-replicates at the input's border — so a tiled per-tile eval (reading the
+/// apron sub-tile) is bit-identical to the whole-image eval (the C3 gate).
 #[derive(Default)]
 pub struct BlurRProbe {}
+
+impl BlurRProbe {
+    /// Default box-blur radius (working pixels at scale 1.0).
+    pub const DEFAULT_RADIUS: f64 = 2.0;
+
+    /// The effective working-pixel radius for `params` at `scale` (spec §3.2
+    /// `plan` = `out.expand(ceil(r*scale))`).
+    pub fn effective_radius(params: &ParamBlock, scale: f32) -> u32 {
+        let r = params.get_f64_or("radius", Self::DEFAULT_RADIUS).max(0.0) as f32;
+        (r * scale).ceil() as u32
+    }
+}
 
 static BLUR_DESC: NodeDescriptor = NodeDescriptor {
     id: NodeId("test.blur_r"),
@@ -126,16 +145,19 @@ impl RenderNode for BlurRProbe {
         &BLUR_DESC
     }
 
-    // NOTE: C1 overrides `plan()` here with `out.expand(ceil(r * scale))`.
+    fn plan(&self, out: Roi, scale: f32, params: &ParamBlock) -> InputRois {
+        InputRois(vec![out.expand(Self::effective_radius(params, scale))])
+    }
 
     fn eval_gpu(
         &self,
-        ctx: &mut GpuEvalCtx<'_>,
-        inputs: &[TileView<'_>],
-        params: &ParamBlock,
+        _ctx: &mut GpuEvalCtx<'_>,
+        _inputs: &[TileView<'_>],
+        _params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("C1 (C): BlurRProbe::eval_gpu — apron-correct box blur")
+        // The GPU box-blur kernel lands with the A-gpu executor; CPU/GPU parity
+        // is task E6. On the CPU reference path this returns a typed error.
+        Err(gpu_deferred("test.blur_r"))
     }
 
     fn eval_cpu(
@@ -144,15 +166,117 @@ impl RenderNode for BlurRProbe {
         inputs: &[CpuTileView<'_>],
         params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("C1 (C): BlurRProbe::eval_cpu")
+        let input = inputs
+            .first()
+            .ok_or_else(|| NodeError::Cpu("test.blur_r needs one input".to_owned()))?;
+        let r = Self::effective_radius(params, ctx.scale) as i64;
+        let in_roi = input.roi;
+        let out_roi = ctx.out_roi;
+        let src = input.pixels;
+        // Input-local bounds (absolute → local via the covered ROI).
+        let ix_max = src.extent.w as i64 - 1;
+        let iy_max = src.extent.h as i64 - 1;
+        let out = ctx.output();
+        let (w, h) = (out.extent.w, out.extent.h);
+        for ly in 0..h {
+            let ay = out_roi.y as i64 + ly as i64;
+            for lx in 0..w {
+                let ax = out_roi.x as i64 + lx as i64;
+                let mut acc = [0.0f32; 4];
+                let mut count = 0.0f32;
+                for dy in -r..=r {
+                    // Absolute source Y clamped to the image border (which the
+                    // apron guarantees the input tile covers), then to local.
+                    let sy = (ay + dy).clamp(0, in_roi.y as i64 + iy_max);
+                    let ly_src = (sy - in_roi.y as i64).clamp(0, iy_max) as u32;
+                    for dx in -r..=r {
+                        let sx = (ax + dx).clamp(0, in_roi.x as i64 + ix_max);
+                        let lx_src = (sx - in_roi.x as i64).clamp(0, ix_max) as u32;
+                        let p = src.get_rgba_f32(lx_src, ly_src);
+                        for c in 0..4 {
+                            acc[c] += p[c];
+                        }
+                        count += 1.0;
+                    }
+                }
+                let inv = 1.0 / count.max(1.0);
+                out.set_rgba_f32(
+                    lx,
+                    ly,
+                    [acc[0] * inv, acc[1] * inv, acc[2] * inv, acc[3] * inv],
+                );
+            }
+        }
+        Ok(())
     }
 }
 
-/// `test.accum` — an accumulation-heavy op used to demonstrate the F32 precision
-/// escape hatch (spec C8). Requests `F32` output. **C8 fills the bodies.**
+/// Factory for [`BlurRProbe`].
 #[derive(Default)]
-pub struct AccumProbe {}
+pub struct BlurRFactory {}
+
+impl NodeFactory for BlurRFactory {
+    fn instantiate(&self) -> Arc<dyn RenderNode> {
+        Arc::new(BlurRProbe::default())
+    }
+    fn kernel_salt(&self) -> KernelSalt {
+        KernelSalt(blake3::hash(b"test.blur_r@v1"))
+    }
+}
+
+/// `test.accum` — an accumulation-heavy op that demonstrates the F32 precision
+/// escape hatch (spec C8, §4.2 / Risk R2).
+///
+/// Each output channel accumulates [`AccumProbe::STEPS`] weighted terms into a
+/// mid-range scene-linear value (well above 1.0, where f16's ~11-bit mantissa is
+/// coarse). Storing that result in an `rgba16float` tile quantizes away the fine
+/// structure; storing it in `rgba32float` preserves it. The node's `precision()`
+/// selects the tile format, so the *same* algorithm run at F32 matches the f64
+/// reference to ≥ 60 dB while at F16 it is demonstrably worse — the test that
+/// documents why the escape hatch exists.
+pub struct AccumProbe {
+    precision: TilePrecision,
+}
+
+impl Default for AccumProbe {
+    fn default() -> Self {
+        AccumProbe {
+            precision: TilePrecision::F32,
+        }
+    }
+}
+
+impl AccumProbe {
+    /// Number of accumulation terms per channel.
+    pub const STEPS: u32 = 64;
+
+    /// An accumulator node emitting `precision`-format tiles.
+    pub fn with_precision(precision: TilePrecision) -> AccumProbe {
+        AccumProbe { precision }
+    }
+
+    /// The accumulation, in `f64` — the ground-truth reference the F32/F16 tile
+    /// storage is compared against. Mirrors [`AccumProbe::accumulate_f32`] term
+    /// for term (only the accumulator type differs).
+    pub fn reference_value(channel_input: f64) -> f64 {
+        let mut acc = 0.0f64;
+        for k in 0..Self::STEPS {
+            // Terms grow so the sum lands in the tens–hundreds (HDR highlights).
+            acc += channel_input * (4.0 + k as f64 * 0.05);
+        }
+        acc
+    }
+
+    /// The same accumulation in `f32` compute (what both tile-precision variants
+    /// run; only the *stored* result differs by tile format).
+    pub fn accumulate_f32(channel_input: f32) -> f32 {
+        let mut acc = 0.0f32;
+        for k in 0..Self::STEPS {
+            acc += channel_input * (4.0 + k as f32 * 0.05);
+        }
+        acc
+    }
+}
 
 static ACCUM_DESC: NodeDescriptor = NodeDescriptor {
     id: NodeId("test.accum"),
@@ -173,27 +297,72 @@ impl RenderNode for AccumProbe {
     }
 
     fn precision(&self) -> TilePrecision {
-        TilePrecision::F32
+        self.precision
     }
 
     fn eval_gpu(
         &self,
-        ctx: &mut GpuEvalCtx<'_>,
-        inputs: &[TileView<'_>],
-        params: &ParamBlock,
+        _ctx: &mut GpuEvalCtx<'_>,
+        _inputs: &[TileView<'_>],
+        _params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("C8 (C): AccumProbe::eval_gpu — F32 accumulation")
+        Err(gpu_deferred("test.accum"))
     }
 
     fn eval_cpu(
         &self,
         ctx: &mut CpuEvalCtx<'_>,
         inputs: &[CpuTileView<'_>],
-        params: &ParamBlock,
+        _params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("C8 (C): AccumProbe::eval_cpu")
+        let input = inputs
+            .first()
+            .ok_or_else(|| NodeError::Cpu("test.accum needs one input".to_owned()))?;
+        let in_roi = input.roi;
+        let out_roi = ctx.out_roi;
+        let src = input.pixels;
+        let out = ctx.output();
+        let (w, h) = (out.extent.w, out.extent.h);
+        for ly in 0..h {
+            let sy = (out_roi.y + ly as i32 - in_roi.y).clamp(0, src.extent.h as i32 - 1) as u32;
+            for lx in 0..w {
+                let sx =
+                    (out_roi.x + lx as i32 - in_roi.x).clamp(0, src.extent.w as i32 - 1) as u32;
+                let p = src.get_rgba_f32(sx, sy);
+                out.set_rgba_f32(
+                    lx,
+                    ly,
+                    [
+                        Self::accumulate_f32(p[0]),
+                        Self::accumulate_f32(p[1]),
+                        Self::accumulate_f32(p[2]),
+                        p[3],
+                    ],
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Factory for [`AccumProbe`] at a fixed precision.
+pub struct AccumFactory {
+    precision: TilePrecision,
+}
+
+impl AccumFactory {
+    /// A factory instantiating [`AccumProbe`]s at `precision`.
+    pub fn new(precision: TilePrecision) -> AccumFactory {
+        AccumFactory { precision }
+    }
+}
+
+impl NodeFactory for AccumFactory {
+    fn instantiate(&self) -> Arc<dyn RenderNode> {
+        Arc::new(AccumProbe::with_precision(self.precision))
+    }
+    fn kernel_salt(&self) -> KernelSalt {
+        KernelSalt(blake3::hash(b"test.accum@v1"))
     }
 }
 

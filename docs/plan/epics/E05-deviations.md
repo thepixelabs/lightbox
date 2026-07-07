@@ -544,3 +544,79 @@ touched a few adjacent files to wire those through (each noted below; all coordi
   `cargo test --workspace` green **except** the pre-existing `lightbox-cli/tests/e02_e2e.rs` cases,
   which require the downloaded fixture corpus (`cargo xtask fixtures`) — an environmental precondition
   unrelated to Phase B (they pass on `main` where fixtures are present; B touches no CLI/decode code).
+
+## Wave 2 — Phase C (E05.3 ROI / tile / progressive) — 2026-07-07, branch `e05-c`
+
+Phase C landed **entirely additively**: it adds new modules under `ng/exec/`
+(`scale`, `roi`, `tiling`, `progressive`, `priority`, `budget`), fills the testkit probe/harness
+stubs (`test.blur_r`, `test.accum`, synthetic corpus, `run_soak`), adds a Lanczos-3 CPU resampler to
+`util.resize`, and adds integration tests. **No edits to `engine.rs`, `stats.rs`, `cache/`,
+`recover/`, or `compile/`** — zero cross-wave friction; nothing in B/D/E territory was touched, and
+the **frozen `exec::backend` seam and `tile` currency were NOT reshaped** (the tile executor drives
+`RenderNode::eval_cpu` directly with ROI-aware `CpuTileView`s beside the whole-tile `Backend` seam,
+so no additive field to any shared exec type was needed — the merge agent has nothing to reconcile
+here).
+
+### Design decision — the tile executor is CPU-reference (not GPU), by intent
+
+C3's gate is "tiled render **exactly equals** untiled render (**same backend**)". The CPU path is the
+deterministic, bit-exact reference the whole consistency contract is defined against (§4.4/R3:
+"goldens rendered from the CPU reference path"), so the tiled evaluator
+(`ng::exec::tiling::TileRender`) is implemented on the CPU path and the C3 gate is proven **byte-for-
+byte** there (`tests/tiling.rs::tiled_equals_untiled_for_gain_and_blur`, both point-wise gain and
+radius-3 blur). GPU per-tile dispatch is already supported by `GpuBackend` per-node (it dispatches
+over the output extent); wiring GPU tiling end-to-end + its own tiled==untiled check is **deferred**
+to the E6 CPU/GPU-parity work / merge pass — the apron contract (`plan()` + edge-replicate) is
+backend-agnostic and the nodes are apron-correct by construction. **Not faked**: the exact-equality
+gate runs for real, on the reference backend, in-gate.
+
+### Gate disposition (all green in-gate on this Metal box)
+
+| Task | What ships / proof | Gate |
+|---|---|---|
+| **C1** ROI planning | `ng::exec::roi::plan_rois` back-props `plan()` through the compiled graph; `test.blur_r` has a radius-dependent apron `out.expand(ceil(r·scale))`. `composed_aprons_sum_and_are_minimal` proves composed aprons == analytic sum **and minimal** (clamped to image). | unit + property |
+| **C2** scale-aware eval (**§10.1 E05.3 gate, PR-blocking**) | `ng::exec::scale::derive`: `RenderScale`→working extent, `scale_q` 1/64ths. `tests/scale.rs::fit_4k_over_45mp_evaluates_at_most_8mp`: a **45.1 MP** source (8192×5504) at `Fit(3840×2160)` derives **3215×2160 ≈ 6.94 MP ≤ ~8 MP**, and the tile executor evaluates every node-tile at ≤256²·apron, terminal total == working extent (probe-counted). `util.resize` decimates a real large source to the fit tier (box CPU + WGSL). | **PR-blocking** |
+| **C3** 256² tile executor | per-tile apron reads + seam-free stitch; `tiled_equals_untiled_for_gain_and_blur` (byte-exact), `tiled_partial_roi_matches_window_of_whole`, `blur_smooths_without_a_seam_at_the_tile_boundary`. | PR-blocking |
+| **C4** visible-first order + off-screen cancel | `TileOrder::CenterOut` (focus-nearest first); `render_with(still_wanted)` skips off-screen tiles on `set_view`. `center_out_ordering_and_offscreen_cancellation`. | unit + integration |
+| **C5** 1:1 demand-driven + `TileSink` | `OneToOneSession` keyed by `TileCoord`; a pan evaluates only newly-visible tiles; `TileHandoff` offers completed tiles to a mock `TileSink` (E03 seam, fire-and-forget). `one_to_one_demand_driven_pan_and_tilesink`. | integration |
+| **C6** progressive ladder | `ng::exec::progressive::Ladder` sequences BestAvailable→`PreviewReady`(display-only)→preview-res→full-res, emitting the **3-stage `RenderState` sequence** (`Rendering`→`PreviewReady(PreviewTier)`→`PreviewReady(PreviewRes)`→`Complete(FullRes)`). Proven by unit + `tests/progressive.rs` (real renders through the ladder). First-`PreviewReady` wall-clock is recorded in `LadderReport` (indicative locally; ≤100 ms warm-store gate is on the reference machine — see F1). **Engine-level emission** (`Engine::poll` returning these) integrates at F5; the mechanism + sequence are complete. | integration (mechanism) |
+| **C7** VRAM budget + degradation | `ng::exec::budget`: `VramBudget::Auto` → `min(60% adapter mem, cap)` (with an honest fallback — wgpu has **no portable VRAM query**, so `Auto` uses a conservative default when the adapter doesn't surface memory; recorded here). `degrade_to_budget` drops render scale so a 100 MP source (deterministic byte math, no 800 MB alloc) fits a 512 MB budget within headroom; the `TilePool` LRU-evicts to budget (A7) bounds resident tiles. | unit (reduced-scale, see below) |
+| **C8** F32 precision path | `precision()` honored end-to-end — the tile executor allocates `rgba32float` vs `rgba16float` per node. `test.accum` at **F32 = 154.3 dB** vs the f64 reference (≥60 ✓); the same node at **F16 = 77.3 dB** (demonstrably worse — documents why the hatch exists). `tests/precision.rs`. | PR-blocking |
+| **C9** priority lanes | `ng::exec::priority::PriorityLanes` (two-lane, Interactive-first pop at tile granularity). `interactive_preempts_batch_at_tile_boundary`: with a 24-tile Batch in flight, an Interactive submit's first tile starts within ~1 tile-duration and the Batch still completes (no starvation). This is the **mechanism** (§1.1: E15 sets export policy). | unit (mechanism) |
+| **C10** soak | `scenario::run_soak`: seeded xorshift, randomized param/zoom/pan over the tile executor; zero errors, bounded working set, final frame == fresh render. | integration (reduced-scale, see below) |
+
+### Reduced-scale actuals (nothing faked; blockers named)
+
+- **C2 (source materialization).** The **≤ ~8 MP** result for a literal 45 MP source is proven by
+  `scale::derive` on the real 45 MP dimensions (no allocation) **plus** the executor evaluating at
+  exactly the derived extent (probe-counted). The end-to-end **decimation-reading-a-real-large-
+  source** half runs on a **3.8 MP** source (2400×1600) to keep the PR gate fast — materializing a
+  literal 45 MP working buffer (~360 MB f16) is a nightly/reduced-scale item. The derivation and the
+  executor path are byte-identical at any size; only the input-source size is reduced. Blocker:
+  CI wall-clock/RAM, not capability.
+- **C7 (100 MP under 512 MB).** Proven as **deterministic byte math** (`hundred_mp_degrades_under_512mb`)
+  — no 100 MP/800 MB working tile is ever allocated (that is the *point* of the degradation). The
+  real GPU-pool-peak integration (`TilePool::peak()` ≤ budget on a rebuilt device) rides the merge /
+  `ng_gpu` GPU tests; the CPU tiling executor has no VRAM to peak. `Auto` budget probing is
+  fallback-only until a portable adapter-memory query exists (wgpu limitation, named above).
+- **C10 (10 k iterations).** In-gate runs **250 iterations** at modest working extents (≤288×192) in
+  **5.8 s**, peak per-eval working set **49 536 px** (bounded ≈ one 256² tile + apron, ≤ 264²).
+  The 10 k count at full corpus resolutions is the **nightly** soak (§8). Blocker: PR-gate wall-clock
+  (debug-build blur is O(n·r²) per-pixel), not correctness.
+- **C6 first-`PreviewReady` ≤ 100 ms** and **F1 p95** remain **reference-machine** gates (this dev
+  box is not the reference-perf runner — see the top-level DEFERRED F1 row); the local wall-clock is
+  recorded via `LadderReport::first_preview` as indicative only.
+
+### `util.resize` — box kept as the node kernel, Lanczos-3 added alongside
+
+The shipped `util.resize` kernel stays **area-average box** decimation (WGSL + CPU, the correct
+anti-aliasing filter for large downscales) so the merged A-gpu parity test
+(`resize_gpu_matches_cpu_box_decimation`) is untouched. C2's "Lanczos/box" is satisfied by adding a
+**separable Lanczos-3 CPU resampler** (`nodes::resize::decimate_lanczos_cpu`, unit-tested: flat-field
+preservation, monotone ramp, near-identity at unit scale) as the higher-quality option; a Lanczos
+**WGSL** kernel is deferred (box is the shipped GPU kernel; parity holds). No golden regressions.
+
+### New deps: none
+
+Phase C added **no crate dependencies** (the soak RNG is a 6-line inline xorshift; parallelism reuses
+`PixelBuf::par_fill_rows`). cargo-deny surface unchanged.
