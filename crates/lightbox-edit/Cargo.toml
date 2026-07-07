@@ -15,6 +15,10 @@ lightbox-types.workspace = true
 # `Recipe::default_for(pv, &AssetProbe)` is a frozen §3.2 seam signature; AssetProbe
 # is owned by lightbox-decode. See E09-deviations.md A-2 for the transitive-weight note.
 lightbox-decode.workspace = true
+# The `crs:`/`lb:` mapping layer (spec §3.6, Phase D) targets the `XmpDoc`
+# substrate in lightbox-meta. See E09-deviations.md D-1 (Phase D shipped ahead of
+# Phase C) and D-3 (render/shell gain lightbox-meta transitively, source untouched).
+lightbox-meta.workspace = true
 serde.workspace = true
 # CBOR is the authoritative recipe serialization (spec §3.2 / T3). Deterministic
 # hand-built encode over ciborium::value::Value (deviations A-3).
@@ -25,6 +29,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# `CrsImportReport` is a serde `Serialize` seam (spec §3.6); the Phase D tests
+# assert it serializes for the E08/E16 fidelity-surfacing consumers.
+serde_json.workspace = true
 
 [lints]
 workspace = true

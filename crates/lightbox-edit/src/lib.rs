@@ -41,12 +41,20 @@ pub mod cbor;
 pub mod leaves;
 pub mod params;
 pub mod recipe;
+pub mod xmp_map;
 
 // ---- Frozen surface: `lightbox_edit::Recipe` resolves at the crate root, as
 // `lightbox-render`/`lightbox-core`/`lightbox-cli`/`lightbox-shell` already import it.
 pub use recipe::{Applied, Geometry, GlobalStages, Recipe, RecipeError, RecipeRead, RECIPE_SCHEMA};
 
 pub use params::{group_of, ParamDelta, ParamGroup, ParamId, ParamSubset, ParamValue};
+
+// The `crs:`/`lb:` mapping layer (spec §3.6 / Phase D): `Recipe::to_xmp`,
+// `Recipe::read_xmp`, `Recipe::from_lr_crs`, and the `CrsImportReport` seam.
+pub use xmp_map::{
+    CrsImport, CrsImportReport, FieldFidelity, RecipeFromXmp, XmpMapError, XmpSource,
+    XmpWriteCoalescer, XmpWriteCtx,
+};
 
 // Leaf value types (architecture §3.2) — the recipe's building blocks.
 pub use leaves::{

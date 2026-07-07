@@ -76,7 +76,18 @@ fn kill9_mid_migration_leaves_catalog_clean_and_upgraded() {
 
     let exe = std::env::current_exe().expect("current test binary");
     let mut rng = fastrand::Rng::with_seed(nanos_now());
-    let mut observed_v2_from_child = 0u32;
+    let mut fully_upgraded_reopens = 0u32;
+
+    // The latest supported schema version, DERIVED (not hardcoded) so a new
+    // migration — e.g. E09's 0003_edit_state — does not stale this E02 test:
+    // a v1 seed always completes the forward-only upgrade to whatever is latest.
+    let latest = {
+        let probe = tempfile::TempDir::new().expect("tempdir");
+        // `usize::MAX` upto → apply every migration → the latest supported version.
+        Catalog::create_at_schema_version_for_tests(&probe.path().join("probe.lbdata"), usize::MAX)
+            .expect("create fully-migrated probe catalog")
+            .schema_version()
+    };
 
     for iteration in 0..iterations {
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -133,7 +144,7 @@ fn kill9_mid_migration_leaves_catalog_clean_and_upgraded() {
         );
         assert_eq!(
             catalog.schema_version(),
-            2,
+            latest,
             "iteration {iteration}: reopen must leave the catalog fully upgraded"
         );
         // The 0002 registry table is reachable (proves the whole atomic
@@ -152,8 +163,8 @@ fn kill9_mid_migration_leaves_catalog_clean_and_upgraded() {
             SEED_ASSETS,
             "iteration {iteration}: assets lost during the upgrade"
         );
-        if catalog.schema_version() == 2 {
-            observed_v2_from_child += 1;
+        if catalog.schema_version() == latest {
+            fully_upgraded_reopens += 1;
         }
         drop(catalog);
 
@@ -173,12 +184,12 @@ fn kill9_mid_migration_leaves_catalog_clean_and_upgraded() {
     }
 
     assert!(
-        observed_v2_from_child > 0,
+        fully_upgraded_reopens > 0,
         "harness never completed a single upgrade — timing is off"
     );
     eprintln!(
-        "migration fault injection: {iterations} mid-0002 kills, 0 corruptions, \
-         0 lost rows, {observed_v2_from_child} upgrades completed"
+        "migration fault injection: {iterations} mid-migration kills, 0 corruptions, \
+         0 lost rows, {fully_upgraded_reopens} upgrades completed to v{latest}"
     );
 }
 

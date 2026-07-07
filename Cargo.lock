@@ -1815,9 +1815,11 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "lightbox-decode",
+ "lightbox-meta",
  "lightbox-types",
  "proptest",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "twox-hash",
 ]
@@ -1861,6 +1863,12 @@ version = "0.1.0"
 [[package]]
 name = "lightbox-meta"
 version = "0.1.0"
+dependencies = [
+ "quick-xml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "twox-hash",
+]
 
 [[package]]
 name = "lightbox-ml"

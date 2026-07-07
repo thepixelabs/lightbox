@@ -27,6 +27,7 @@ lightbox-preview = { path = "crates/lightbox-preview" }
 lightbox-render = { path = "crates/lightbox-render" }
 lightbox-render-testkit = { path = "crates/lightbox-render-testkit" }
 lightbox-edit = { path = "crates/lightbox-edit" }
+lightbox-meta = { path = "crates/lightbox-meta" }
 lightbox-ingest = { path = "crates/lightbox-ingest" }
 lbx-image-compare = { path = "tools/lbx-image-compare" }
 
@@ -49,6 +50,13 @@ eframe = { version = "0.35", default-features = false, features = [
   "x11",
 ] }
 ciborium = "0.2"
+# XMP substrate (spec §1.6 / §3.5). The architecture's primary is the Adobe ISO
+# 16684 XMP Toolkit via the `xmp_toolkit` bindings (CTO sign-off, 02-approval.md);
+# the NAMED reversal fallback (§1.6 / Risk R1) is our own RDF/XML behind the same
+# `XmpDoc` API, parsed/serialized with `quick-xml` (MIT — surface-1 clean; already
+# in the graph). E09 Phase D ships the fallback because Phase C's toolkit
+# integration had not landed when Phase D executed (see E09-deviations D-1).
+quick-xml = "0.39"
 tokio = { version = "1", default-features = false }
 pollster = "0.4"
 toml = "1"
