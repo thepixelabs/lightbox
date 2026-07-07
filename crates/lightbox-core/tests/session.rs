@@ -557,10 +557,10 @@ fn engine_and_previews_are_reachable_headless() {
         .unwrap();
 
     // Headless with gpu: None ⇒ CPU-only engine (spec §3.4).
-    assert_eq!(
-        session.engine().backend_kind(),
-        lightbox_render::BackendKind::CpuOnly
-    );
+    assert!(matches!(
+        session.engine().active_backend(),
+        lightbox_render::ng::ActiveBackend::CpuPreviewOnly
+    ));
 
     // T21 previews: the real embedded-preview provider is wired. An image
     // id the catalog does not know must fail that TICKET cleanly (Io from

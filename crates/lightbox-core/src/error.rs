@@ -15,7 +15,7 @@ pub enum CoreError {
     Catalog(#[from] lightbox_catalog::CatalogError),
     /// The render engine could not be constructed.
     #[error(transparent)]
-    Engine(#[from] lightbox_render::EngineError),
+    Engine(#[from] lightbox_render::ng::EngineInitError),
     /// Filesystem-level failure outside the catalog.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

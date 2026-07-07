@@ -32,6 +32,7 @@ use crate::ng::node::NodeRegistry;
 use crate::ng::nodes::decoded::SrcDecodedNode;
 use crate::ng::nodes::resize::decimate_box_cpu;
 use crate::ng::recover::{DegradeState, RecoverStateMachine};
+use crate::ng::sched::canvas::CanvasPublisher;
 use crate::ng::source::{DeviceProvider, SourceImage, SourceProvider, SourceWant, Uploader};
 use crate::ng::stats::{EngineStats, RecomputeProbe};
 use crate::ng::tile::{PixelBuf, PixelFormat, TileHandle};
@@ -258,6 +259,13 @@ struct Shared {
     /// loss: a post-rebuild render re-uploads from it with **zero**
     /// `SourceProvider::fetch` (re-warm, task E3).
     source_pin: Mutex<HashMap<ImageId, Arc<SourceImage>>>,
+    /// The shell's canvas double-buffer publisher (task **F5** M1
+    /// integration; installed via [`Engine::install_canvas`]). `None` until
+    /// the [`crate::ng::RenderScheduler`] wires one in — a `Canvas` target
+    /// request without an installed publisher fails typed rather than
+    /// panicking (headless/CLI/test engines never install one and only ever
+    /// submit `Buffer` targets).
+    canvas: RwLock<Option<Arc<CanvasPublisher>>>,
 }
 
 /// How a render is delivered given the current degrade state (task E7).
@@ -579,13 +587,40 @@ impl Shared {
                 OutputPayload::Pixels(readback(&tile, format, gpu.map(|c| c.as_ref()))?)
             }
             RenderTarget::Canvas => {
-                // The engine-owned double-buffered canvas texture pair is wired
-                // by A-gpu (task A13). The CPU-only path renders to a Buffer
-                // target; Canvas over CPU is a merge/F5 concern.
-                return Err(RenderError::Internal(
-                    "Canvas render target is wired by A-gpu (task A13); use a Buffer target on the CPU path"
-                        .to_owned(),
-                ));
+                // Publish the GPU-resident terminal tile through the installed
+                // CanvasPublisher (task F5): a zero-copy texture-to-texture
+                // blit into the shell's compositing ring, no CPU readback
+                // (spec §2.3 seam 2 / §3.7). A CPU-resident terminal (degraded
+                // to CPU, task E7) has nothing to publish — the shell falls
+                // back to compositing the last good generation while degraded
+                // (F5 deviation: CPU-degraded Canvas targets are not wired;
+                // callers should route degraded sessions through a Buffer
+                // target if a fresh degraded frame must reach the UI).
+                let publisher = self
+                    .canvas
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                match publisher {
+                    Some(p) if tile.texture().is_some() => {
+                        let gen = p.publish(&tile, plan.quality)?;
+                        OutputPayload::CanvasGeneration(gen)
+                    }
+                    Some(_) => {
+                        return Err(RenderError::Internal(
+                            "Canvas render target requires a GPU-resident terminal tile \
+                             (degraded-to-CPU sessions must use a Buffer target)"
+                                .to_owned(),
+                        ));
+                    }
+                    None => {
+                        return Err(RenderError::Internal(
+                            "Canvas render target requested but no publisher is installed \
+                             (F5: RenderScheduler::enable_canvas)"
+                                .to_owned(),
+                        ));
+                    }
+                }
             }
         };
         Ok(RenderOutput {
@@ -803,6 +838,7 @@ impl Engine {
             events_tx,
             device_gen: AtomicU64::new(0),
             source_pin: Mutex::new(HashMap::new()),
+            canvas: RwLock::new(None),
         });
 
         // Install device-lost detection on the GPU device, generation 0 (task E1).
@@ -941,6 +977,18 @@ impl Engine {
             let _ = self.shared.events_tx.send(EngineEvent::GpuReenabled);
         }
         Ok(())
+    }
+
+    /// Installs the shell's canvas double-buffer publisher (task **F5** M1
+    /// integration; spec §3.7). Once installed, `RenderTarget::Canvas`
+    /// requests publish their GPU-resident terminal tile through `publisher`
+    /// (zero-copy) instead of failing typed. Owned/constructed by
+    /// [`crate::ng::RenderScheduler::enable_canvas`] — call that instead of
+    /// this directly unless you are wiring a custom scheduler.
+    pub fn install_canvas(&self, publisher: Arc<CanvasPublisher>) {
+        if let Ok(mut c) = self.shared.canvas.write() {
+            *c = Some(publisher);
+        }
     }
 
     /// **Test-only fault injector** (spec E1): simulate a device-lost signal

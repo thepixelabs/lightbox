@@ -1,19 +1,25 @@
 // SPDX-FileCopyrightText: 2026 Lightbox contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! The loupe (spec T26): every displayed pixel is produced by
-//! `Engine::submit` and composited **zero-copy** — the finished texture on
-//! the shared device is registered with egui
+//! The loupe (spec T26, carried forward by E05 Phase F5): every displayed
+//! pixel is produced by the `ng` render engine and composited **zero-copy**
+//! — `RenderScheduler::canvas()` publishes a [`CanvasFrame`] whose texture
+//! (already on the shared device) is registered with egui
 //! (`egui_wgpu::Renderer::register_native_texture`) and drawn; there is no
 //! `map_async`/CPU readback anywhere in this file (T7/T26 invariant).
 //!
-//! A fresh `RenderRequest` is submitted on every relevant change (image
-//! navigation, resize, zoom toggle) onto ONE viewport id — the engine's
-//! per-viewport latest-wins coalescing supersedes stale in-flight renders,
-//! so an out-of-date size is never composited over a newer one. Fit mode
-//! renders `FitWithin(viewport)`; 100 % renders at `Native` scale from the
-//! embedded preview (honest about the M0 source resolution) and pans by
-//! compositing only.
+//! **F5 rewrite.** The E01 seed drove one `Engine::submit`/`poll` ticket per
+//! viewport (pull model). The `ng` engine is push-based: [`LoupeView::ui`]
+//! calls [`RenderScheduler::set_view`]/[`RenderScheduler::set_recipe`] on any
+//! relevant change (the scheduler's latest-wins coalescing supersedes
+//! whatever was in flight — spec §3.7/§4.3), and each frame samples the
+//! canvas [`tokio::sync::watch`] channel for a newer generation to composite.
+//! There is exactly one canvas publisher per session (owned by the
+//! `RenderScheduler`, enabled once at session-open in `lib.rs`), so only one
+//! image renders to the canvas surface at a time — correct for the one-pane
+//! loupe this crate ships; a future multi-pane compare view would need
+//! either per-pane engines or an `image` tag on `CanvasFrame` (noted in
+//! `docs/plan/epics/E05-deviations.md`).
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,25 +28,18 @@ use std::time::Instant;
 use eframe::egui;
 use lightbox_core::ImageSummary;
 use lightbox_edit::Recipe;
-use lightbox_render::{
-    Engine, RenderOutput, RenderRequest, RenderScale, RenderState, RenderTarget, RenderTicket, Roi,
-    ViewportId,
-};
+use lightbox_render::ng::{Extent, OutputQuality, RenderScheduler, Roi, ViewState};
 use lightbox_types::{ImageId, PV_M0};
 
 use crate::grid::fit_rect;
 use crate::ShellOutcome;
 
-/// The loupe's coalescing bucket (spec §4.3: one in-flight render per
-/// viewport, latest wins).
-const LOUPE_VIEWPORT: ViewportId = ViewportId(1);
-
 /// Zoom modes (T26: fit / 100 % toggle).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Zoom {
-    /// Fit the viewport (`RenderScale::FitWithin`).
+pub enum LoupeZoom {
+    /// Fit the viewport.
     Fit,
-    /// 1 image pixel : 1 physical pixel (`RenderScale::Native`), drag pan.
+    /// 1 image pixel : 1 physical pixel, drag pan.
     OneToOne,
 }
 
@@ -53,32 +52,36 @@ pub enum LoupeAction {
     Navigate(usize),
 }
 
-/// The (image, zoom, output-size) triple a submitted render answers for.
+/// The (image, zoom, output-size) triple most recently submitted (dedupes
+/// redundant `set_view`/`set_recipe` calls — spec §4.3 "submit on relevant
+/// change only").
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct SubmitKey {
     image: ImageId,
-    zoom: Zoom,
-    /// Requested output size in physical px (0×0 under `Native`, which is
-    /// size-independent — resizes then re-composite without re-rendering).
+    zoom: LoupeZoom,
     out: [u32; 2],
 }
 
 /// The engine texture currently composited (registered with egui).
 struct Displayed {
     texture_id: egui::TextureId,
-    /// Keeps the pool from recycling the texture while displayed.
-    _tex: Arc<wgpu::Texture>,
     size: [u32; 2],
+    generation: u64,
 }
 
 /// Loupe state — see the module docs.
 pub struct LoupeView {
     render_state: eframe::egui_wgpu::RenderState,
     outcome: Arc<ShellOutcome>,
-    ticket: Option<RenderTicket>,
+    canvas_rx: Option<tokio::sync::watch::Receiver<lightbox_render::ng::CanvasFrame>>,
     displayed: Option<Displayed>,
     last_key: Option<SubmitKey>,
-    zoom: Zoom,
+    /// Set on every dispatch, cleared once a newer generation is observed —
+    /// the push-model's "still waiting on a fresher frame" flag
+    /// ([`LoupeView::busy`]).
+    awaiting_frame: bool,
+    last_quality: Option<OutputQuality>,
+    zoom: LoupeZoom,
     pan: egui::Vec2,
     error: Option<String>,
     /// Navigation → texture-swap latency probe (T26 AC: < 50 ms p95).
@@ -88,18 +91,25 @@ pub struct LoupeView {
 }
 
 impl LoupeView {
-    /// A loupe compositing through `render_state`'s egui renderer.
+    /// A loupe compositing through `render_state`'s egui renderer, sampling
+    /// `scheduler`'s canvas publisher (`None` when the scheduler has no GPU
+    /// canvas enabled — e.g. a CPU-only session; the loupe then shows the
+    /// "rendering…"/error text forever, which is honest: there is nothing to
+    /// composite zero-copy without a GPU canvas).
     pub fn new(
         render_state: eframe::egui_wgpu::RenderState,
         outcome: Arc<ShellOutcome>,
+        scheduler: &RenderScheduler,
     ) -> LoupeView {
         LoupeView {
             render_state,
             outcome,
-            ticket: None,
+            canvas_rx: scheduler.canvas(),
             displayed: None,
             last_key: None,
-            zoom: Zoom::Fit,
+            awaiting_frame: false,
+            last_quality: None,
+            zoom: LoupeZoom::Fit,
             pan: egui::Vec2::ZERO,
             error: None,
             nav_started: None,
@@ -109,18 +119,18 @@ impl LoupeView {
 
     /// Reset for a fresh entry from the grid.
     pub fn enter(&mut self) {
-        self.zoom = Zoom::Fit;
+        self.zoom = LoupeZoom::Fit;
         self.pan = egui::Vec2::ZERO;
         self.error = None;
         self.last_key = None; // force a submit for the (possibly new) image
         self.nav_started = Some(Instant::now());
     }
 
-    /// Release engine + egui resources when leaving the loupe.
-    pub fn exit(&mut self, engine: &Engine) {
-        if let Some(ticket) = self.ticket.take() {
-            engine.cancel(&ticket);
-        }
+    /// Release egui resources when leaving the loupe. The scheduler itself
+    /// needs no explicit stop — a new image simply supersedes the old one's
+    /// slot via latest-wins (spec §3.7); there is no per-ticket cancel to
+    /// issue in the push model.
+    pub fn exit(&mut self) {
         if let Some(old) = self.displayed.take() {
             self.render_state
                 .renderer
@@ -132,14 +142,15 @@ impl LoupeView {
 
     /// True while a render is in flight (keep repainting).
     pub fn busy(&self) -> bool {
-        self.ticket.is_some()
+        self.awaiting_frame
     }
 
     /// Renders one loupe frame for `rows[idx]`.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
-        engine: &Engine,
+        scheduler: &RenderScheduler,
+        max_tex_dim: u32,
         rows: &[ImageSummary],
         idx: usize,
     ) -> Option<LoupeAction> {
@@ -171,45 +182,47 @@ impl LoupeView {
 
         let ppp = ui.ctx().pixels_per_point();
         let view_rect = ui.available_rect_before_wrap();
-        let max_dim = engine
-            .gpu()
-            .map_or(8192, |g| g.limits.max_texture_dimension_2d);
         let view_px = [
-            ((view_rect.width() * ppp).round() as u32).clamp(1, max_dim),
-            ((view_rect.height() * ppp).round() as u32).clamp(1, max_dim),
+            ((view_rect.width() * ppp).round() as u32).clamp(1, max_tex_dim),
+            ((view_rect.height() * ppp).round() as u32).clamp(1, max_tex_dim),
         ];
 
         // --- Submit on any relevant change; latest-wins coalescing on the
-        // engine side supersedes whatever was in flight (T26). ---
+        // scheduler side supersedes whatever was in flight (T26/§3.7). ---
         let key = SubmitKey {
             image: summary.id,
             zoom: self.zoom,
-            out: match self.zoom {
-                Zoom::Fit => view_px,
-                Zoom::OneToOne => [0, 0], // Native: size-independent
-            },
+            out: view_px,
         };
         if self.last_key != Some(key) {
-            let ticket = engine.submit(RenderRequest {
-                image: summary.id,
-                recipe: Recipe::identity(PV_M0),
-                pv: PV_M0,
-                roi: Roi::Full,
-                scale: match self.zoom {
-                    Zoom::Fit => RenderScale::FitWithin {
-                        w: view_px[0],
-                        h: view_px[1],
-                    },
-                    Zoom::OneToOne => RenderScale::Native,
+            let view = ViewState {
+                viewport: Extent {
+                    w: view_px[0],
+                    h: view_px[1],
                 },
-                target: RenderTarget::Texture,
-                viewport: LOUPE_VIEWPORT,
-            });
-            self.ticket = Some(ticket);
+                zoom: lightbox_render::ng::Zoom(match self.zoom {
+                    LoupeZoom::Fit => 1.0,
+                    LoupeZoom::OneToOne => 1.0,
+                }),
+                pan: Roi {
+                    x: 0,
+                    y: 0,
+                    w: view_px[0],
+                    h: view_px[1],
+                },
+            };
+            scheduler.set_view(summary.id, view);
+            // The M1 recipe carries no develop params yet (E09) — identity
+            // under PV1, resubmitted on every relevant view change so a fresh
+            // image always gets a render dispatched even without a param
+            // change (set_view alone only re-renders when a recipe already
+            // exists for that image — see `RenderScheduler::set_view`).
+            scheduler.set_recipe(summary.id, Recipe::identity(PV_M0), PV_M0);
             self.last_key = Some(key);
+            self.awaiting_frame = true;
         }
 
-        self.poll(engine);
+        self.poll(scheduler, summary.id);
 
         // --- Composite ---
         let response = ui.allocate_rect(view_rect, egui::Sense::click_and_drag());
@@ -219,8 +232,8 @@ impl LoupeView {
         if let Some(d) = &self.displayed {
             let logical = egui::vec2(d.size[0] as f32 / ppp, d.size[1] as f32 / ppp);
             let image_rect = match self.zoom {
-                Zoom::Fit => fit_rect(view_rect, [logical.x, logical.y]),
-                Zoom::OneToOne => {
+                LoupeZoom::Fit => fit_rect(view_rect, [logical.x, logical.y]),
+                LoupeZoom::OneToOne => {
                     // Drag pan, clamped so the image never leaves the view.
                     if response.dragged() {
                         self.pan += response.drag_delta();
@@ -256,51 +269,47 @@ impl LoupeView {
 
     fn toggle_zoom(&mut self) {
         self.zoom = match self.zoom {
-            Zoom::Fit => Zoom::OneToOne,
-            Zoom::OneToOne => Zoom::Fit,
+            LoupeZoom::Fit => LoupeZoom::OneToOne,
+            LoupeZoom::OneToOne => LoupeZoom::Fit,
         };
         self.pan = egui::Vec2::ZERO;
     }
 
-    /// Polls the in-flight ticket; swaps the composited texture on `Ready`.
-    fn poll(&mut self, engine: &Engine) {
-        let Some(ticket) = self.ticket.clone() else {
+    /// Samples the canvas watch channel for a newer generation; swaps the
+    /// composited texture and surfaces the last error/quality badge.
+    fn poll(&mut self, scheduler: &RenderScheduler, image: ImageId) {
+        if let Some(err) = scheduler.last_error(image) {
+            // Keep compositing the last good frame (F5: a transient failure
+            // never blanks the loupe) but surface the error for the badge.
+            self.error = Some(err);
+        }
+        let Some(rx) = &mut self.canvas_rx else {
             return;
         };
-        match engine.poll(&ticket) {
-            RenderState::Pending | RenderState::Running => {}
-            RenderState::Ready(RenderOutput::Texture { tex, view, size }) => {
-                self.swap_displayed(tex, &view, size);
-                self.error = None;
-                self.ticket = None;
-                if let Some(started) = self.nav_started.take() {
-                    let ms = started.elapsed().as_secs_f32() * 1000.0;
-                    self.nav_swap_ms.push(ms);
-                    if self.nav_swap_ms.len() > 256 {
-                        self.nav_swap_ms.remove(0);
-                    }
-                }
-            }
-            RenderState::Ready(RenderOutput::Cpu(_)) => {
-                // Unreachable: the loupe only submits RenderTarget::Texture.
-                tracing::error!(target: "lightbox_shell", "unexpected CPU output in frame path");
-                self.ticket = None;
-            }
-            RenderState::Failed(err) => {
-                tracing::warn!(target: "lightbox_shell", %err, "loupe render failed");
-                self.error = Some(err.to_string());
-                // Don't keep compositing a stale image over an error state.
-                if let Some(old) = self.displayed.take() {
-                    self.render_state
-                        .renderer
-                        .write()
-                        .free_texture(&old.texture_id);
-                }
-                self.ticket = None;
-            }
-            RenderState::Cancelled | RenderState::Superseded => {
-                // A newer submit owns the viewport now; nothing to keep.
-                self.ticket = None;
+        let frame = rx.borrow_and_update();
+        let already_shown = self
+            .displayed
+            .as_ref()
+            .is_some_and(|d| d.generation == frame.generation);
+        if already_shown || frame.generation == 0 {
+            return;
+        }
+        let (texture, quality, extent, generation) = (
+            frame.texture.clone(),
+            frame.quality,
+            frame.extent,
+            frame.generation,
+        );
+        drop(frame);
+        self.swap_displayed(&texture, [extent.w, extent.h], generation);
+        self.last_quality = Some(quality);
+        self.error = None;
+        self.awaiting_frame = false;
+        if let Some(started) = self.nav_started.take() {
+            let ms = started.elapsed().as_secs_f32() * 1000.0;
+            self.nav_swap_ms.push(ms);
+            if self.nav_swap_ms.len() > 256 {
+                self.nav_swap_ms.remove(0);
             }
         }
     }
@@ -308,12 +317,7 @@ impl LoupeView {
     /// Registers a finished engine texture with egui, releasing the previous
     /// one — flicker-free swap on the SAME shared device (seam 2). Never
     /// copies pixels.
-    fn swap_displayed(
-        &mut self,
-        tex: Arc<wgpu::Texture>,
-        view: &wgpu::TextureView,
-        size: [u32; 2],
-    ) {
+    fn swap_displayed(&mut self, view: &wgpu::TextureView, size: [u32; 2], generation: u64) {
         let mut renderer = self.render_state.renderer.write();
         let texture_id = renderer.register_native_texture(
             &self.render_state.device,
@@ -322,8 +326,8 @@ impl LoupeView {
         );
         if let Some(old) = self.displayed.replace(Displayed {
             texture_id,
-            _tex: tex,
             size,
+            generation,
         }) {
             renderer.free_texture(&old.texture_id);
         }
@@ -331,7 +335,7 @@ impl LoupeView {
         self.outcome.seam_proven.store(true, Ordering::Release);
     }
 
-    /// Minimal info overlay (T26): filename, dims, tier badge, zoom.
+    /// Minimal info overlay (T26): filename, dims, quality badge, zoom.
     fn info_overlay(
         &self,
         ui: &egui::Ui,
@@ -340,14 +344,21 @@ impl LoupeView {
         idx: usize,
         total: usize,
     ) {
+        let quality = match self.last_quality {
+            Some(OutputQuality::PreviewTier) => "preview",
+            Some(OutputQuality::PreviewRes) => "preview-res",
+            Some(OutputQuality::FullRes) => "full-res",
+            None => "…",
+        };
         let text = format!(
-            "{}  ·  {}×{}  ·  embedded preview  ·  {}  ·  {}/{}",
+            "{}  ·  {}×{}  ·  {}  ·  {}  ·  {}/{}",
             summary.filename,
             summary.width,
             summary.height,
+            quality,
             match self.zoom {
-                Zoom::Fit => "fit",
-                Zoom::OneToOne => "100%",
+                LoupeZoom::Fit => "fit",
+                LoupeZoom::OneToOne => "100%",
             },
             idx + 1,
             total,

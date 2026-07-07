@@ -16,10 +16,12 @@ use anyhow::{bail, Context};
 use lightbox_catalog::{Catalog, ImageQuery, NewAsset, PageCursor, SortOrder};
 use lightbox_core::{CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, Session};
 use lightbox_edit::Recipe;
-use lightbox_render::{
-    GpuContext, RenderOutput, RenderRequest, RenderScale, RenderState, RenderTarget, Roi,
-    ViewportId,
+use lightbox_jobs::CancelToken;
+use lightbox_render::ng::{
+    ActiveBackend, Extent, OutFormat, RenderPriority, RenderRequest, RenderScale, RenderState,
+    RenderTarget, Roi,
 };
+use lightbox_render::GpuContext;
 use lightbox_types::{ContentHash, FolderId, ImageId, Orientation, PV_M0};
 
 use crate::corpus;
@@ -232,14 +234,14 @@ pub fn page_query_100k(total: u64) -> anyhow::Result<Metrics> {
 // nav-swap (loupe next/prev)
 // ---------------------------------------------------------------------------
 
-fn wait_terminal(session: &Session, ticket: &lightbox_render::RenderTicket) -> RenderState {
+fn wait_terminal(session: &Session, ticket: &lightbox_render::ng::RenderTicket) -> RenderState {
     let engine = session.engine();
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match engine.poll(ticket) {
-            RenderState::Pending | RenderState::Running => {
+            RenderState::Queued | RenderState::Rendering { .. } => {
                 if Instant::now() > deadline {
-                    return RenderState::Failed(lightbox_render::RenderError::Source(
+                    return RenderState::Failed(lightbox_render::ng::RenderError::Internal(
                         "nav-swap: render never became terminal".into(),
                     ));
                 }
@@ -250,15 +252,23 @@ fn wait_terminal(session: &Session, ticket: &lightbox_render::RenderTicket) -> R
     }
 }
 
-fn nav_request(image: ImageId, viewport: u64) -> RenderRequest {
+fn nav_request(image: ImageId) -> RenderRequest {
     RenderRequest {
         image,
         recipe: Recipe::identity(PV_M0),
         pv: PV_M0,
-        roi: Roi::Full,
-        scale: RenderScale::FitWithin { w: 1600, h: 1000 },
-        target: RenderTarget::CpuBuffer,
-        viewport: ViewportId(viewport),
+        roi: Roi {
+            x: 0,
+            y: 0,
+            w: 1600,
+            h: 1000,
+        },
+        scale: RenderScale::Fit(Extent { w: 1600, h: 1000 }),
+        target: RenderTarget::Buffer {
+            format: OutFormat::Rgba8Srgb,
+        },
+        priority: RenderPriority::Interactive,
+        cancel: CancelToken::new(),
     }
 }
 
@@ -279,7 +289,10 @@ pub fn nav_swap(fixtures: &Path, gpu: Option<GpuContext>) -> anyhow::Result<(Met
 
     let core = Core::start(CoreConfig::default())?;
     let session = core.create_catalog(&tmp.path().join("nav.lbdata"), gpu)?;
-    let backend = format!("{:?}", session.engine().backend_kind());
+    let backend = match session.engine().active_backend() {
+        ActiveBackend::Gpu(info) => format!("Gpu({:?})", info.backend),
+        ActiveBackend::CpuPreviewOnly => "CpuOnly".to_owned(),
+    };
 
     let mut rx = session.events();
     session.submit(Command::ImportAddInPlace {
@@ -314,13 +327,13 @@ pub fn nav_swap(fixtures: &Path, gpu: Option<GpuContext>) -> anyhow::Result<(Met
     // originals fail with a Source error at M0, by design).
     let mut usable: Vec<ImageId> = Vec::new();
     for (i, summary) in page.items.iter().enumerate() {
-        let ticket = session.engine().submit(nav_request(summary.id, 1));
+        let ticket = session.engine().submit(nav_request(summary.id));
         match wait_terminal(&session, &ticket) {
-            RenderState::Ready(RenderOutput::Cpu(_) | RenderOutput::Texture { .. }) => {
+            RenderState::Complete(_) | RenderState::PreviewReady(_) => {
                 usable.push(summary.id);
             }
-            RenderState::Superseded => {
-                bail!("nav-swap: warm render {i} superseded — the scenario submits sequentially")
+            RenderState::Cancelled => {
+                bail!("nav-swap: warm render {i} cancelled — the scenario submits sequentially")
             }
             _ => {}
         }
@@ -335,9 +348,11 @@ pub fn nav_swap(fixtures: &Path, gpu: Option<GpuContext>) -> anyhow::Result<(Met
     for _pass in 0..4 {
         for id in &usable {
             let t = Instant::now();
-            let ticket = session.engine().submit(nav_request(*id, 1));
+            let ticket = session.engine().submit(nav_request(*id));
             match wait_terminal(&session, &ticket) {
-                RenderState::Ready(_) => samples.push(ms(t.elapsed())),
+                RenderState::Complete(_) | RenderState::PreviewReady(_) => {
+                    samples.push(ms(t.elapsed()))
+                }
                 other => bail!("nav-swap: warm render failed: {other:?}"),
             }
         }

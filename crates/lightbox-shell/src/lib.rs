@@ -236,13 +236,22 @@ impl LightboxApp {
         };
         let events = session.events();
 
-        // T7/T26 debug assertion: the engine's device IS the shell's device.
+        // T7/T26 seam-2 invariant: the engine renders on the shell's device.
+        // **F5 deviation:** `ng::Engine` does not expose the raw device handle
+        // for an `Arc::ptr_eq` proof (the old E01 seed did via `Engine::gpu()`);
+        // the guarantee is now structural instead of runtime-asserted —
+        // `Session::open` builds `SharedDeviceProvider` from exactly the
+        // `gpu.clone()` passed in here, and `Engine::with_compiler`'s `Auto`
+        // path builds its `DeviceCtx` only from `DeviceProvider::current()` (no
+        // other device-creation path exists on the `Auto` branch), so the
+        // engine's GPU backend is provably built on this device by
+        // construction. See `docs/plan/epics/E05-deviations.md`.
         debug_assert!(
-            session
-                .engine()
-                .gpu()
-                .is_some_and(|g| Arc::ptr_eq(&g.device, &gpu.device)),
-            "engine must render on the shell's wgpu device (seam 2)"
+            matches!(
+                session.engine().active_backend(),
+                lightbox_render::ng::ActiveBackend::Gpu(_)
+            ),
+            "engine must be GPU-active when the shell hands it a shared device (seam 2)"
         );
 
         tracing::info!(
@@ -253,7 +262,11 @@ impl LightboxApp {
         );
 
         let thumbs = ThumbCache::new(session.previews());
-        let loupe = LoupeView::new(render_state, Arc::clone(&outcome));
+        let loupe = LoupeView::new(
+            render_state,
+            Arc::clone(&outcome),
+            &session.render_scheduler(),
+        );
         Ok(LightboxApp {
             session,
             _core: core,
@@ -448,7 +461,7 @@ impl LightboxApp {
     }
 
     fn exit_loupe(&mut self) {
-        self.loupe.exit(&self.session.engine());
+        self.loupe.exit();
         self.view = View::Grid;
     }
 
@@ -560,21 +573,27 @@ impl eframe::App for LightboxApp {
                 }
             }
             View::Loupe => {
-                let engine = self.session.engine();
+                let scheduler = self.session.render_scheduler();
+                let max_tex_dim = self.gpu.limits.max_texture_dimension_2d;
                 let idx = self
                     .selection
                     .focus()
                     .and_then(|id| self.model.index_of(id));
                 match idx {
-                    Some(idx) => match self.loupe.ui(ui, &engine, self.model.rows(), idx) {
-                        Some(LoupeAction::ExitToGrid) => self.exit_loupe(),
-                        Some(LoupeAction::Navigate(next)) => {
-                            if let Some(s) = self.model.rows().get(next) {
-                                self.selection.set_focus(s.id);
+                    Some(idx) => {
+                        match self
+                            .loupe
+                            .ui(ui, &scheduler, max_tex_dim, self.model.rows(), idx)
+                        {
+                            Some(LoupeAction::ExitToGrid) => self.exit_loupe(),
+                            Some(LoupeAction::Navigate(next)) => {
+                                if let Some(s) = self.model.rows().get(next) {
+                                    self.selection.set_focus(s.id);
+                                }
                             }
+                            None => {}
                         }
-                        None => {}
-                    },
+                    }
                     // The focused image vanished (undo-import): back to grid.
                     None => self.exit_loupe(),
                 }

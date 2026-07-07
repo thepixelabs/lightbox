@@ -24,6 +24,10 @@ tokio = { workspace = true, features = ["rt", "sync"] }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+# The one GPU type allowed across the core/shell boundary (§2.3 seam 2): the
+# `ng::DeviceProvider` impl in `render_source.rs` names `wgpu::Device`/`Queue`
+# directly (E05 Phase F5).
+wgpu.workspace = true
 
 [dev-dependencies]
 fastrand.workspace = true

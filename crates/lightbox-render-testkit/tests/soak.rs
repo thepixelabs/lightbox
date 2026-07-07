@@ -35,3 +35,29 @@ fn soak_is_clean_and_deterministic() {
         report.iterations, report.peak_tile_pixels
     );
 }
+
+/// The full 10k-iteration soak (spec §8/C10) — `#[ignore]`d so `cargo test`
+/// stays fast in-gate; the nightly workflow runs it explicitly
+/// (`.github/workflows/nightly.yml`, "Full 10k-iteration interactive soak").
+#[test]
+#[ignore = "10k iterations — nightly job, not the PR-blocking gate (E05-deviations.md, C10)"]
+fn full_10k_soak_is_clean_and_deterministic() {
+    let iterations = 10_000;
+    let report = run_soak(&SoakConfig {
+        iterations,
+        seed: 0x00C0_FFEE_1234,
+    });
+
+    assert_eq!(report.iterations, iterations);
+    assert_eq!(report.validation_errors, 0, "soak produced render errors");
+    assert!(report.final_matches_fresh, "final frame != fresh render");
+    assert!(
+        report.peak_tile_pixels <= (256 + 8) * (256 + 8),
+        "peak per-eval working set {} px is unbounded",
+        report.peak_tile_pixels
+    );
+    eprintln!(
+        "[C10-full] soak clean: {} iterations, peak per-eval working set {} px",
+        report.iterations, report.peak_tile_pixels
+    );
+}

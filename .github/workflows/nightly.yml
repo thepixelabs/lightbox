@@ -180,6 +180,79 @@ jobs:
   # std allocator is instrumented too. Non-blocking (nightly); a real UB/leak
   # fails the job. NOTE: this recipe is committed but UNVERIFIED on the E02 build
   # machine (macOS, no nightly ASan runner) — see E02-deviations.md (H4).
+  # E05 Phase F (F1/F4, DoD #4/#9): the reference-hardware perf gate and the
+  # extended fuzz/soak legs the E05 spec names as nightly-by-design (§8: "10k
+  # soak" / "24 h fuzz" are not PR-gate steps). Runs on the hosted 3-OS
+  # matrix, NOT the self-hosted RTX-3060/M-series reference runner the spec
+  # names (§7) — that runner does not exist yet (recorded in
+  # `docs/plan/epics/E05-deviations.md`, F1). Until it is provisioned this
+  # job's p95 numbers are indicative time-series data, not the gate of
+  # record; regressions are reported (job summary), never blocking, matching
+  # the perf job's convention above.
+  e05-extended:
+    name: E05 extended fuzz/soak/perf (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Mesa software Vulkan adapter (lavapipe)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
+          echo "VK_LOADER_DEBUG=error" >> "$GITHUB_ENV"
+
+      # F4: a much larger bounded proptest case count than the PR-blocking
+      # default (2000) — a practical stand-in for the spec's 24 h continuous
+      # fuzz run, NOT equivalent to real coverage-guided fuzzing (cargo-fuzz
+      # is not set up here; see fuzz_compile.rs module docs).
+      - name: Extended compiler fuzz (F4)
+        env:
+          PROPTEST_CASES: "200000"
+        run: cargo test -p lightbox-render --release --test fuzz_compile
+
+      # F4: the same bounded concurrency stress test, repeated many times to
+      # widen the window for a scheduling-order-dependent race the single
+      # in-gate run might miss.
+      - name: Repeated concurrency stress (F4)
+        shell: bash
+        run: |
+          for i in $(seq 1 50); do
+            cargo test -p lightbox-render --release --test concurrency_stress -- --exact \
+              concurrent_submit_poll_cancel_never_corrupts_the_ticket_store_or_cache
+          done
+
+      # C10: the full 10k-iteration soak (the in-gate PR run uses a reduced
+      # count — see E05-deviations.md).
+      - name: Full 10k-iteration interactive soak (C10)
+        run: cargo test -p lightbox-render-testkit --release --test soak -- --ignored --nocapture
+
+      # F1: local (non-reference-hardware) slider-latency indicative numbers,
+      # release build, published to the job summary — never asserted against
+      # the <100 ms budget here (that gate needs the §7 reference runner).
+      - name: Slider-latency scenario (F1, indicative only)
+        shell: bash
+        run: |
+          cargo test -p lightbox-render-testkit --release f1_slider_latency -- --nocapture \
+            2>&1 | tee f1-latency.log
+          {
+            echo '### F1 slider-latency (${{ matrix.os }}, NOT the reference-runner gate of record)'
+            echo '```'
+            grep '\[F1\]' f1-latency.log || echo '(no sample captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   sanitizers:
     name: ASan/LSan (decode + FFI surfaces)
     runs-on: ubuntu-latest
