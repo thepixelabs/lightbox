@@ -465,3 +465,127 @@ worktree `a9_gpu_backend_src_decoded_copies_source` proved only the backend in i
 `lightbox-render-testkit corpus::tests::first_single_node_golden_within_tolerance` passes against
 the committed `goldens/test.gain/pv1/checker-gain.png` within ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB (CPU
 reference path, landed by A-core; unaffected by the merge). PR-blocking golden gate live.
+
+## Phase E — E05.5 device-lost recovery + CPU fallback (E1–E8) — 2026-07-07
+
+Branch `e05-e` (worktree). Tasks landed: **E1 E2 E3 E4 E5 E6 E7 E8**. Full five-gate exit bar
+green in the worktree on the real Metal adapter (`build` · `test` · `clippy --all-targets -D
+warnings` · `fmt --check` · `deny check`; `cargo xtask fixtures` fetched for the unrelated E02 CLI
+e2e preconditions). Owned files: `ng/recover/mod.rs` (rewritten from stub), `ng/engine.rs`
+(recovery/events/active_backend wiring), an additive method on `ng/source/mod.rs`'s
+`DeviceProvider`, and two new integration test files. **No edits** to `ng/cache/` (B),
+`ng/exec/` tiling (C), `ng/compile/` (D), `ng/sched/` (B), or the testkit probe bodies (A-core/C) —
+strictly disjoint from the concurrent B/C/D waves.
+
+### The four §10.1 / DoD gates this phase owns (PR-blocking, GREEN on the Metal box)
+
+- **E05.5 gate (E5):** `tests/ng_recover.rs::e5_gate_injected_loss_keeps_editing_at_preview_resolution`
+  — an injected device-lost mid-session (`max_losses = 1`) degrades to CPU preview
+  (`EngineEvent::DegradedToCpu`, `active_backend() == CpuPreviewOnly`) and successive interactive
+  submits keep producing frames at preview resolution on the CPU.
+- **CPU/GPU parity gate (E6):** `tests/ng_parity.rs::e6_cpu_gpu_parity_over_corpus_and_graphs` —
+  every engine-owned node (`src.decoded`, `util.resize`, `xform.display`) + a point-op probe over
+  6 synthetic corpus patterns, GPU vs CPU within **ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB** (the testkit's
+  validated comparators); provenance asserted on every `RenderOutput`.
+- **Determinism gate (E6):** `e6_each_backend_is_bit_deterministic_across_three_runs` — each backend
+  bit-identical across 3 repeat renders of the most kernel-diverse chain.
+
+E1 (detection: event + in-flight tickets resolve `Failed(DeviceLost)`, never hang), E2 (rebuild on a
+**genuinely fresh** wgpu device via the seam), E3 (re-warm with zero `SourceProvider::fetch`), E4
+(policy boundary + `active_backend` + explicit re-enable), E7 (degraded contract), and E8
+(export-safety) each have a dedicated green test in `tests/ng_recover.rs`.
+
+### D-E-1 (STRUCTURAL): the engine backend is now runtime-swappable (`Shared.live: RwLock<LiveBackend>`)
+
+**What.** Device-lost recovery + degrade require swapping the pixel backend (GPU → fresh GPU on
+rebuild; GPU → CPU on degrade) at runtime. A-core's `Shared` held one immutable `Executor`
+(`backend: Arc<dyn Backend>` baked in). E replaces that with a swappable
+`live: RwLock<LiveBackend { backend, gpu, lost }>`; `Engine::stats` reads a `Shared`-owned
+`probe: Arc<RecomputeProbe>`, and each render builds a fresh `Executor::with_probe(current_backend,
+tile_size, probe)` from the snapshot of `live`. **The frozen `exec`↔backend seam is untouched** — no
+change to `trait Backend`, `Executor::evaluate`'s signature, or any executor internal (C's tiling
+layers on `evaluate` unchanged). **Why here.** `ng/engine.rs` is E-owned for the recovery wiring and
+is not touched by the concurrent B/C/D waves, so restructuring `Shared` is conflict-free.
+**Behaviour preserved.** All pre-existing engine unit tests (`submit_is_fast…`, `cancel_mid_render…`,
+`unsupported_pv…`, `poll_of_unknown…`) and the A9 engine GPU test pass unchanged. **Rollback.**
+revert `ng/engine.rs`.
+
+### D-E-2: device-generation guard against stale-device callbacks
+
+A rebuilt-past device may fire its `device_lost` callback when it is deliberately destroyed during a
+rebuild. A monotonic `device_gen: AtomicU64` — captured in each callback closure at install time and
+checked in `signal_device_lost_gen` — makes a stale device's loss a no-op, so destroying the old
+device on rebuild never spuriously re-triggers loss on the new one. `set_state` is now
+**sticky-terminal** (never overwrites Complete/Failed/Cancelled) so an in-flight ticket's
+`Failed(DeviceLost)` wins over a late worker `Cancelled`/`Complete` — the E1 "resolve, never hang"
+guarantee.
+
+### D-E-3: `DeviceProvider::adapter_info()` — additive `None`-default seam method
+
+`active_backend() -> Gpu(AdapterInfo)` needs the adapter identity, but the frozen §3.8 seam yields
+only `(device, queue)` and `wgpu::AdapterInfo` has **no `Default`**. Added an **additive**
+`fn adapter_info(&self) -> Option<wgpu::AdapterInfo> { None }` to `DeviceProvider` (backward-
+compatible — existing impls compile unchanged). The shell (F5) and the GPU test providers, which own
+the adapter, override it with the real info; when absent the engine reports a clearly-labelled
+"unknown adapter" placeholder (honest metadata — never a fabricated identity or gate number).
+Touches `ng/source/mod.rs` (A-gpu-owned, already merged); no B/C wave touches `DeviceProvider`, so
+the union is conflict-free.
+
+### D-E-4: E-owned RAM source pin for re-warm (distinct from B's NodeCache RAM tier)
+
+Re-warm (E3) requires the decoded source to survive device loss and re-upload with zero
+`SourceProvider::fetch`. B owns the general two-tier `NodeCache` RAM pin (`PinLabel::SourceStage`),
+which is **still stubbed in this worktree** (B runs in a parallel wave). Rather than reach into B's
+file, E holds its own `source_pin: Mutex<HashMap<ImageId, Arc<SourceImage>>>` on `Shared`: the first
+fetch pins the decoded pixels; every later render (including post-rebuild and post-degrade) re-uploads
+from the pin. This is host memory, so it survives GPU cache eviction and device loss. When B lands,
+its NodeCache RAM tier is the general home; F5/integration can reconcile the two (both are pure
+caches — correctness never depends on either). Blast radius: `ng/engine.rs` only.
+
+### D-E-5: `Engine::inject_device_lost` — a public test-only fault injector
+
+The E05.5 gates run headlessly and deterministically without depending on the Metal driver to
+actually drop the device. `Engine::inject_device_lost(reason)` drives `signal_device_lost_gen`
+exactly as the real wgpu `device_lost` callback would (the real callback is also installed, via
+`set_device_lost_callback`, and routes to the same code). It is a plain `pub fn` documented as
+"not part of the shipping API surface" (kept public so integration tests in a separate crate can call
+it; a `#[cfg]` feature would exclude it from the default `cargo test` gate). F5/promotion can gate it
+behind a `fault-injection` feature if desired.
+
+### D-E-6: E7 degraded preview clamp uses the engine-owned box decimator (C2 stand-in)
+
+The degraded interactive contract ("full-res never leaves the interactive path") is enforced by
+badging the output `PreviewRes` **and** shrinking the delivered frame. True fit-viewport decimation
+inside the pipeline is C2's (`util.resize` by `RenderScale`), which is not landed in this worktree.
+E's clamp therefore box-downscales the (CPU-resident, since degraded) **terminal tile** via the
+engine-owned `decimate_box_cpu` to a preview footprint (currently a 0.5 stand-in for the fit factor).
+`Batch` requests are never clamped (full-res allowed, badged `FullRes`). When C2 lands, the in-pipeline
+resize supersedes this terminal downscale; the *contract* (marking + no silent full-res interactive +
+Batch full-res) is unchanged. Fine-grained tile progress on the Batch path likewise rides on C's
+tiling; today the coarse `Rendering{…}` states are the progress surface.
+
+### D-E-7: E6 parity gate carries a self-contained point-op probe (does not touch `probes.rs`)
+
+The testkit `GainProbe`'s GPU kernel is deferred and owned by C's territory in
+`lightbox-render-testkit/src/probes.rs` (C fills `BlurRProbe`/`AccumProbe` there in a parallel wave).
+To keep Phase E strictly file-disjoint from C, the parity gate (`tests/ng_parity.rs`) carries its own
+point-op gain node (fixed ×0.75, WGSL + CPU) rather than editing `probes.rs`. The gate proves E6 on
+the three **real** engine-owned deliverable nodes plus this representative point-op — full cross-
+backend numerical parity on the real device. Completing the testkit `GainProbe::eval_gpu` for D's
+GPU golden matrix remains available to C/D; it is not required for the E6 parity gate.
+
+### D-E-8: dev-dependency edge `lightbox-render` → `lightbox-render-testkit`
+
+`tests/ng_parity.rs` reuses the testkit's **validated** ΔE2000 (Sharma-Wu-Dalal) / PSNR comparators
+as the single ground truth, so `lightbox-render` gains a **dev-dependency** on
+`lightbox-render-testkit`. This forms a dev-only cycle (`render` →[dev] `testkit` →[normal] `render`)
+which Cargo permits (the render *library* never depends on the dev/test testkit; only its test target
+does — `cargo build --workspace` never traverses it). Blast radius: one line in
+`crates/lightbox-render/Cargo.toml` `[dev-dependencies]`.
+
+### Nothing deferred inside Phase E's own scope
+
+All eight tasks E1–E8 build and gate for real on this Metal box. The DEFERRED items in the §0
+disposition (F1 reference-perf runner, F2 non-macOS GPU legs, F4 24 h soak, D3 full nightly matrix,
+C7/C10 scale) are other phases' and are unchanged by Phase E. Phase E adds **no** fabricated perf
+numbers, cross-platform runs, or goldens.

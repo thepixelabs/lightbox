@@ -34,6 +34,18 @@ pub trait DeviceProvider: Send + Sync {
     fn current(&self) -> DeviceHandles;
     /// Rebuild after device loss, yielding fresh handles (task E2).
     fn rebuild(&self) -> BoxFuture<'static, Result<DeviceHandles, DeviceError>>;
+
+    /// The adapter identity backing [`Self::current`], if the shell can report it
+    /// (drives [`crate::ng::Engine::active_backend`] → `Gpu(AdapterInfo)`,
+    /// spec §3.6). **Additive with a `None` default** (E05-deviations §E): the
+    /// `DeviceProvider`/`SourceProvider` seam yields only handles, so existing
+    /// providers compile unchanged; the shell (F5) and GPU test providers, which
+    /// own the adapter, override it with the real info. When `None`, the engine
+    /// reports a labelled "unknown adapter" placeholder — never a fabricated
+    /// identity.
+    fn adapter_info(&self) -> Option<wgpu::AdapterInfo> {
+        None
+    }
 }
 
 /// What the engine wants from the source seam (spec §3.8).

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, RwLock, Weak};
 use std::thread::JoinHandle;
 
 use lightbox_edit::Recipe;
@@ -29,7 +29,9 @@ use crate::ng::exec::{Backend, Executor};
 use crate::ng::gpu::DeviceCtx;
 use crate::ng::node::NodeRegistry;
 use crate::ng::nodes::decoded::SrcDecodedNode;
-use crate::ng::source::{DeviceProvider, SourceProvider, SourceWant, Uploader};
+use crate::ng::nodes::resize::decimate_box_cpu;
+use crate::ng::recover::{DegradeState, RecoverStateMachine};
+use crate::ng::source::{DeviceProvider, SourceImage, SourceProvider, SourceWant, Uploader};
 use crate::ng::stats::EngineStats;
 use crate::ng::tile::{PixelBuf, PixelFormat, TileHandle};
 use crate::ng::types::{Extent, ProcessVersion, RenderScale, Roi};
@@ -205,33 +207,123 @@ struct Job {
     cancel: CancelToken,
 }
 
-/// Engine state shared with the render worker thread.
+/// The live pixel backend + its GPU device context. Swapped at runtime on
+/// device-lost rebuild (GPU → fresh GPU) and on degradation (GPU → CPU) — the
+/// executor is rebuilt per render around whichever backend is live, so the swap
+/// needs no executor surgery (the frozen `exec` seam is untouched; task E owns
+/// this wiring).
+struct LiveBackend {
+    /// The backend the next render evaluates on.
+    backend: Arc<dyn Backend>,
+    /// The GPU device context on the GPU path (source upload + terminal
+    /// readback); `None` on the CPU path (`ForceCpu` or degraded-to-CPU).
+    gpu: Option<Arc<DeviceCtx>>,
+    /// `true` between a device-lost signal and a successful rebuild — submissions
+    /// refuse typed until recovery (export-safety, task E8).
+    lost: bool,
+}
+
+/// Engine state shared with the render worker thread + the device-lost callback.
 struct Shared {
     tickets: Mutex<HashMap<u64, TicketEntry>>,
     compiler: RecipeCompiler,
-    executor: Executor,
     cache: NodeCache,
     source: Arc<dyn SourceProvider>,
-    #[allow(dead_code)] // consumed by device-lost recovery (E); backend built at construction
     device: Arc<dyn DeviceProvider>,
-    /// The shared GPU device context when a GPU backend was selected (`Auto` +
-    /// an available device) — used to upload the source stage and to read the
-    /// terminal tile back on the `Buffer` path. `None` under `ForceCpu` / no
-    /// device (the CPU path uploads/reads back in host memory).
-    gpu: Option<Arc<DeviceCtx>>,
+    /// The live (swappable) backend + device context (device-lost recovery, E).
+    live: RwLock<LiveBackend>,
+    /// The shared recompute probe (snapshot by [`Engine::stats`]), threaded into
+    /// each per-render [`Executor`].
+    probe: Arc<crate::ng::stats::RecomputeProbe>,
+    /// Tile edge for the per-render executor.
+    tile_size: u32,
+    /// rayon pool size for the CPU path (used when degrading to CPU).
+    cpu_threads: Option<usize>,
+    /// The configured backend preference — distinguishes a deliberate `ForceCpu`
+    /// engine from a GPU engine degraded to CPU (the E7 clamp applies only to the
+    /// latter).
+    backend_pref: BackendPref,
+    /// Device-lost degradation policy state machine (task E4).
+    recover: RecoverStateMachine,
+    /// Broadcasts device-lost / degraded / re-enable events to the shell (§3.6).
+    events_tx: broadcast::Sender<EngineEvent>,
+    /// Monotonic device generation. A device-lost callback captured at install
+    /// time carries the generation of the device it belongs to; a signal from a
+    /// superseded (rebuilt-past) device is ignored, so deliberately destroying
+    /// the old device during a rebuild never spuriously re-triggers loss.
+    device_gen: AtomicU64,
+    /// RAM-pinned decoded source keyed by image (`PinLabel::SourceStage`
+    /// semantics). Host memory, so it survives GPU cache eviction and device
+    /// loss: a post-rebuild render re-uploads from it with **zero**
+    /// `SourceProvider::fetch` (re-warm, task E3).
+    source_pin: Mutex<HashMap<ImageId, Arc<SourceImage>>>,
+}
+
+/// How a render is delivered given the current degrade state (task E7).
+#[derive(Clone, Copy, Debug)]
+struct RenderPlan {
+    /// The fidelity badge stamped on the output.
+    quality: OutputQuality,
+    /// Whether the terminal tile is halved to a preview footprint (degraded +
+    /// Interactive + full-res — the "no silent full-res on the interactive path"
+    /// clause).
+    preview_halve: bool,
 }
 
 impl Shared {
+    /// Set a ticket's state, but never overwrite a **terminal** state (Complete /
+    /// Failed / Cancelled). This makes a device-lost failure (task E1) stick: if
+    /// the worker later reports the same ticket as Cancelled/Complete it is
+    /// dropped, so an in-flight ticket resolves `Failed(DeviceLost)` deterministically.
     fn set_state(&self, ticket: u64, state: RenderState) {
         if let Ok(mut map) = self.tickets.lock() {
             if let Some(entry) = map.get_mut(&ticket) {
-                entry.state = state;
+                if !is_terminal(&entry.state) {
+                    entry.state = state;
+                }
             }
         }
     }
 
-    /// Run one job to a terminal state.
-    fn process(&self, job: Job) {
+    /// The engine is on a lost GPU device awaiting rebuild.
+    fn is_lost(&self) -> bool {
+        self.live.read().map(|l| l.lost).unwrap_or(false)
+    }
+
+    /// The engine started on the GPU (`Auto`) and has degraded to CPU-preview
+    /// after repeated device loss — the state that arms the E7 clamp. A
+    /// deliberate `ForceCpu` engine is **not** "degraded" and is never clamped.
+    fn is_degraded(&self) -> bool {
+        self.backend_pref == BackendPref::Auto
+            && self.recover.state() == DegradeState::CpuPreviewOnly
+    }
+
+    /// Deliver plan for `req` under the current degrade state (task E7):
+    /// on CpuPreviewOnly an Interactive full-res request is clamped to a preview
+    /// footprint and badged `PreviewRes`; full-res only proceeds as `Batch`.
+    fn plan_render(&self, req: &RenderRequest) -> RenderPlan {
+        if !self.is_degraded() {
+            return RenderPlan {
+                quality: OutputQuality::FullRes,
+                preview_halve: false,
+            };
+        }
+        match req.priority {
+            RenderPriority::Interactive => RenderPlan {
+                quality: OutputQuality::PreviewRes,
+                // Only full-res interactive requests are shrunk; an already-
+                // decimated request (Fit/Ratio<1) is simply badged PreviewRes.
+                preview_halve: is_full_res(req.scale),
+            },
+            RenderPriority::Batch => RenderPlan {
+                quality: OutputQuality::FullRes,
+                preview_halve: false,
+            },
+        }
+    }
+
+    /// Run one job to a terminal state on the current live backend.
+    fn process(self: &Arc<Self>, job: Job) {
         let Job {
             ticket,
             req,
@@ -242,6 +334,32 @@ impl Shared {
             self.set_state(ticket, RenderState::Cancelled);
             return;
         }
+
+        // Recovery preamble (E2/E8): a lost GPU device is rebuilt before we
+        // render; if the rebuild fails and we have not degraded to CPU, refuse
+        // the submission typed (export-safety — E15 retries after rebuild).
+        if self.is_lost() {
+            if let Err(e) = self.try_recover() {
+                self.set_state(
+                    ticket,
+                    RenderState::Failed(RenderError::DeviceUnavailable(e)),
+                );
+                return;
+            }
+        }
+
+        // Snapshot the live backend + device context for this whole render, so a
+        // concurrent device-lost signal cannot swap the device mid-render.
+        let (backend, gpu) = {
+            let live = self
+                .live
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (Arc::clone(&live.backend), live.gpu.clone())
+        };
+        let backend_kind = backend.kind();
+        let plan = self.plan_render(&req);
+
         self.set_state(
             ticket,
             RenderState::Rendering {
@@ -252,7 +370,7 @@ impl Shared {
 
         // Compile the recipe → typed DAG under the requested PV. The M1 compiler
         // is template-only, so a nominal SourceDesc suffices (real source extent
-        // arrives via SourceProvider at the A-gpu merge).
+        // arrives via SourceProvider).
         let src = SourceDesc {
             image: req.image,
             full_extent: Extent {
@@ -271,13 +389,13 @@ impl Shared {
         };
 
         // Source-stage injection: if the compiled graph has the engine-owned
-        // source stage (`src.decoded`), fetch the decoded source through the
-        // `SourceProvider` seam and lift it to a working tile — a pooled GPU
-        // texture on the GPU path (via `Uploader`) or an identical-bytes host
-        // buffer on the CPU path. Graphs without a source stage (probe
-        // generators) render without a fetch.
+        // source stage (`src.decoded`), obtain the decoded source — from the RAM
+        // pin when present (re-warm, zero fetch) else through the
+        // `SourceProvider` seam — and lift it to a working tile on the snapshot
+        // backend. Graphs without a source stage (probe generators) render
+        // without a fetch.
         let source_inject = match graph.node_index(SrcDecodedNode::ID) {
-            Some(src_idx) => match self.fetch_source_tile(&req, &cancel) {
+            Some(src_idx) => match self.fetch_source_tile(&req, &cancel, gpu.as_ref()) {
                 Ok(tile) => Some((src_idx, tile)),
                 Err(e) => {
                     self.set_state(ticket, RenderState::Failed(e));
@@ -287,11 +405,17 @@ impl Shared {
             None => None,
         };
 
-        // Evaluate. A node panic (e.g. a still-stubbed kernel reached off the
-        // wired path) is caught and surfaced typed rather than aborting the
+        // Evaluate on the snapshot backend (rebuilt per render around whichever
+        // backend is live). A node panic (e.g. a still-stubbed kernel reached off
+        // the wired path) is caught and surfaced typed rather than aborting the
         // worker.
+        let executor = Executor::with_probe(
+            Arc::clone(&backend),
+            self.tile_size,
+            Arc::clone(&self.probe),
+        );
         let eval = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.executor.evaluate(
+            executor.evaluate(
                 &graph,
                 req.roi,
                 req.scale,
@@ -321,7 +445,7 @@ impl Shared {
             }
         };
 
-        let output = match self.finish(&req, tile) {
+        let output = match self.finish(&req, tile, gpu.as_ref(), backend_kind, &plan) {
             Ok(o) => o,
             Err(e) => {
                 self.set_state(ticket, RenderState::Failed(e));
@@ -331,21 +455,39 @@ impl Shared {
         self.set_state(ticket, RenderState::Complete(output));
     }
 
-    /// Fetch the decoded source for `req` and lift it to a working tile on the
+    /// Obtain the decoded source for `req` and lift it to a working tile on the
     /// active backend: a pooled GPU texture (via [`Uploader`]) on the GPU path,
-    /// or an identical-bytes host buffer on the CPU path. The engine never
-    /// decodes — pixels arrive through the [`SourceProvider`] seam (§3.8).
+    /// or an identical-bytes host buffer on the CPU path. Prefers the RAM pin
+    /// (re-warm, task E3) so a repeat render — including after a device-lost
+    /// rebuild — performs **zero** `SourceProvider::fetch`. The engine never
+    /// decodes; pixels arrive through the [`SourceProvider`] seam (§3.8).
     fn fetch_source_tile(
         &self,
         req: &RenderRequest,
         cancel: &CancelToken,
+        gpu: Option<&Arc<DeviceCtx>>,
     ) -> Result<TileHandle, RenderError> {
-        let image = pollster::block_on(self.source.fetch(
-            req.image,
-            SourceWant::DecodedFull,
-            cancel,
-        ))?;
-        match &self.gpu {
+        let pinned = self
+            .source_pin
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&req.image).cloned());
+        let image = match pinned {
+            Some(img) => img,
+            None => {
+                let fetched = pollster::block_on(self.source.fetch(
+                    req.image,
+                    SourceWant::DecodedFull,
+                    cancel,
+                ))?;
+                let arc = Arc::new(fetched);
+                if let Ok(mut m) = self.source_pin.lock() {
+                    m.insert(req.image, Arc::clone(&arc));
+                }
+                arc
+            }
+        };
+        match gpu {
             Some(ctx) => Ok(Uploader::new().upload(ctx.as_ref(), &image)),
             None => Ok(TileHandle::from_cpu(
                 crate::ng::source::to_working_tile_cpu(&image),
@@ -353,18 +495,44 @@ impl Shared {
         }
     }
 
-    /// Turn a terminal tile into a [`RenderOutput`] for the request's target.
-    fn finish(&self, req: &RenderRequest, tile: TileHandle) -> Result<RenderOutput, RenderError> {
-        let backend = self.executor.backend_kind();
-        let quality = OutputQuality::FullRes;
+    /// Turn a terminal tile into a [`RenderOutput`] for the request's target,
+    /// applying the degraded preview clamp (task E7) and stamping the executing
+    /// backend as provenance (§4.4).
+    fn finish(
+        &self,
+        req: &RenderRequest,
+        tile: TileHandle,
+        gpu: Option<&Arc<DeviceCtx>>,
+        backend: BackendId,
+        plan: &RenderPlan,
+    ) -> Result<RenderOutput, RenderError> {
+        // Degraded interactive full-res → deliver a downscaled-whole preview so a
+        // full-res frame never leaves the interactive path (task E7). The
+        // degraded path is CPU-resident, so the engine-owned box decimator
+        // applies directly; the GPU-resident case (not reachable while degraded)
+        // rides on C2's in-pipeline resize.
+        let tile = if plan.preview_halve {
+            match tile.cpu() {
+                Some(px) => {
+                    let half = Extent {
+                        w: (px.extent.w / 2).max(1),
+                        h: (px.extent.h / 2).max(1),
+                    };
+                    TileHandle::from_cpu(decimate_box_cpu(px, half))
+                }
+                None => tile,
+            }
+        } else {
+            tile
+        };
         let payload = match req.target {
             RenderTarget::Buffer { format } => {
-                OutputPayload::Pixels(readback(&tile, format, self.gpu.as_deref())?)
+                OutputPayload::Pixels(readback(&tile, format, gpu.map(|c| c.as_ref()))?)
             }
             RenderTarget::Canvas => {
                 // The engine-owned double-buffered canvas texture pair is wired
-                // by A-gpu (task A13). The CPU-only A-core path renders to a
-                // Buffer target; Canvas over CPU is a merge concern.
+                // by A-gpu (task A13). The CPU-only path renders to a Buffer
+                // target; Canvas over CPU is a merge/F5 concern.
                 return Err(RenderError::Internal(
                     "Canvas render target is wired by A-gpu (task A13); use a Buffer target on the CPU path"
                         .to_owned(),
@@ -376,23 +544,133 @@ impl Shared {
             colorimetry: OutputColorimetry::default(),
             backend,
             pv: req.pv,
-            quality,
+            quality: plan.quality,
         })
+    }
+
+    /// Handle a device-lost signal for the device generation `gen` (task E1).
+    /// A stale generation (a superseded device reporting loss during a rebuild)
+    /// is ignored; an already-degraded engine ignores further loss (CPU can't be
+    /// lost). Otherwise: mark lost, drive the policy SM, emit `DeviceLost`, fail
+    /// every in-flight ticket `Failed(DeviceLost)` (never hang), and — if the SM
+    /// says degrade — swap to CPU immediately and emit `DegradedToCpu`.
+    fn signal_device_lost_gen(&self, gen: u64, reason: &str) {
+        if gen != self.device_gen.load(Ordering::Acquire) {
+            return; // a stale/superseded device — ignore.
+        }
+        if self.recover.state() == DegradeState::CpuPreviewOnly {
+            return; // already on CPU — nothing to lose.
+        }
+        {
+            let mut live = self
+                .live
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if live.gpu.is_none() {
+                return; // ForceCpu / no GPU — nothing to lose.
+            }
+            live.lost = true;
+        }
+        let state = self.recover.on_device_lost(reason);
+        let _ = self.events_tx.send(EngineEvent::DeviceLost {
+            reason: reason.to_owned(),
+        });
+        self.fail_inflight_device_lost(reason);
+
+        if state == DegradeState::CpuPreviewOnly {
+            // Retire the lost GPU device generation so its (about-to-drop)
+            // callback is ignored, then swap to CPU — always available.
+            self.device_gen.fetch_add(1, Ordering::AcqRel);
+            {
+                let mut live = self
+                    .live
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                live.backend = Arc::new(CpuBackend::new(self.cpu_threads));
+                live.gpu = None;
+                live.lost = false;
+            }
+            let _ = self.events_tx.send(EngineEvent::DegradedToCpu);
+            tracing::warn!(
+                target: "lightbox_render::recover",
+                "degraded to CPU preview-only after repeated device loss"
+            );
+        }
+    }
+
+    /// Resolve every non-terminal ticket as `Failed(DeviceLost)` and cancel its
+    /// token so a blocking node unwinds — the "in-flight tickets resolve, never
+    /// hang" guarantee (task E1).
+    fn fail_inflight_device_lost(&self, reason: &str) {
+        if let Ok(mut map) = self.tickets.lock() {
+            for entry in map.values_mut() {
+                if !is_terminal(&entry.state) {
+                    entry.state = RenderState::Failed(RenderError::DeviceLost(reason.to_owned()));
+                    entry.cancel.cancel();
+                }
+            }
+        }
+    }
+
+    /// Rebuild the GPU backend on a fresh device from the [`DeviceProvider`] seam
+    /// (task E2): recreate the [`DeviceCtx`], pipeline cache, and [`TilePool`],
+    /// install device-lost callbacks on the new device under a bumped generation,
+    /// and clear the lost flag. The VRAM cache tier is dropped with the old
+    /// backend; the RAM source pin (host memory) survives and re-uploads onto the
+    /// rebuilt device (re-warm, task E3). Returns the seam error string on
+    /// failure so `process` can refuse the submission typed (E8).
+    fn try_recover(self: &Arc<Self>) -> Result<(), String> {
+        let handles = pollster::block_on(self.device.rebuild()).map_err(|e| e.to_string())?;
+        let ctx = Arc::new(DeviceCtx::new(handles.0, handles.1));
+        let backend: Arc<dyn Backend> = Arc::new(GpuBackend::new(&ctx));
+        let gen = self.device_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        self.install_device_callbacks(&ctx.device, gen);
+        {
+            let mut live = self
+                .live
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            live.backend = backend;
+            live.gpu = Some(ctx);
+            live.lost = false;
+        }
+        Ok(())
+    }
+
+    /// Install the device-lost callback + uncaptured-error hook on `device`
+    /// (task E1). The device-lost callback routes hard loss into
+    /// [`Self::signal_device_lost_gen`] under `gen`; the uncaptured-error hook
+    /// surfaces GPU errors so they are neither swallowed nor panicked (a hard
+    /// loss still arrives via the device-lost callback, not here).
+    fn install_device_callbacks(self: &Arc<Self>, device: &wgpu::Device, gen: u64) {
+        let weak: Weak<Shared> = Arc::downgrade(self);
+        device.set_device_lost_callback(move |reason, message| {
+            if let Some(shared) = weak.upgrade() {
+                shared.signal_device_lost_gen(gen, &format!("{reason:?}: {message}"));
+            }
+        });
+        device.on_uncaptured_error(Arc::new(|err: wgpu::Error| {
+            tracing::error!(
+                target: "lightbox_render::recover",
+                "uncaptured GPU error (hard device loss arrives via the device-lost callback): {err}"
+            );
+        }));
     }
 }
 
 /// The render engine (spec §3.6). Holds the registry-backed compiler, the tile
-/// cache, the executor (over a pixel [`Backend`]), and a serial render worker.
+/// cache, a live (swappable) pixel [`Backend`], the device-lost recovery state
+/// machine, and a serial render worker.
 ///
-/// A-core wires the **CPU** backend + Buffer readback end-to-end; A-gpu adds the
-/// shared-device GPU backend, the canvas double-buffer (A13), and device-lost
-/// recovery (E) at merge — the ticket lifecycle below is backend-agnostic.
+/// A-core wired the **CPU** backend + Buffer readback; A-gpu added the
+/// shared-device GPU backend and the canvas double-buffer (A13); **E** adds
+/// device-lost detection → rebuild → degrade-to-CPU-preview and the degraded
+/// contract — the ticket lifecycle below is backend-agnostic.
 pub struct Engine {
     shared: Arc<Shared>,
     next_ticket: AtomicU64,
     job_tx: Option<mpsc::Sender<Job>>,
     worker: Option<JoinHandle<()>>,
-    events_tx: broadcast::Sender<EngineEvent>,
 }
 
 impl Engine {
@@ -426,8 +704,8 @@ impl Engine {
         // `ForceCpu` always takes the rayon CPU path; `Auto` builds the GPU
         // backend on the shell's shared device (via the `DeviceProvider` seam)
         // and keeps the device context for source upload + terminal readback.
-        // (Device-lost fallback GPU→CPU is task E; the CPU path is fully wired
-        // here.)
+        // (Device-lost fallback GPU→CPU is task E, wired below; the CPU path is
+        // fully wired here.)
         let (backend, gpu): (Arc<dyn Backend>, Option<Arc<DeviceCtx>>) = match cfg.backend {
             BackendPref::ForceCpu => (Arc::new(CpuBackend::new(cfg.cpu_threads)), None),
             BackendPref::Auto => {
@@ -437,21 +715,40 @@ impl Engine {
                 (backend, Some(ctx))
             }
         };
-        let executor = Executor::with_probe(
-            backend,
-            cfg.tile_size,
-            Arc::new(crate::ng::stats::RecomputeProbe::new()),
-        );
 
+        let (events_tx, _) = broadcast::channel(64);
         let shared = Arc::new(Shared {
             tickets: Mutex::new(HashMap::new()),
             compiler,
-            executor,
             cache: NodeCache::new(),
             source: sp,
             device: dp,
-            gpu,
+            live: RwLock::new(LiveBackend {
+                backend,
+                gpu,
+                lost: false,
+            }),
+            probe: Arc::new(crate::ng::stats::RecomputeProbe::new()),
+            tile_size: cfg.tile_size,
+            cpu_threads: cfg.cpu_threads,
+            backend_pref: cfg.backend,
+            recover: RecoverStateMachine::new(cfg.device_lost_degrade),
+            events_tx,
+            device_gen: AtomicU64::new(0),
+            source_pin: Mutex::new(HashMap::new()),
         });
+
+        // Install device-lost detection on the GPU device, generation 0 (task E1).
+        let gpu_device = shared
+            .live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .gpu
+            .as_ref()
+            .map(|ctx| Arc::clone(&ctx.device));
+        if let Some(device) = gpu_device {
+            shared.install_device_callbacks(&device, 0);
+        }
 
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let worker_shared = Arc::clone(&shared);
@@ -465,14 +762,11 @@ impl Engine {
             })
             .map_err(|e| EngineInitError::WorkerSpawn(e.to_string()))?;
 
-        let (events_tx, _) = broadcast::channel(64);
-
         Ok(Engine {
             shared,
             next_ticket: AtomicU64::new(1),
             job_tx: Some(job_tx),
             worker: Some(worker),
-            events_tx,
         })
     }
 
@@ -532,15 +826,64 @@ impl Engine {
         }
     }
 
-    /// Subscribe to engine events (device-lost / degraded / vram; spec §3.6).
-    /// The channel exists here; **E** emits the events (device-lost / degrade).
+    /// Subscribe to engine events — device-lost / degraded / re-enabled (§3.6).
+    /// **E** emits `DeviceLost` on a detected loss, `DegradedToCpu` on the
+    /// policy-driven fall to CPU-preview, and `GpuReenabled` on explicit
+    /// re-enable. Subscribe **before** the event you want to observe (a broadcast
+    /// channel only delivers to live receivers).
     pub fn events(&self) -> broadcast::Receiver<EngineEvent> {
-        self.events_tx.subscribe()
+        self.shared.events_tx.subscribe()
     }
 
-    /// What the engine is currently rendering on.
+    /// What the engine is currently rendering on (spec §3.6; task E4). Reports
+    /// `CpuPreviewOnly` when degraded (or CPU-only), else `Gpu(AdapterInfo)` — the
+    /// adapter identity from the [`DeviceProvider`] seam, or a labelled unknown
+    /// placeholder when the seam does not expose it.
     pub fn active_backend(&self) -> ActiveBackend {
-        unimplemented!("E (E4): Engine::active_backend — GPU adapter / degrade state")
+        if self.shared.is_degraded() {
+            return ActiveBackend::CpuPreviewOnly;
+        }
+        let on_gpu = self
+            .shared
+            .live
+            .read()
+            .map(|l| l.gpu.is_some())
+            .unwrap_or(false);
+        if on_gpu {
+            let info = self
+                .shared
+                .device
+                .adapter_info()
+                .unwrap_or_else(unknown_adapter_info);
+            ActiveBackend::Gpu(info)
+        } else {
+            ActiveBackend::CpuPreviewOnly
+        }
+    }
+
+    /// Explicitly re-enable the GPU path after a degrade (prefs, E08; task E4):
+    /// reset the degrade policy and rebuild the GPU backend. On an `Auto` engine
+    /// a failed rebuild returns the seam error typed; a `ForceCpu` engine has no
+    /// GPU to re-enable and returns `Ok` unchanged.
+    pub fn reenable_gpu(&self) -> Result<(), RenderError> {
+        self.shared.recover.reenable_gpu();
+        if self.shared.backend_pref == BackendPref::Auto {
+            self.shared
+                .try_recover()
+                .map_err(RenderError::DeviceUnavailable)?;
+            let _ = self.shared.events_tx.send(EngineEvent::GpuReenabled);
+        }
+        Ok(())
+    }
+
+    /// **Test-only fault injector** (spec E1): simulate a device-lost signal
+    /// exactly as the wgpu `device_lost` callback would, driving detection →
+    /// (rebuild on next submit) / degrade. Not part of the shipping API surface —
+    /// it lets the E05.5 gates run headlessly and deterministically without
+    /// relying on the driver to actually drop the device.
+    pub fn inject_device_lost(&self, reason: &str) {
+        let gen = self.shared.device_gen.load(Ordering::Acquire);
+        self.shared.signal_device_lost_gen(gen, reason);
     }
 
     /// The process versions this engine can render (spec §3.6).
@@ -550,7 +893,7 @@ impl Engine {
 
     /// Engine counters, including the recompute-count probe (spec §3.6).
     pub fn stats(&self) -> EngineStats {
-        self.shared.executor.probe().snapshot()
+        self.shared.probe.snapshot()
     }
 }
 
@@ -561,6 +904,45 @@ impl Drop for Engine {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Whether a ticket state is terminal (no further transition). Used to make
+/// device-lost failures sticky (task E1) and to drop late worker updates.
+fn is_terminal(state: &RenderState) -> bool {
+    matches!(
+        state,
+        RenderState::Complete(_) | RenderState::Failed(_) | RenderState::Cancelled
+    )
+}
+
+/// Whether `scale` requests a full-resolution render (the class the degraded
+/// interactive path clamps, task E7). `Fit`/`Ratio(<1)` are already previews.
+fn is_full_res(scale: RenderScale) -> bool {
+    match scale {
+        RenderScale::OneToOne => true,
+        RenderScale::Ratio(f) => f >= 0.999,
+        RenderScale::Fit(_) => false,
+    }
+}
+
+/// A labelled placeholder adapter identity for [`Engine::active_backend`] when a
+/// [`DeviceProvider`] does not report [`DeviceProvider::adapter_info`]. Honest
+/// "unknown" metadata (never a fabricated adapter); the shell (F5) and GPU test
+/// providers supply the real info.
+fn unknown_adapter_info() -> wgpu::AdapterInfo {
+    wgpu::AdapterInfo {
+        name: "unknown (DeviceProvider did not report adapter_info)".to_owned(),
+        vendor: 0,
+        device: 0,
+        device_type: wgpu::DeviceType::Other,
+        device_pci_bus_id: String::new(),
+        driver: String::new(),
+        driver_info: String::new(),
+        backend: wgpu::Backend::Noop,
+        subgroup_min_size: 0,
+        subgroup_max_size: 0,
+        transient_saves_memory: false,
     }
 }
 
