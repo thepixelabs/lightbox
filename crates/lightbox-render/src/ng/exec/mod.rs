@@ -21,8 +21,14 @@
 //! node (`cache` is accepted but not yet consulted).
 
 pub mod backend;
+pub mod budget;
 pub mod cpu;
 pub mod gpu;
+pub mod priority;
+pub mod progressive;
+pub mod roi;
+pub mod scale;
+pub mod tiling;
 
 use std::collections::HashMap;
 use std::sync::Arc;

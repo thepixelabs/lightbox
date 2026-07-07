@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use lightbox_jobs::CancelToken;
 use lightbox_render::ng::{
-    CpuBackend, Executor, NodeCache, ParamBlock, ParamValue, PixelBuf, RenderGraph, RenderScale,
-    Roi,
+    CpuBackend, Executor, Extent, NodeCache, ParamBlock, ParamValue, PixelBuf, PixelFormat,
+    RenderGraph, RenderScale, Roi,
 };
 use lightbox_types::ProcessVersion;
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,59 @@ pub enum CorpusKind {
     WideGamut,
     /// 100 MP-synthetic (VRAM-budget stress).
     Synthetic100Mp,
+}
+
+/// Generate the synthetic source pixels for a [`CorpusKind`] at `w`×`h`, as a
+/// working-format (`Rgba16F`) tile — the seed the tiled/scale/soak executors
+/// consume as `src.decoded` (spec §6 corpus; tasks C2/C10). Deterministic and
+/// self-contained (own-math patterns, no external data → §8 surface-3 clean).
+pub fn synth_source(kind: CorpusKind, w: u32, h: u32) -> PixelBuf {
+    let w = w.max(1);
+    let h = h.max(1);
+    let mut px = PixelBuf::new_zeroed(PixelFormat::Rgba16F, Extent { w, h });
+    let bpp = PixelFormat::Rgba16F.bytes_per_pixel() as usize;
+    px.par_fill_rows(|y, row| {
+        for x in 0..w {
+            PixelBuf::encode_pixel(
+                PixelFormat::Rgba16F,
+                &mut row[x as usize * bpp..],
+                synth_pixel(kind, x, y, w, h),
+            );
+        }
+    });
+    px
+}
+
+/// The scene-linear working RGBA for one synthetic-corpus pixel.
+fn synth_pixel(kind: CorpusKind, x: u32, y: u32, w: u32, h: u32) -> [f32; 4] {
+    let fx = x as f32 / w as f32;
+    let fy = y as f32 / h as f32;
+    match kind {
+        CorpusKind::Gradient | CorpusKind::Synthetic100Mp => [fx, fy, 0.5, 1.0],
+        CorpusKind::Checker => {
+            if (x / 8 + y / 8).is_multiple_of(2) {
+                [0.2, 0.45, 0.7, 1.0]
+            } else {
+                [0.85, 0.15, 0.5, 1.0]
+            }
+        }
+        CorpusKind::LowKey => [0.02 + 0.10 * fx, 0.02 + 0.08 * fy, 0.03, 1.0],
+        CorpusKind::HighKey => [0.85 + 0.14 * fx, 0.88 + 0.11 * fy, 0.90, 1.0],
+        CorpusKind::HighFrequency => {
+            let v = if (x + y).is_multiple_of(2) { 0.9 } else { 0.05 };
+            [v, v, v, 1.0]
+        }
+        CorpusKind::WideGamut => {
+            // Saturated primaries rotating across the frame (values can exceed 1.0
+            // — scene-linear wide-gamut highlights).
+            let sector = ((fx * 3.0) as u32).min(2);
+            match sector {
+                0 => [1.4 * (1.0 - fy), 0.0, 0.0, 1.0],
+                1 => [0.0, 1.3 * (1.0 - fy), 0.0, 1.0],
+                _ => [0.0, 0.0, 1.5 * (1.0 - fy), 1.0],
+            }
+        }
+    }
 }
 
 /// One golden case: a `(node, pv, source, recipe)` rendered and compared to a
