@@ -97,6 +97,123 @@ satisfies the AC; these are UX-taxonomy calls, not schema.
 
 ---
 
+## Phase B — edit store, history, hub (the §3.1.1 core; store layer only — T5-DAOs, T6, T7, T9, T10)
+
+**Scope note.** This phase covers the **store layer** only: the catalog DAOs (T5),
+the `EditStore`/read surface (T6), `EditSession`'s gesture lifecycle (T7), history
+reconstruction/navigation (T9), and snapshots (T10). `EditHub` in `lightbox-core`
+(T8), the `lightbox-cli edit/history/snapshot/…` subcommands (T11), and the kill-9
+auto-persist fault-injection proof (T12) are a **separate follow-up phase** — see
+"Seams left for T8/T11/T12" below. Migration `0003_edit_state.sql` and the
+`docs/plan/migrations.md` registry entry were already applied/reserved before this
+phase started (recorded here for completeness, not re-litigated).
+
+**Correction to earlier entries.** D-2, E-2, E-4, and E-5 below (Phases C/D/E)
+describe `EditStore`/`EditHub`/the catalog edit DAOs as **absent** in their
+worktrees — accurate at the time those phases ran. That gap is now closed by this
+phase for the store layer: `lightbox-catalog::{CatalogTxn DAOs, ReaderHandle DTOs}`
+(T5/T6) and `lightbox_edit::{store::{EditStore, EditSession, PendingCommit},
+history::{list, recipe_at, step_to, undo, redo, clear}, snapshot}` (T7/T9/T10) all
+exist and are tested. `EditSink for EditStore` (below) closes E-4's deferred DB
+binding. `EditHub` (T8), the CLI subcommands (T11), and the kill-9 harness
+extension (T12) remain absent — that is this phase's intentional scope boundary,
+not a regression of D-2/E-2/E-4/E-5.
+
+### B-1 — `recipe_at` upper bound must key off the latest **existing** history
+step, not `head_seq` (T9 — production bug found and fixed in review)
+
+**What.** The partial work handed to this review had `history::recipe_at` reject
+any `seq > row.head_seq`. That is wrong: per §4.1-2, `StepTo`/`Undo` move
+`head_seq` **backward** without deleting the steps beyond it (truncation only
+happens on the next real commit) — precisely so `Redo` can replay forward again.
+Bounding on `head_seq` made every `Redo` past a single `Undo` fail with
+`NoSuchHistoryStep`, caught by `history::tests::undo_redo_round_trips_head_seq`
+(which the partial work had written but never run — it was mid-implementation,
+interrupted before its test pass).
+
+**Fix.** The bound is now `seq > row.head_seq.max(latest_history_seq)`, i.e. the
+highest seq actually present in `history_step` for the image. The nearest-keyframe
++ replay path underneath was already correct (it queries `history_step` directly,
+independent of `head_seq`) — only the guard was wrong. See
+`crates/lightbox-edit/src/history.rs` (`recipe_at` doc comment explains the
+invariant inline for future readers).
+
+### B-2 — Three test/bench fixtures used out-of-range `Exposure` values or a
+neutral-colliding first value (T9/T7 — test bugs found and fixed in review)
+
+**What.** `ParamId::Exposure` clamps to `[-5.0, 5.0]` (`recipe.rs` `set_scalar!`).
+Three places in the partial work asserted or depended on values outside that
+range, or on a first value equal to the neutral default (which produces **no**
+committed step — `EditSession::take_commit` returns `None` on zero net change,
+by design, T7 AC):
+
+- `history::tests::step_back_then_edit_drops_later_steps_exactly` committed
+  `Exposure = 9.0` post-step-back and asserted the stored value was `9.0`; the
+  DAO/recipe layer correctly clamped it to `5.0`, failing the assertion. Fixed to
+  commit/assert `4.5` (in range, still distinct from the pre-step-back value).
+- `history::tests::recipe_at_head_matches_stored_doc_after_1000_steps_and_is_fast`
+  looped `i as f32 * 0.01` for `i in 0..1000`: `i=0` gives `0.0`, identical to the
+  neutral default, so the very first commit was a no-op and `.unwrap()` on
+  `take_commit()` panicked; later iterations also exceeded `5.0` (`9.99` at
+  `i=999`). Fixed to an in-range monotone ramp (`-4.0 + i*0.008`, max `≈3.992`)
+  that is never equal to its predecessor.
+- `benches/store_perf.rs`'s `seeded_store_with_steps` had the identical `i=0`
+  no-op bug (same fix applied), and `bench_commit_with_1k_steps`'s per-iteration
+  closure re-committed a **constant** `Contrast = 5.0` every criterion sample,
+  which only nets a real change on the very first call and panics on the second.
+  Fixed to ping-pong between two distinct in-range values (`5.0`/`-5.0`) each call.
+
+**Why called out.** None of these are spec/schema deviations — they are test-data
+bugs in code the partial work had written but not yet run (the interruption point
+named in this phase's task brief). Recorded per the honest-reporting rule: the
+production `recipe_at` fix (B-1) is a real behavior change; these are not.
+
+### B-3 — Added a randomized property test for `recipe_at ≡ brute-force replay`
+(T9, §6 test-plan gap closed)
+
+**What.** The partial work's `recipe_at_matches_brute_force_replay` test used a
+fixed 10-value array (never crossing the 64-step `KEYFRAME_INTERVAL` anchor
+boundary). §6 of the spec names this a **PR-blocking property test** over "random
+gesture sequences". Added
+`history::tests::proptests::recipe_at_matches_independent_brute_force_replay`
+(`proptest`, 32 cases, 1–191 random multi-param gestures per case — long enough to
+cross the keyframe boundary): it folds an independently-computed expected `Recipe`
+alongside the store (never calling `recipe_at`'s own anchor/replay logic) and
+checks `recipe_at(seq)` against it for every `seq` actually committed, including
+gestures that legitimately produce no commit (net-zero change).
+
+### B-4 — Perf ACs measured (informational; not the nightly-dashboard machine)
+
+**What.** Ran `cargo bench -p lightbox-edit --bench store_perf` locally (not the
+nightly perf harness/reference machine) after fixing B-2's panic: `commit_p95_with_1k_steps`
+≈ 76 µs (target < 5 ms), `recipe_at_head_1000_steps` ≈ 18.8 µs and
+`recipe_at_mid_1000_steps` ≈ 35.7 µs (target < 10 ms each). Comfortably inside the
+§6 budget on this machine; wiring these into the nightly lbx-perf baseline
+dashboard is unchanged/DEFERRED per the existing E-6 pattern (CI plumbing, not
+shipped code) — this phase did not add that wiring.
+
+### B-5 — Seams left for T8/T11/T12 (the named follow-up)
+
+Per this phase's scope boundary, the following are **intentionally untouched**,
+confirmed clean at review time (`grep` found no `EditHub` in `lightbox-core`, no
+`edit`/`history`/`snapshot`/`preset`/`xmp` subcommands in `lightbox-cli`):
+
+- **T8 (`EditHub` in `lightbox-core`).** Build on `lightbox_edit::{EditStore,
+  EditSession, PendingCommit}` directly (`crates/lightbox-edit/src/store.rs`).
+  `EditSession` is already the pure in-memory gesture object T8's registry should
+  wrap per-image; `EditStore::commit` is the one DB-touching call to route through
+  the dispatcher's blocking pool.
+- **T11 (CLI subcommands).** `lightbox-cli` already depends on `lightbox-edit`
+  (pre-existing, for `Recipe::identity(PV_M0)` in `render`); no new subcommand
+  wiring exists. `EditStore`/`history`/`snapshot` functions are ready to call
+  directly from hand-rolled subcommand handlers, matching the existing
+  `create/import/list/render/backup/check` pattern.
+- **T12 (kill-9 auto-persist proof).** Not extended; `EditStore::commit` is one
+  `WriterHandle::with_txn` call (the same primitive E01's existing kill-9 harness
+  already exercises for other tables), so the harness extension is additive.
+
+---
+
 ## Phases C + D — XMP substrate + `crs:`/`lb:` mapping layer (T13–T22)
 
 ### D-1 — Fallback XMP substrate (own RDF/XML), and Phase D shipped ahead of Phase C
@@ -123,10 +240,9 @@ unaffected today (`quick-xml` is MIT, surface-1 clean; no GPL, no C++ vendoring)
 **What.** T22's durable surface — `Command::Edit(ReadMetadata/WriteMetadata)`
 dispatcher arms, the debounced `Class::Background` auto-write job, and
 `sync::status(cat, asset, original)` reading the `xmp_sync` DAO — depends on the
-`EditHub`/dispatcher and the catalog read/write DAOs that **Phase B owns and that
-are not present in this worktree** (only the 0003 migration landed). Phase D
-therefore ships the **operations those commands invoke**, fully tested in
-isolation:
+`EditHub`/dispatcher, which is **still absent** (T8 is a separate follow-up phase
+from the store layer landed above — see the Phase B section). Phase D therefore
+ships the **operations those commands invoke**, fully tested in isolation:
 
 - `xmp_map::write_sidecar` / `read_sidecar` (recipe ↔ atomic sidecar, mandate-c.2
   safe — never touches the original);
@@ -135,11 +251,16 @@ isolation:
   E06 scheduler (its graceful synchronous fallback: flush eagerly on `due`);
 - `sync::classify` — the pure divergence state machine (Phase C).
 
+The catalog read/write DAOs this note originally called "not present" **do now
+exist** (Phase B, T5/T6, landed above) — `xmp_sync` CRUD in particular
+(`upsert_xmp_sync_write`/`upsert_xmp_sync_read`/`xmp_sync_row`) is ready for T22's
+dispatcher wiring to call directly.
+
 **Why.** T22's own spec permits a "graceful synchronous fallback when jobs absent
-in tests"; the command arms are one dispatcher match each once Phase B's `EditHub`
+in tests"; the command arms are one dispatcher match each once `EditHub` (T8)
 exists. `ReadMetadata` applying as a `StepLabel::XmpRead` history step and the
-opt-in (default **off**) auto-write pref are **DEFERRED** to that Phase B wiring;
-the label variant already exists in the frozen `StepLabel` enum.
+opt-in (default **off**) auto-write pref are **DEFERRED** to that T8 wiring; the
+label variant already exists in the frozen `StepLabel` enum.
 
 ### D-3 — `lightbox-render`/`lightbox-shell` gain `lightbox-meta` transitively (source untouched)
 
@@ -219,16 +340,17 @@ plus the licensing-review PR.
 ### E-2 — `StepLabel` shipped in `lightbox_edit::history` ahead of Phase B (T25)
 
 **What.** Phase E defines [`history::StepLabel`] (spec §3.3) — a pure leaf enum the
-preset/transfer engines stamp onto steps. The **rest** of `lightbox_edit::history`
-(the `recipe_at`/`list`/`clear` engine, keyframe replay, `HistoryStepMeta`) is
-**Phase B (T5–T9), not present in this worktree**.
+preset/transfer engines stamp onto steps. At the time Phase E ran, the **rest** of
+`lightbox_edit::history` (the `recipe_at`/`list`/`clear` engine, keyframe replay,
+`HistoryStepMeta`) was Phase B (T5–T9) territory and not yet present. **Phase B has
+since landed** (see the Phase B section above) and extended `history.rs` in place,
+reusing this exact `StepLabel` enum unchanged, as anticipated below.
 
-**Why / action for Phase B.** Phase E's public surface (`sync_to`, the apply
-paths) is typed on `StepLabel`, so it must exist for the crate to compile and be
-testable now. Phase D already referenced `StepLabel::XmpRead` (deviations D-2).
-Phase B **extends `history.rs` in place and reuses this exact enum** — it must not
-redefine it. (If Phase B is authored on a parallel branch, this is the merge
-reconciliation point.)
+**Why / what happened.** Phase E's public surface (`sync_to`, the apply paths) is
+typed on `StepLabel`, so it had to exist for the crate to compile and be testable
+at Phase E time. Phase D already referenced `StepLabel::XmpRead` (deviations D-2).
+Phase B did extend `history.rs` in place and did not redefine `StepLabel` — the
+anticipated merge reconciliation was a non-event.
 
 ### E-3 — Preset delete is a permanent remove, not OS trash (T24)
 
@@ -242,43 +364,51 @@ is additive and changes no caller. **DEFERRED** with that trigger.
 ### E-4 — Transfer engine written against an `EditSink` seam, not `EditStore` (T27)
 
 **What.** The spec signature is `sync_to(store: &EditStore, …)`, but `EditStore`
-is a **Phase B** type absent here. The engine ([`transfer::sync_to`] and the
-apply paths) is written against a minimal [`transfer::EditSink`] trait
+was a **Phase B** type absent when Phase E ran. The engine ([`transfer::sync_to`]
+and the apply paths) is written against a minimal [`transfer::EditSink`] trait
 (`recipe_of` + `commit_batch` = one WAL txn). A local [`transfer::CancelFlag`] /
 [`transfer::CancelSignal`] provides cooperative cancellation without pulling the
 `lightbox-jobs` (tokio) runtime into `lightbox-edit` (which would grow
 render/shell's graph, cf. A-2/D-3).
 
-**Why.** This keeps the genuinely-Phase-E logic — ~64/txn batching, one step per
+**Why.** This kept the genuinely-Phase-E logic — ~64/txn batching, one step per
 target, progress events, cancel-between-chunks, "Previous" semantics — **real and
-fully unit-tested now** against an in-memory fake sink, while the DB binding stays
-Phase B's. Phase B's `EditStore` implements `EditSink` (or the dispatcher adapts in
-a few lines) and passes a `CancelFlag` driven by the E06 `CancelToken`.
+fully unit-tested** against an in-memory fake sink, while the DB binding stayed
+for Phase B. **Resolved by Phase B** (above): `impl EditSink for EditStore` now
+exists in `crates/lightbox-edit/src/store.rs`, wiring `sync_to`/the transfer engine
+onto the real catalog with no change to the Phase-E types — see
+`store::tests::edit_sink_sync_to_via_editstore`.
 
-### E-5 — Command-bus / CLI / kill-9 legs of T25/T27/T28 DEFERRED to Phase B
+### E-5 — Command-bus / CLI / kill-9 legs of T25/T27/T28 DEFERRED past Phase B (T8/T11/T12)
 
-**What.** These T25/T27/T28 items depend on Phase B artifacts that do **not exist
-in this worktree** (no `EditStore`/`EditHub`, no `Command::Edit` dispatcher, no
-catalog edit DAOs, no `lightbox-cli edit/preset/xmp` subcommands — only the 0003
-migration SQL landed):
+**What.** These T25/T27/T28 items depend on artifacts that did not exist when
+Phase E ran and, for the command-bus/CLI/kill-9 legs specifically, **still do
+not** (they are T8/T11/T12 — a follow-up scoped separately from the store layer
+Phase B landed above, per that section's scope note):
 
 - the `Command::Edit(ApplyPreset / PasteSettings / ResetEdits / ApplyPrevious /
   SyncSettings)` **dispatcher arms** and the core-held `CopiedSettings` / "Previous"
-  buffer wiring;
+  buffer wiring (needs `EditHub`, T8);
 - the **full `lightbox-cli` E2E scenario** (import → gestures → history walk →
   snapshot → preset create/apply → LR import → xmp write → fresh open → xmp read →
-  equality + divergence → kill-9 leg);
+  equality + divergence → kill-9 leg) (needs the CLI subcommands, T11, and the
+  kill-9 harness extension, T12);
 - the **500-target-against-SQLite** criterion number and the commit-txn/`recipe_at`
-  perf rows (need the catalog DAOs).
+  perf rows — **this part is now measurable**: Phase B's `store_perf.rs` bench
+  reports `commit_p95_with_1k_steps` ≈ 76 µs and `recipe_at_*_1000_steps` ≈
+  19–36 µs (see Phase B, B-4), both far inside the §6 budget. The 500-target sync
+  number specifically (against the real DB, not the in-memory `EditSink`) remains
+  open until a T11 CLI/E06-job-scale benchmark exists.
 
 **What ships instead (real, tested).** The complete file-backed `PresetStore`
 (create/rename/delete/export/import, cold scan, refresh, quarantine), the pure
 `preview_recipe`, `CopiedSettings`, and the batched transfer engine — all exercised
 end-to-end at the crate layer in `tests/preset_transfer_e2e.rs` against the on-disk
-store and the in-memory `EditSink`. The perf ACs measurable without the DB are met
-(criterion `preset_transfer` bench: cold-scan 500 ≈ 55 ms < 100 ms; in-memory sync
-500 ≈ 0.7 ms « 1 s). Phase B wires the deferred legs onto this surface with no
-change to the Phase-E types.
+store and the in-memory `EditSink`, **plus now against the real `EditStore`** (E-4,
+`store::tests::edit_sink_sync_to_via_editstore`). The perf ACs measurable without
+the DB are met (criterion `preset_transfer` bench: cold-scan 500 ≈ 55 ms < 100 ms;
+in-memory sync 500 ≈ 0.7 ms « 1 s). T8/T11/T12 wire the remaining deferred legs
+onto this surface with no change to the Phase-E types.
 
 ### E-6 — Criterion benches ship; the nightly perf-dashboard wiring is DEFERRED
 

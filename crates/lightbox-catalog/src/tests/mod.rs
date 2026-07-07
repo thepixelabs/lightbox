@@ -7,6 +7,7 @@
 
 mod backup_tests;
 mod dao_tests;
+mod edit_state_tests;
 mod fts_tests;
 mod open_create_tests;
 mod pages_tests;

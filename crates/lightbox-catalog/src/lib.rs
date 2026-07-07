@@ -36,6 +36,10 @@ mod backup;
 mod catalog;
 mod clock;
 mod dao;
+// E09 Phase B (T5-DAOs/T6): the edit-state store layer — write DAOs on
+// `CatalogTxn` and the matching read surface on `ReaderHandle` for
+// edit_recipe/edit_index/history_step/snapshot/xmp_sync (migration 0003).
+mod edit_state;
 mod error;
 mod migrate;
 mod pages;
@@ -50,6 +54,9 @@ pub use backup::{BackupOpts, BackupReport};
 pub use catalog::integrity_check_file;
 pub use catalog::{Catalog, IntegrityStatus};
 pub use dao::{InsertOutcome, NewAsset, RemovedCounts};
+pub use edit_state::{
+    EditBadge, EditStateRow, HistoryReplayRange, HistoryStepRow, SnapshotRow, XmpSyncRow,
+};
 pub use error::{CatalogError, Result};
 pub use pages::{ImageQuery, ImageSummary, Page, PageCursor, SortOrder};
 pub use profile_sync::{

@@ -12,6 +12,10 @@ publish.workspace = true
 
 [dependencies]
 lightbox-types.workspace = true
+# The edit-state store layer (spec §3.3, Phase B / T5-T10): `EditStore` wraps
+# `Arc<Catalog>` and calls only the public DAO/reader surface — no SQL crosses
+# this crate's boundary (E01 rule, kept).
+lightbox-catalog.workspace = true
 # `Recipe::default_for(pv, &AssetProbe)` is a frozen §3.2 seam signature; AssetProbe
 # is owned by lightbox-decode. See E09-deviations.md A-2 for the transitive-weight note.
 lightbox-decode.workspace = true
@@ -45,6 +49,12 @@ criterion.workspace = true
 # micro-benches (spec §6 perf table / T27 / T28).
 [[bench]]
 name = "preset_transfer"
+harness = false
+
+# Phase B store perf (spec §6 / T7 / T9): commit-txn p95 < 5 ms @ 1k existing
+# steps; recipe_at < 10 ms @ 1k steps.
+[[bench]]
+name = "store_perf"
 harness = false
 
 [lints]

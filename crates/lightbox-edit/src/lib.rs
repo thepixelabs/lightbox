@@ -43,6 +43,14 @@ pub mod leaves;
 pub mod params;
 pub mod preset;
 pub mod recipe;
+// The edit store (spec §3.1.1/§3.3, Phase B — T6/T7): `EditStore`,
+// `EditSession`/`PendingCommit` (the pure gesture lifecycle + commit DAO
+// txn), and `StoreError`.
+pub mod store;
+// Snapshots (spec §3.1/§3.3, Phase B — T10): `SnapshotMeta`, the
+// `SnapshotMaterializer` E12 seam, and `EditStore`'s snapshot CRUD +
+// `restore_snapshot`.
+pub mod snapshot;
 pub mod transfer;
 pub mod xmp_map;
 
@@ -52,9 +60,18 @@ pub use recipe::{Applied, Geometry, GlobalStages, Recipe, RecipeError, RecipeRea
 
 pub use params::{group_of, ParamDelta, ParamGroup, ParamId, ParamSubset, ParamValue};
 
-// History vocabulary (spec §3.3). Phase E ships `StepLabel` (the label every
-// durable edit txn carries); Phase B extends this module with the history engine.
-pub use history::StepLabel;
+// History vocabulary + engine (spec §3.3). Phase E shipped `StepLabel` (the
+// label every durable edit txn carries); Phase B (T9) adds the reconstruction
+// engine (`history::list`/`recipe_at`/`clear`/`step_to`/`undo`/`redo`,
+// accessed via the `history` module path) and `HistoryStepMeta`.
+pub use history::{HistoryStepMeta, StepLabel};
+
+// The edit store (spec §3.3, Phase B — T6/T7): session registry + durable
+// commit surface for `lightbox-core`'s `EditHub` (T8, follow-up) to build on.
+pub use store::{EditSession, EditState, EditStore, PendingCommit, StoreError};
+
+// Snapshots (spec §3.3, Phase B — T10).
+pub use snapshot::{IdentityMaterializer, SnapshotMaterializer, SnapshotMeta};
 
 // Presets (spec §3.7 / Phase E): the file-backed store, the preset model, and the
 // pure hover `preview_recipe`.

@@ -1817,6 +1817,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "criterion",
+ "lightbox-catalog",
  "lightbox-decode",
  "lightbox-meta",
  "lightbox-types",
