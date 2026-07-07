@@ -19,7 +19,9 @@ use crate::ng::error::NodeError;
 use crate::ng::tile::{CpuTileView, PixelBuf, TileHandle, TileView};
 use crate::ng::types::{Extent, NodeId, PortType, Roi, TilePrecision};
 
-pub use param::{ParamBlock, ParamHash, ParamsSchema, ParamsSchemaRef};
+pub use param::{
+    FieldDecl, ParamBlock, ParamHash, ParamKind, ParamValue, ParamsSchema, ParamsSchemaRef,
+};
 pub use registry::{NodeRegistry, PvRange};
 
 /// One declared port: a name and its [`PortType`] (spec §3.2).
@@ -119,18 +121,47 @@ impl GpuEvalCtx<'_> {
 }
 
 /// What a CPU node sees during evaluation (spec §3.2). The rayon parity path.
+///
+/// The [`crate::ng::exec::cpu::CpuBackend`] pre-allocates the output working
+/// tile (sized from the eval ROI, formatted per [`RenderNode::precision`]) and
+/// hands the node a mutable view through [`CpuEvalCtx::output`]; the node fills
+/// it (task A14).
 pub struct CpuEvalCtx<'a> {
-    /// The render scale for this eval.
+    /// The render scale (source→output decimation factor) for this eval.
     pub scale: f32,
     /// Cooperative cancellation; long nodes check at checkpoints.
     pub cancel: &'a CancelToken,
-    // A-core adds: output PixelBuf, tile ROI, thread-pool handle.
+    /// The output tile ROI (source-pixel coordinates).
+    pub out_roi: Roi,
+    /// The pre-allocated output working tile the node writes.
+    out: &'a mut PixelBuf,
 }
 
-impl CpuEvalCtx<'_> {
-    /// The output buffer the node writes.
+impl<'a> CpuEvalCtx<'a> {
+    /// Build a CPU eval context over a pre-allocated output buffer (A-core /
+    /// [`crate::ng::exec::cpu::CpuBackend`]).
+    pub(crate) fn new(
+        scale: f32,
+        cancel: &'a CancelToken,
+        out_roi: Roi,
+        out: &'a mut PixelBuf,
+    ) -> CpuEvalCtx<'a> {
+        CpuEvalCtx {
+            scale,
+            cancel,
+            out_roi,
+            out,
+        }
+    }
+
+    /// The output buffer the node writes (working-format tile).
     pub fn output(&mut self) -> &mut PixelBuf {
-        unimplemented!("A14 (A-core): CpuEvalCtx::output — the rayon tile output buffer")
+        self.out
+    }
+
+    /// The output tile extent (convenience for eval loops).
+    pub fn out_extent(&self) -> Extent {
+        self.out.extent
     }
 }
 

@@ -42,6 +42,10 @@ tokio = { workspace = true, features = ["sync"] }
 pollster.workspace = true
 # Golden-image + CPU/GPU parity tests (spec §5 T22–T24).
 lbx-image-compare.workspace = true
+# E05 A-core unit/property tests: serde round-trips (A2) + canonical-CBOR
+# order-independence property (A3).
+serde_json.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true
