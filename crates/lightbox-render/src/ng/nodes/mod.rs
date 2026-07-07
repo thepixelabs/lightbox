@@ -13,3 +13,4 @@
 pub mod decoded;
 pub mod display;
 pub mod resize;
+pub mod support;

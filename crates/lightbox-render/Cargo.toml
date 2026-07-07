@@ -38,10 +38,17 @@ petgraph.workspace = true
 # broadcast/watch channels for EngineEvent / CanvasFrame (spec §3.6/§3.7).
 tokio = { workspace = true, features = ["sync"] }
 
+[build-dependencies]
+# E05 A6 (A-gpu): naga-validate every WGSL shader at BUILD time (invalid WGSL
+# fails the build, not runtime). naga is wgpu's own shader front-end, already
+# vendored in the graph at the pinned wgpu major — no new external surface.
+naga = { version = "29", features = ["wgsl-in"] }
+
 [dev-dependencies]
 pollster.workspace = true
 # Golden-image + CPU/GPU parity tests (spec §5 T22–T24).
 lbx-image-compare.workspace = true
+half.workspace = true
 
 [lints]
 workspace = true
