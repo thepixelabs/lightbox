@@ -14,6 +14,7 @@ use lightbox_catalog::BackupReport;
 use lightbox_edit::StepLabel;
 use lightbox_ingest::ImportReport;
 use lightbox_meta::xmp::sync::DivergenceStatus;
+use lightbox_preview::{PreviewDesc, PreviewError, Tier};
 use lightbox_types::{AssetId, ImageId, ImportSessionId};
 
 use crate::command::CommandTicket;
@@ -130,5 +131,38 @@ pub enum Event {
         asset: AssetId,
         /// The new status.
         status: DivergenceStatus,
+    },
+    /// E03 Phase D (T14, spec §5.6): a preview build completed. Re-published
+    /// verbatim from [`lightbox_preview::PreviewEvent::Ready`] (via
+    /// `Session::open`'s wiring of `PreviewService`'s event sink onto this
+    /// bus).
+    PreviewReady {
+        /// The image the build was for.
+        image: ImageId,
+        /// Which pyramid tier.
+        tier: Tier,
+        /// The resulting descriptor (store path, dims, variant, …).
+        desc: PreviewDesc,
+    },
+    /// A preview build failed (spec §5.6). Re-published from
+    /// [`lightbox_preview::PreviewEvent::Failed`].
+    PreviewFailed {
+        /// The image the build was for.
+        image: ImageId,
+        /// Which pyramid tier.
+        tier: Tier,
+        /// Why.
+        error: PreviewError,
+    },
+    /// Progress for a [`Command::BuildPreviews`](crate::Command::BuildPreviews)
+    /// bulk run (T16). Re-published from
+    /// [`lightbox_preview::PreviewEvent::BulkProgress`] — carries no session
+    /// id (see that variant's doc comment); at most one concurrently
+    /// observed bulk run is disambiguated by this event stream alone.
+    PreviewBulkProgress {
+        /// Builds completed so far in this run.
+        done: u64,
+        /// Total builds in this run.
+        total: u64,
     },
 }

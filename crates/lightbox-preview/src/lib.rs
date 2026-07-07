@@ -24,7 +24,10 @@
 // Lanczos3 resize (codec), the feature-gated libjxl encode FFI + jxl-oxide
 // decode (codec/jxl.rs, `jxl` feature — OFF by default, libjxl absent on
 // this build machine), and the T1 build pipeline (producer::ensure_t1).
-// Phases D-F build the scheduler, raw cache, and lifecycle on top of these.
+// Phase D (T13-T16) adds the priority build scheduler (sched) and the
+// `PreviewService` facade (service) — tickets, `PreviewEvent`, viewport
+// integration, bulk build/progress. Phases E-F build the raw cache and
+// lifecycle/T2/hardening on top of these.
 mod codec;
 mod config;
 mod decode;
@@ -35,6 +38,8 @@ mod index;
 mod pipeline;
 mod producer;
 mod pyramid;
+mod sched;
+mod service;
 mod store;
 
 use std::path::PathBuf;
@@ -54,6 +59,13 @@ pub use pyramid::{
     PreviewScope, PreviewSource, ProducerId, RelPath, StoreKey, Tier, VariantHash, VariantParams,
     VARIANT_PARAMS_ENC_VER,
 };
+// E03 Phase D (T13): the priority build scheduler (spec §3.4/§5.6).
+pub use sched::{
+    BuildFn, BuildFuture, BuildKey, BuildPriority, BuildRuntime, BulkHandle, EnqueueError,
+    EventSink, PreviewEvent, Scheduler,
+};
+// E03 Phase D (T14-T16): the `PreviewService` facade (spec §5.2).
+pub use service::{CacheStats, PreviewRequest, PreviewService, PurgeReport, QuickVerifyReport};
 pub use store::{BlobNamespace, BlobRef, BlobStore, Store, StoreManifest, STORE_FORMAT_VERSION};
 
 /// Which rendition of an image is being asked for (spec §3.6).

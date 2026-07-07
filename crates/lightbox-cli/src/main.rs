@@ -52,6 +52,9 @@ mod e02;
 // `snapshot`/`preset`/`xmp` subcommands over the `Command::Edit`/`EditHub`
 // seam.
 mod edit;
+// E03 Phase D (T14): `preview build/stat/verify/purge` over the
+// `Command::BuildPreviews`/`Queries::cache_stats`/`PreviewService` seam.
+mod preview;
 // E02 Phase H (H6/H7): the seam-handoff contract + threat-model notes, as
 // rustdoc committed alongside the crates (no separate report .md).
 mod seams;
@@ -105,6 +108,12 @@ USAGE:
   lightbox-cli xmp write  --catalog <dir> --image <id>
   lightbox-cli xmp read   --catalog <dir> --image <id>
   lightbox-cli xmp status --catalog <dir> --image <id> [--json]
+
+  E03 preview pyramid (headless):
+  lightbox-cli preview build  --catalog <dir> --tier <0|1|2> [--image <id> ...] [--priority visible|neighbor|bulk]
+  lightbox-cli preview stat   --catalog <dir> [--json]
+  lightbox-cli preview verify --catalog <dir> [--json]
+  lightbox-cli preview purge  --catalog <dir> --yes
 
 EXIT CODES:
   0 success | 1 failure | 2 usage error | 3 catalog corrupt/refused
@@ -184,6 +193,8 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
         "snapshot" => edit::cmd_snapshot(rest),
         "preset" => edit::cmd_preset(rest),
         "xmp" => edit::cmd_xmp(rest),
+        // E03 Phase D (T14): preview build/stat/verify/purge.
+        "preview" => preview::cmd_preview(rest),
         "--help" | "-h" | "help" => {
             print!("{USAGE}");
             Ok(0)

@@ -54,7 +54,7 @@ fn required_name(flags: &mut Flags) -> Result<String, UsageError> {
         .ok_or_else(|| UsageError("--name <name> is required".to_owned()))
 }
 
-fn bad_subcommand(name: &str, want: &str) -> anyhow::Result<u8> {
+pub(crate) fn bad_subcommand(name: &str, want: &str) -> anyhow::Result<u8> {
     eprintln!("error: {name} requires a subcommand: {want}");
     Ok(EXIT_USAGE)
 }

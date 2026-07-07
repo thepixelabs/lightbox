@@ -20,6 +20,7 @@ use lightbox_catalog::{
 };
 use lightbox_edit::{EditState, HistoryStepMeta, PresetId, PresetMeta, Recipe, SnapshotMeta};
 use lightbox_meta::xmp::sync::DivergenceStatus;
+use lightbox_preview::{CacheStats, PreviewDesc, PreviewService};
 use lightbox_types::{AssetId, ImageId};
 
 use crate::edit_hub::EditHub;
@@ -27,15 +28,25 @@ use crate::error::Result;
 
 /// A borrowed snapshot view of the catalog (spec §3.8), plus the E09 edit
 /// read surface (spec §3.4 — additive methods, hydrated via `lightbox-edit`
-/// from raw catalog DTOs; no SQL crosses up).
+/// from raw catalog DTOs; no SQL crosses up) and the E03 Phase D preview
+/// read surface (spec §5.6 `Query::CacheStats`/`PreviewState`).
 pub struct Queries {
     reader: ReaderHandle,
     edits: Arc<EditHub>,
+    previews: PreviewService,
 }
 
 impl Queries {
-    pub(crate) fn new(reader: ReaderHandle, edits: Arc<EditHub>) -> Queries {
-        Queries { reader, edits }
+    pub(crate) fn new(
+        reader: ReaderHandle,
+        edits: Arc<EditHub>,
+        previews: PreviewService,
+    ) -> Queries {
+        Queries {
+            reader,
+            edits,
+            previews,
+        }
     }
 
     /// One page of images by keyset cursor (never OFFSET — spec §3.2).
@@ -125,6 +136,23 @@ impl Queries {
     /// (spec §3.4; no session/store mutation).
     pub fn preset_preview_recipe(&self, image: ImageId, preset: PresetId) -> Result<Recipe> {
         self.edits.preset_preview(image, preset)
+    }
+
+    // ── E03 Phase D (spec §5.6) — additive preview read surface ─────────────
+
+    /// Per-tier preview-pyramid counts/bytes, fresh from the catalog (spec
+    /// §5.6 `Query::CacheStats`; narrowed — see
+    /// `lightbox_preview::service`'s module doc comment for what Phase E/F
+    /// still owns).
+    pub fn cache_stats(&self) -> Result<CacheStats> {
+        Ok(self.previews.stats()?)
+    }
+
+    /// The best currently-built preview for `image`, if any (spec §5.6
+    /// `Query::PreviewState`; sync, in-memory-only — see
+    /// [`lightbox_preview::PreviewService::best_available`]).
+    pub fn preview_state(&self, image: ImageId) -> Option<PreviewDesc> {
+        self.previews.best_available(image, 0)
     }
 }
 

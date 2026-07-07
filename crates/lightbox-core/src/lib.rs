@@ -29,6 +29,9 @@ mod error;
 mod event;
 pub mod observability;
 mod previews;
+// E03 Phase D (T14): the M0 `BuildRuntime` seam (spec §5.6) backing
+// `PreviewService`'s build scheduler on plain tokio.
+mod preview_runtime;
 mod queries;
 mod render_source;
 mod session;
@@ -54,6 +57,18 @@ pub use lightbox_edit::{
     PresetMeta, Recipe, RecipeRead, SnapshotMeta, StepLabel,
 };
 pub use lightbox_meta::xmp::sync::DivergenceStatus;
+
+// E03 Phase D (spec §5.2/§5.6) — the preview build-scheduler vocabulary
+// callers (the CLI, tests, the eventual E08 shell) need to drive
+// `Session::preview_service`/`Command::BuildPreviews`/`Queries::cache_stats`
+// without a separate `lightbox-preview` dependency of their own. `PreviewDesc`
+// (in `event.rs`'s `Event::PreviewReady`) and `PreviewError` travel the same
+// way. `Tier`/`BuildPriority` are the vocabulary `Command::BuildPreviews`
+// itself is typed over.
+pub use lightbox_preview::{
+    BuildPriority, CacheStats, EnqueueError, PreviewDesc, PreviewError, PreviewRequest,
+    PreviewService, PurgeReport, QuickVerifyReport, Tier,
+};
 
 // Reader DTOs (spec §3.8: "the reader types simply re-exported") and the
 // report/option types shared with the import pipeline. No SQL, no rusqlite

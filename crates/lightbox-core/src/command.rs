@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use lightbox_edit::{ParamSubset, PresetId};
+use lightbox_preview::{BuildPriority, Tier};
 use lightbox_types::{Flag, ImageId, ImportSessionId, SnapshotId};
 
 /// Correlates a submitted command with its outcome events. Allocated by
@@ -66,6 +67,24 @@ pub enum Command {
     /// mutation, dispatched as one WAL txn each (ordered, like `SetRating`)
     /// except `SyncSettings`, which spawns as a `Class::Background` job.
     Edit(EditCommand),
+    /// E03 Phase D (T14/T16, spec §5.6): enqueues preview builds for
+    /// `images` at `tier`/`priority` through [`crate::Session::preview_service`].
+    /// `priority == BuildPriority::Bulk` drives a tracked
+    /// [`lightbox_preview::PreviewService::bulk_build`] run (progress
+    /// arrives as `Event::PreviewBulkProgress`); any other priority issues
+    /// one `PreviewService::request` per image. Completion/failure of each
+    /// individual build arrives as `Event::PreviewReady`/`PreviewFailed` —
+    /// this command itself has no separate durable-txn ack (mirrors
+    /// `BackupNow`/`ImportAddInPlace`'s progress-event shape, not
+    /// `SetRating`'s single-ack shape).
+    BuildPreviews {
+        /// Targets.
+        images: Vec<ImageId>,
+        /// Which pyramid tier to build.
+        tier: Tier,
+        /// Scheduling priority (spec §3.4: Visible > Neighbor > Bulk).
+        priority: BuildPriority,
+    },
 }
 
 /// E09 edit-state mutations (spec §3.4). Every variant is durable: it lands

@@ -775,3 +775,310 @@ source → resize → codec → store/index (mirror `producer::ensure_t0`)," and
 without needing the more general `ProduceJob`/`Produced` machinery Phase
 D/E05 are expected to build when a second (rendered) producer actually
 exists to justify the abstraction.
+
+---
+
+## Phase D — service + scheduler (T13–T16)
+
+New modules: `crates/lightbox-preview/src/sched.rs` (T13: `Scheduler`,
+`BuildPriority`, `BuildKey`, `EnqueueError`, `PreviewEvent`, `BuildRuntime`,
+`BulkHandle`) and `crates/lightbox-preview/src/service.rs` (T14-T16:
+`PreviewService`, `PreviewRequest`, `CacheStats`, `QuickVerifyReport`,
+`PurgeReport`). `lightbox-core` additions:
+`crates/lightbox-core/src/preview_runtime.rs` (`TokioBuildRuntime`, the M0
+`BuildRuntime`), `Session::preview_service()`, `Command::BuildPreviews`,
+`Event::{PreviewReady,PreviewFailed,PreviewBulkProgress}`,
+`Queries::{cache_stats,preview_state}`. `lightbox-cli` addition:
+`crates/lightbox-cli/src/preview.rs` (`preview build/stat/verify/purge`).
+
+### D-1 — closes A-10: reuses `lightbox_jobs::CancelToken`, not `tokio-util::CancellationToken`
+
+**What.** A-10 (Phase A) left this as an explicit open question for Phase D.
+The spec's §3.4/§5.6 text names `tokio_util::sync::CancellationToken` as an
+M0-acceptable cancellation primitive and separately states "E03 never
+imports `lightbox-jobs` types" — but that boundary was already crossed by
+Phase B: `embedded.rs`'s `PreviewProvider`/`EmbeddedPreviewProvider` (the
+E01-seeded trait this crate freezes, unrelated to this phase) already takes
+`lightbox_jobs::Class` in its `request` signature and uses
+`lightbox_jobs::CancelToken` throughout. Given that precedent, `sched.rs`
+reuses `lightbox_jobs::CancelToken` rather than adding a second, parallel
+cancellation-token type via a new `tokio-util` dependency — `tokio-util` is
+MIT and would have been permitted (RULES section confirms this); this is a
+reuse/simplicity call, not a license one. Documented in `sched.rs`'s own
+module doc comment.
+
+### D-2 — cancellation granularity: "next step boundary" reads as "before dispatch," not mid-`ensure_t0`/`ensure_t1`
+
+**What.** Spec §3.4: "Cancellation is cooperative..., checked between
+coarse steps (read / extract / decode / resize / encode / write)." Phase
+C's `producer::ensure_t0`/`ensure_t1` (frozen, already tested) accept no
+cancellation token and checkpoint no sub-steps internally — threading one
+through them now would mean rewriting and re-testing already-shipped,
+tested Phase C code, explicitly out of this phase's scope per the task
+prompt's "leave clean seams" instruction applied by analogy (Phase C itself
+made the identical call about not touching Phase B's provider machinery —
+C-10).
+
+**Resolution.** The scheduler's one checkpoint is immediately before a
+queued build is handed to the `BuildRuntime` (`Scheduler::dispatch_one`,
+called from `try_dispatch`): a request cancelled while still queued (the
+`pending` map) is removed and never runs at all — 100% effective, not
+probabilistic. A build already dispatched runs to completion uninterrupted
+(nowhere left to check). This is the exact granularity T15's own AC needs
+("≥95% of off-screen queued builds cancelled **before start**") and is what
+`sched.rs`'s test suite (`cancelling_a_queued_build_prevents_it_from_ever_running`)
+and the T15 viewport-sweep test actually exercise. Finer-grained mid-build
+cancellation is future work if Phase C's producer functions ever grow
+internal checkpoints. Recorded in `sched.rs`'s own module doc comment.
+
+### D-3 — `BuildKey` narrows spec's `(image, tier, variant)` dedup key to `(image, tier)`
+
+**What.** Spec §3.4: "dedup by `(image, tier, variant)`." The spec's own
+`PreviewRequest` (§5.2) carries no `variant` field — callers ask for a tier,
+not a specific encoded variant. The variant a build actually produces is
+resolved server-side from `PreviewStoreConfig` (`standard_px`/`t1_codec`/
+`t1_quality`), fixed for the lifetime of one `PreviewService`, so for any
+given `(image, tier)` there is exactly one variant this service will ever
+build — `(image, tier)` is a faithful dedup key in practice. A future
+caller-supplied variant override (e.g. a UI-driven display-size change) would
+need to fold into this key; not exercised at M0 since no such caller exists
+yet (Q3: "no proactive rebuild" is the standing policy regardless).
+Documented in `BuildKey`'s own doc comment.
+
+### D-4 — `PreviewEvent::Failed` reuses `PreviewError`, not a separate `PreviewErrorKind`
+
+**What.** Spec §5.2 names `PreviewErrorKind` for `PreviewEvent::Failed`.
+`PreviewError` (lib.rs, `#[derive(Clone, Debug, thiserror::Error)]`) is
+already `Clone` — there is no technical reason `PreviewEvent` (itself
+`Clone`) cannot carry it directly, so `sched.rs` reuses it rather than
+introducing a second, informationally-identical enum. `PreviewEvent::
+BulkProgress` also drops the spec's illustrative session identifier (the
+spec text itself gives it none — `{done, total}` verbatim); multiple
+concurrent `bulk_build` runs are not distinguishable from the event stream
+alone in this M0 implementation — `BulkHandle::progress()` gives an
+authoritative per-session read regardless. Both documented in
+`sched.rs`/`PreviewEvent`'s own doc comment.
+
+### D-5 — `BuildRuntime::spawn_build` returns nothing; spec's `RuntimeTask` is omitted
+
+**What.** Spec §5.6: `fn spawn_build(&self, name: &'static str, fut:
+BoxFuture<'static, ()>) -> RuntimeTask;`. Nothing in this M0 implementation
+needs to join/observe/cancel an individual runtime task externally — the
+scheduler's own completion callback (baked into the future itself via
+`Scheduler::on_build_finished`) is the sole consumer of a build's outcome,
+and cancellation is already handled through the scheduler's own
+`CancelToken` bookkeeping (D-1/D-2), not through a `RuntimeTask` handle.
+Adding an unused return type now would be dead API surface. A future phase
+that needs to inspect/join individual tasks (e.g. E06's activity center)
+can add this without breaking `BuildRuntime`'s call sites (the return type
+is the only thing that would change). `BuildFuture` also uses a plain
+`Pin<Box<dyn Future<Output = ()> + Send>>` instead of naming a `futures`-crate
+`BoxFuture` alias — no new dependency needed (`Pin`/`Box`/`Future` are all
+`std`).
+
+### D-6 — the M0 `BuildRuntime` runs on `tokio::task::spawn_blocking`, not a `lightbox_jobs::Class` budget
+
+**What.** Spec §5.6: "M0: `lightbox-core` backs this with plain tokio...
+M1: `lightbox-jobs` `Class::Background` adapter (pausable, activity-center
+visible)." `Session` already owns a `lightbox_jobs::JobSystem` and could
+have routed preview builds through `JobSystem::spawn_blocking(Class::
+Background, ..)` today, pulling M1's adapter forward — deliberately NOT
+done: `TokioBuildRuntime` (`preview_runtime.rs`) reaches straight for
+`tokio::task::spawn_blocking` on the SAME runtime handle
+(`JobSystem::handle()`, already used for other long-lived system tasks in
+`session.rs`) with no `Class` semaphore budget involved, keeping the M0/M1
+boundary the spec draws honest rather than silently already-done.
+Concurrency is instead capped by the scheduler's own `available_slots`
+counter (`BuildRuntime::concurrency()` supplies the bound); `spawn_blocking`
+itself is used (not a bare `handle.spawn`) because `producer::ensure_t0`/
+`ensure_t1` do real, synchronous file/CPU work with no internal `.await`
+points, and running that directly on the async runtime's worker threads
+would starve the command dispatcher/event bus the moment more than a couple
+builds overlap. Documented in `preview_runtime.rs`'s own module doc
+comment.
+
+### D-7 — real bug found and fixed during Phase D's own development: the scheduler's `BuildFn` originally built a private, disconnected `PreviewIndex`
+
+**What.** An early draft of `make_build_fn` (`service.rs`) constructed its
+OWN `PreviewIndex::load(..)` internally, separate from `ServiceInner.index`
+— every build the scheduler drove updated that PRIVATE index, never the one
+`PreviewService::best_available`/callers actually read. Caught by this
+phase's own integration test (`t14_build_via_request_lands_a_ready_event_
+and_matching_stats`), which failed with `best_available` returning `None`
+right after a `Ready` event for the very same image. **Fixed:** `ServiceInner.
+index` is now an `Arc<Mutex<PreviewIndex>>` shared directly with
+`make_build_fn`'s closure — one index, updated by every build this
+service ever drives, immediately visible to `best_available`/`stats`.
+Recorded here per the honest-reporting mandate (a real, found-and-fixed
+defect, not a hypothetical).
+
+**Separately, a real, still-standing, DIFFERENT duplication:**
+`lightbox-core::Session::open` also constructs `EmbeddedPreviewProvider`
+(Phase B), which hydrates its OWN independent `PreviewIndex` for the
+grid/loupe decode path (`previews()`). That mirror and `PreviewService`'s
+(now-unified, per the fix above) mirror are still two separate RAM indices
+across the two TYPES — both correct on their own (each is a disposable
+cache kept current with the same catalog `preview` table), but a build
+driven through one does not immediately warm the other's fast path (falls
+back to its on-disk-existence check — still correct, just not maximally
+cheap). Unifying the two types would mean changing
+`EmbeddedPreviewProvider::new`'s constructor again (B-8) and is left as a
+documented follow-up, out of this phase's T13-T16 scope. Documented in
+`service.rs`'s module doc comment.
+
+### D-8 — `verify_quick`/`purge_all` are narrower, honestly-scoped cousins of the spec's Phase-F `verify_store`/`purge`
+
+**What.** The task prompt's DELIVER list names `lightbox-cli preview
+build/stat/verify/purge`, while the RULES section explicitly carves
+Phase F's eviction/relocate/purge/`verify_store(Quick|Full)` out of this
+phase's scope (T21 owns manifest cross-checks, checksum spot-checks, orphan
+detection, refcounted cap-based eviction, and auto re-enqueue-on-repair).
+Rather than fake the fuller behavior or drop the CLI subcommands entirely,
+Phase D ships two narrower, genuinely useful, honestly-named primitives
+that need none of Phase F's machinery: `PreviewService::verify_quick`
+(missing-file detection only — iterates every indexed row, checks the file
+exists, reports counts; never deletes, never re-enqueues, no checksum/orphan
+work) and `PreviewService::purge_all` (deletes every preview row + wipes and
+recreates the entire `previews/` directory — a blunt whole-store reset, not
+Phase F's refcounted, cap-based, tier-ordered `PurgeScope` eviction).
+`lightbox-cli preview verify` exits 1 (not `EXIT_CORRUPT`/3 — the preview
+store is disposable by contract, spec §3.2) when any file is missing;
+`preview purge` requires an explicit `--yes` flag (destructive, no default).
+Documented in both methods' own doc comments and `service.rs`'s module doc
+comment.
+
+### D-9 — `PreviewService::set_viewport` targets `Tier::T1` uniformly; no tier parameter
+
+**What.** Spec §5.2's `set_viewport(&self, visible: Vec<ImageId>, neighbors:
+Vec<ImageId>)` signature has no tier argument, unlike
+`EmbeddedPreviewProvider::set_viewport`'s narrower Phase-B `PreviewClass`
+distinction (B-7: `Thumb{max_px}` vs `Loupe`). This M0 implementation
+targets `Tier::T1` (the standard display-sized preview) for both visible and
+neighbor requests; a caller wanting grid-thumbnail-sized `T0` builds instead
+calls `PreviewService::request` directly per image. Documented in
+`set_viewport`'s own doc comment.
+
+### D-10 — `Command::BuildPreviews`'s `priority` field: `Bulk` drives `bulk_build` (tracked progress), any other priority issues individual `request` calls
+
+**What.** The spec's abstract `Query`/`Command` enums (architecture-doc
+pattern) don't literally exist for the read side in this codebase — `Queries`
+is a struct with typed methods (already how E09 added `edit_state` etc.), so
+"Query additions (`CacheStats`, `PreviewState`)" landed as
+`Queries::cache_stats()`/`Queries::preview_state()` methods, not enum
+variants; `Command` DOES exist as a real enum here, so `BuildPreviews`
+landed as a genuine variant. Its `priority: BuildPriority` field is
+interpreted as: `Bulk` → `PreviewService::bulk_build` (real
+`BulkProgress`-tracked run, spec T16's actual shape); any other priority →
+one `PreviewService::request` per image (no progress tracking — matches
+what `Visible`/`Neighbor` mean elsewhere, an interactive/prefetch nudge, not
+a tracked batch). This command has no separate durable-txn ack event
+(mirrors `BackupNow`/`ImportAddInPlace`'s progress-event shape, not
+`SetRating`'s single-ack shape) — completion is observed via
+`Event::PreviewReady`/`PreviewFailed`/`PreviewBulkProgress` as builds land.
+Documented in `command.rs`'s own doc comment on the variant.
+
+### D-11 — `PreviewRequest::allow_embedded` is accepted but not yet enforced
+
+**What.** Spec §5.2: "permit embedded-source T1 (M0: true)." At M0 the ONLY
+registered producer is embedded (Phase B/C) — there is no non-embedded
+producer to prefer or refuse yet, and threading the flag into `BuildKey`
+(D-3's narrowed dedup key) would need a real second producer to make
+meaningful. The field is kept on `PreviewRequest` (so wiring it up when
+E05's `EngineProducer` lands at M1 is additive, not a signature break) but
+currently has no effect on scheduling. Documented in the field's own doc
+comment.
+
+### D-12 — honest performance/scale reporting for the T13/T15/T16 acceptance criteria
+
+**What.** Per the task's honest-reporting mandate, the actual scale each AC
+was exercised at, and why:
+
+- **T13 "Bulk `try_enqueue` over bound returns `QueueFull`" / "Visible
+  overtakes queued Bulk 100% of trials":** exercised exactly as stated —
+  100 trials, real assertions, deterministic (`sched::tests::
+  visible_overtakes_queued_bulk_every_trial`, a `ManualRuntime` test helper
+  that steps futures on demand instead of relying on timing).
+- **T16 "1k-image bulk run — queue never exceeds bound, progress monotonic
+  to completion":** exercised at the literal 1000-image scale
+  (`sched::tests::bulk_build_1k_images_bounds_the_queue_and_progresses_
+  monotonically`), but against a **synthetic** `build_fn` (an atomic
+  counter, no real file/catalog IO) run on real OS threads (`ThreadRuntime`,
+  concurrency 8) — this is what makes 1000 iterations fast/deterministic in
+  a PR-blocking suite. `service.rs`'s own integration test
+  (`t16_bulk_build_across_50_images_completes_and_matches_stats`) proves
+  the SAME bulk-build path against the real store/catalog/`producer::
+  ensure_t0` pipeline, but only at N=50 (not 1000) — real T0 extraction of
+  the same 8 MP fixture 50 times, plus catalog writer contention, was judged
+  a reasonable PR-blocking bound; T23 (Phase F)'s nightly scenario harness
+  is the spec's named home for full-scale (1k-5k), real-IO timing numbers
+  (§8: "Perf... Nightly; regression files issue"). Numbers observed
+  locally: the 50-image real-store run completes in well under a second on
+  this reference machine (T0 dedupes to one real extraction; the other 49
+  are RAM-index/on-disk-existence fast-path hits, per spec §3.1's dedupe
+  design — exactly what makes N=50 a fast, still-real proof of the
+  scheduler-through-producer path, not a toy).
+- **T15 "viewport sweep over 5k images — ≥95% of off-screen queued builds
+  cancelled before start":** the *viewport-diffing algorithm itself*
+  (`plan_viewport`, a pure function with no scheduler/IO dependency) is
+  exercised at the literal 5000-image scale
+  (`service::tests::viewport_sweep_over_5k_images_sheds_at_least_95_percent_
+  off_screen`), completing in microseconds and asserting a measured shed
+  rate ≥ 0.95. The scheduler's actual cancel-before-dispatch behavior driven
+  BY that plan (real tickets, real cancellation, real priority queues) is
+  proven separately at a much smaller, real-IO scale
+  (`service::tests::t15_set_viewport_cancels_off_screen_and_visible_
+  precedes_neighbor_completion`, ~11 images) using `concurrency = 1` to make
+  "visible strictly precedes neighbor" a deterministic assertion rather than
+  a timing race (an earlier version of this test used `concurrency = 2` with
+  5+5 images and floating-point timing assumptions — it was flaky/wrong by
+  construction and was rewritten, not tuned, once the failure was
+  understood; see D-13 for the specific defect that surfaced first). Full
+  5k-image real-IO wall-clock execution through the actual store/catalog/
+  producer pipeline was not run — same T23/nightly-harness reasoning as
+  T16 above.
+- **T13 "bounded concurrency":** `sched::tests::
+  concurrency_never_exceeds_the_configured_bound` proves the bound holds
+  under real OS-thread concurrency (40 synthetic builds, bound 4, a
+  max-concurrent-observed atomic counter) — not scale-limited, this one is
+  exercised at full realism.
+
+### D-13 — two test-design defects found and fixed while building T15's test coverage (recorded per the honest-reporting mandate, not hidden)
+
+**What.**
+1. A "visible-before-neighbor" test originally polled `best_available(image,
+   0)` (`min_long_edge = 0`, ANY tier) to mean "this image's own T1 build
+   landed." Since all test images in that harness are virtual copies of ONE
+   asset, T0 is asset-scope (spec §3.1) and gets built once, early, as a
+   side effect of the FIRST T1 build (`ensure_t1`'s raw-source path calls
+   `ensure_t0` first) — so `best_available` trivially returned `Some` (the
+   shared T0) for every image the instant that happened, regardless of
+   whether that specific image's T1 build had run. Fixed by checking
+   `desc.tier == Tier::T1` specifically, not "any preview at all."
+2. The same test's first draft asserted a `<` (strict minority) relationship
+   between visible/neighbor readiness under `concurrency = 2`, which is a
+   real timing race (two builds of near-identical duration finishing within
+   the same polling window can tie or invert under normal thread-scheduling
+   jitter) rather than a structural guarantee. Rewritten to use
+   `concurrency = 1` (D-12 above), which makes the ordering a consequence of
+   the scheduler's own dequeue logic (Visible always checked before
+   Neighbor, spec §3.4) rather than of timing.
+3. `harness()`'s original fixture-catalog helper inserted N separate assets
+   sharing one `content_hash` — `CatalogTxn::insert_assets` de-dupes by
+   content hash globally (`dao_tests::insert_assets_skips_duplicate_hashes_
+   globally_and_within_batch`, pre-existing E01 behavior), so only the
+   FIRST asset insert actually landed a row; the rest silently produced zero
+   inserted rows, and indexing `inserted[0]` panicked. Fixed by inserting
+   ONE asset and fanning it out over N `image` rows via
+   `insert_default_images(&vec![asset; n])` (synthetic virtual copies at the
+   DAO level — the same pattern `producer.rs`'s own Phase-C test,
+   `virtual_copies_of_one_asset_share_one_t0_row_and_file`, already uses).
+
+### D-14 — Phase E/F seams confirmed untouched
+
+**What.** Named for the record: `RawCache` (`get`/`put`/container format),
+`BlobStore`-adjacent raw-cache/T2 key derivation, eviction/retention,
+relocation, the full `PurgeScope`/`VerifyMode::Full`, and `thumbcache.sqlite`
+are not implemented by this phase. No stub types were added for them either
+— nothing in T13-T16 needed to reference them, and `Store::open`'s reserved
+directories (Phase A) already create the `rawcache/`/`masks/`/`smartpreview/`
+top-level dirs Phase E/F will fill.

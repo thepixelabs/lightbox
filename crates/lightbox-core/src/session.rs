@@ -35,7 +35,8 @@ use lightbox_edit::EditStore;
 use lightbox_ingest::{import_add_in_place, ImportEvent, ImportOptions};
 use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
 use lightbox_preview::{
-    AssetLocator, EmbeddedPreviewProvider, PreviewProvider, PreviewStoreConfig, Store,
+    AssetLocator, EmbeddedPreviewProvider, PreviewEvent as PvEvent, PreviewProvider,
+    PreviewService, PreviewStoreConfig, Store,
 };
 use lightbox_render::ng::nodes::decoded::{SrcDecodedFactory, SrcDecodedNode};
 use lightbox_render::ng::nodes::display::{XformDisplayFactory, XformDisplayNode};
@@ -53,6 +54,7 @@ use crate::config::CoreConfig;
 use crate::edit_hub::EditHub;
 use crate::error::Result;
 use crate::event::{ChangeSet, Event};
+use crate::preview_runtime::TokioBuildRuntime;
 use crate::previews::CatalogAssetLocator;
 use crate::queries::Queries;
 use crate::render_source::{NullDeviceProvider, PreviewSourceProvider, SharedDeviceProvider};
@@ -156,6 +158,9 @@ struct SessionInner {
     engine: Arc<Engine>,
     scheduler: Arc<RenderScheduler>,
     previews: Arc<dyn PreviewProvider>,
+    /// E03 Phase D (T14): the build-scheduler facade, additive alongside
+    /// `previews` above.
+    preview_service: PreviewService,
     edit_hub: Arc<EditHub>,
     events: broadcast::Sender<Event>,
     cmd_tx: mpsc::UnboundedSender<Queued>,
@@ -264,6 +269,49 @@ impl Session {
 
         let (events, _) = broadcast::channel::<Event>(core.cfg.event_capacity.max(16));
 
+        // E03 Phase D (T14): the `PreviewService` facade — tickets, the T13
+        // scheduler, `set_viewport` (T15), bulk build (T16). Additive
+        // alongside `EmbeddedPreviewProvider` above (see
+        // `lightbox_preview::service`'s module doc comment on the two
+        // independent index mirrors this implies); registered under its own
+        // `Session::preview_service()` accessor, not through
+        // `PreviewProvider`. The M0 `BuildRuntime` (spec §5.6) runs builds
+        // on the SAME tokio runtime `core.jobs` already owns, via
+        // `spawn_blocking` — no second runtime, no `Class` budget yet (see
+        // `preview_runtime.rs`'s doc comment for why "plain tokio" is read
+        // literally here).
+        let preview_cfg = PreviewStoreConfig::with_defaults(lbdata.clone());
+        let preview_workers = preview_cfg.workers.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(4)
+                .min(8)
+        });
+        let preview_runtime = TokioBuildRuntime::new(core.jobs.handle().clone(), preview_workers);
+        let preview_bus = events.clone();
+        let preview_events_sink: lightbox_preview::EventSink = Arc::new(move |ev: PvEvent| {
+            let translated = match ev {
+                PvEvent::Ready { image, tier, desc } => Event::PreviewReady { image, tier, desc },
+                PvEvent::Failed { image, tier, error } => {
+                    Event::PreviewFailed { image, tier, error }
+                }
+                PvEvent::BulkProgress { done, total } => Event::PreviewBulkProgress { done, total },
+                // `PreviewEvent` is `#[non_exhaustive]`; a future variant
+                // (Phase E/F: `Evicted`/`CachePressure`) gets a core
+                // translation when it gets core meaning, same convention as
+                // `ImportEvent`/`EngineEvent` elsewhere in this function.
+                _ => return,
+            };
+            let _ = preview_bus.send(translated);
+        });
+        let preview_service = PreviewService::open(
+            preview_cfg,
+            Arc::clone(&catalog),
+            preview_runtime,
+            preview_events_sink,
+        )
+        .map_err(crate::error::CoreError::Preview)?;
+
         // E09 T8: the edit-state session registry (wraps `EditStore`, itself
         // just an `Arc<Catalog>` handle — cheap). The preset store underneath
         // is opened lazily on first use (see `CoreConfig::preset_dir`), so a
@@ -319,6 +367,7 @@ impl Session {
             in_flight: Arc::clone(&in_flight),
             backup_retain: core.cfg.backup_retain,
             edit_hub: Arc::clone(&edit_hub),
+            preview_service: preview_service.clone(),
         };
         // Long-lived system task, not a class-budgeted job. It ends when the
         // last `Session` clone drops (the sole sender side of `cmd_rx`).
@@ -337,6 +386,7 @@ impl Session {
                 engine,
                 scheduler,
                 previews,
+                preview_service,
                 edit_hub,
                 events,
                 cmd_tx,
@@ -369,6 +419,7 @@ impl Session {
         Queries::new(
             self.inner.catalog.reader(),
             Arc::clone(&self.inner.edit_hub),
+            self.inner.preview_service.clone(),
         )
     }
 
@@ -394,6 +445,16 @@ impl Session {
     /// scroll-out, spec §5.3).
     pub fn previews(&self) -> Arc<dyn PreviewProvider> {
         Arc::clone(&self.inner.previews)
+    }
+
+    /// The E03 Phase D preview build-scheduler facade (spec §5.2): tickets,
+    /// `best_available`, `request`/`set_viewport` (T15), `bulk_build` (T16),
+    /// `stats`/`verify_quick`/`purge_all`. Clone-cheap (`Arc` inner).
+    /// Additive alongside [`Self::previews`] — see `lightbox_preview::
+    /// service`'s module doc comment on why these are two independent
+    /// facades at M0, not one.
+    pub fn preview_service(&self) -> PreviewService {
+        self.inner.preview_service.clone()
     }
 
     /// The render engine (spec §3.4 seam). **E05 Phase F5:** this is now
@@ -497,6 +558,7 @@ struct DispatchCtx {
     in_flight: Arc<InFlight>,
     backup_retain: u32,
     edit_hub: Arc<EditHub>,
+    preview_service: PreviewService,
 }
 
 async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>) {
@@ -553,9 +615,51 @@ async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>
                 subset,
             }) => spawn_edit_sync(&ctx, ticket, source, targets, subset),
             Command::Edit(cmd) => run_edit_command(&ctx, ticket, cmd).await,
+            Command::BuildPreviews {
+                images,
+                tier,
+                priority,
+            } => dispatch_build_previews(&ctx, images, tier, priority),
         }
     }
     tracing::debug!(target: "lightbox_core", "command dispatcher stopped");
+}
+
+/// `Command::BuildPreviews` (spec §5.6, T14/T16): a fast, non-blocking call
+/// — `PreviewService::request`/`bulk_build` only lock + enqueue (the actual
+/// builds run later on the `BuildRuntime`), so unlike `spawn_backup`/
+/// `spawn_import` this needs no `spawn_blocking`/job handle. Completion
+/// arrives as `Event::PreviewReady`/`PreviewFailed`/`PreviewBulkProgress`
+/// (already wired through `Session::open`'s event sink) — this command has
+/// no separate durable-txn ack (see `Command::BuildPreviews`'s own doc
+/// comment).
+fn dispatch_build_previews(
+    ctx: &DispatchCtx,
+    images: Vec<lightbox_types::ImageId>,
+    tier: lightbox_preview::Tier,
+    priority: lightbox_preview::BuildPriority,
+) {
+    if images.is_empty() {
+        return;
+    }
+    if priority == lightbox_preview::BuildPriority::Bulk {
+        let _handle = ctx.preview_service.bulk_build(images, tier);
+        // The handle is intentionally dropped: nothing in this M0 command
+        // surface needs to cancel a specific bulk run by ticket/handle after
+        // submission (E08's activity center, E06, would be the eventual
+        // owner of a cancel-by-handle UI affordance).
+    } else {
+        for image in images {
+            let _ = ctx
+                .preview_service
+                .request(lightbox_preview::PreviewRequest {
+                    image,
+                    tier,
+                    priority,
+                    allow_embedded: true,
+                });
+        }
+    }
 }
 
 /// One durable [`EditCommand`] = `EditHub::dispatch`, executed on the
