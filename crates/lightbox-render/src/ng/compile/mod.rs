@@ -14,20 +14,24 @@
 //! parameters yet (E09 fills it), topology is a pure function of `(template, pv)`
 //! — dragging a slider never restructures the graph (spec §3.4).
 
+pub mod manifest;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use lightbox_edit::Recipe;
-use lightbox_types::ImageId;
+use lightbox_types::{ImageId, PV_M0};
 
 use crate::ng::colorimetry::{SourceColorimetry, SourceKind};
 use crate::ng::error::CompileError;
 use crate::ng::graph::RenderGraph;
-use crate::ng::node::{KernelSalt, NodeRegistry, ParamBlock};
-use crate::ng::nodes::{
-    decoded::SrcDecodedNode, display::XformDisplayNode, resize::UtilResizeNode,
-};
+use crate::ng::node::{KernelSalt, NodeRegistry, ParamBlock, PvRange};
+use crate::ng::nodes::decoded::{SrcDecodedFactory, SrcDecodedNode};
+use crate::ng::nodes::display::{XformDisplayFactory, XformDisplayNode};
+use crate::ng::nodes::resize::{UtilResizeFactory, UtilResizeNode};
 use crate::ng::types::{Extent, NodeId, ProcessVersion};
+
+pub use manifest::{PvManifest, StageDigest};
 
 /// What the compiler needs to know about the source, independent of decode
 /// (the E02 seam; spec §3.4).
@@ -80,11 +84,37 @@ impl GraphTemplate {
         ])
     }
 
+    /// A **test-only, divergent-topology** template for the reserved test PV
+    /// [`PV_TEST_999`] (task **D2**). It drops the `util.resize` stage from the
+    /// PV1 chain, yielding `src.decoded → xform.display` — a *structurally
+    /// different* graph (2 nodes / 1 edge vs PV1's 3 nodes / 2 edges) that
+    /// resolves against the same registry. It exercises per-PV template
+    /// selection, the pv-keyed content cache (no cross-PV pollution — the key
+    /// folds in `pv`, spec §3.5), and the compile-under-two-PVs / migrate-preview
+    /// primitive (task D5). PV999 never ships — [`Engine::new`] registers only
+    /// PV1; PV999 is added via [`crate::ng::Engine::with_compiler`] in tests /
+    /// the golden matrix.
+    ///
+    /// [`Engine::new`]: crate::ng::Engine::new
+    pub fn pv_test_999() -> GraphTemplate {
+        GraphTemplate::linear(vec![
+            SrcDecodedNode::ID,
+            // util.resize deliberately absent — the divergence from PV1.
+            XformDisplayNode::ID,
+        ])
+    }
+
     /// The ordered stage ids.
     pub fn stages(&self) -> &[NodeId] {
         &self.stages
     }
 }
+
+/// The reserved **test-only** process version whose template
+/// ([`GraphTemplate::pv_test_999`]) diverges in topology from PV1 (task D2). It
+/// is never registered by [`crate::ng::Engine::new`]; only tests and the per-PV
+/// golden matrix register it.
+pub const PV_TEST_999: ProcessVersion = ProcessVersion(999);
 
 /// Holds per-`ProcessVersion` [`GraphTemplate`]s + the [`NodeRegistry`] used to
 /// resolve stages, and compiles recipes against them (spec §3.4).
@@ -127,6 +157,18 @@ impl RecipeCompiler {
         let mut pvs: Vec<u16> = self.templates.keys().copied().collect();
         pvs.sort_unstable();
         pvs.into_iter().map(ProcessVersion).collect()
+    }
+
+    /// The registered [`GraphTemplate`] for `pv`, if any (used by the PV
+    /// [`manifest`] builder and per-PV selection tests, task D1/D2).
+    pub fn template(&self, pv: ProcessVersion) -> Option<&GraphTemplate> {
+        self.templates.get(&pv.0)
+    }
+
+    /// The [`NodeRegistry`] this compiler resolves stages against (used by the
+    /// PV [`manifest`] builder to read per-stage kernel salts, task D1).
+    pub fn registry(&self) -> &NodeRegistry {
+        &self.registry
     }
 
     /// Compiles a read-only [`Recipe`] into an executable DAG under `pv`.
@@ -183,6 +225,48 @@ impl RecipeCompiler {
         }
         Ok(graph)
     }
+}
+
+/// Register the three engine-owned scaffold nodes (`src.decoded`, `util.resize`,
+/// `xform.display`) into a fresh [`NodeRegistry`] over the open PV range from
+/// [`PV_M0`] (task D1). This is the shipping node set every PV1 render resolves
+/// against; it is the registry the PV [`manifest`] freezes.
+///
+/// Registration cannot fail here — the ids are distinct and the ranges do not
+/// overlap — so a failure is a programming error and panics.
+pub fn shipping_registry() -> NodeRegistry {
+    let mut reg = NodeRegistry::new();
+    reg.register(
+        SrcDecodedNode::ID,
+        PvRange::from_open(PV_M0),
+        Arc::new(SrcDecodedFactory::default()),
+    )
+    .expect("src.decoded registers");
+    reg.register(
+        UtilResizeNode::ID,
+        PvRange::from_open(PV_M0),
+        Arc::new(UtilResizeFactory::default()),
+    )
+    .expect("util.resize registers");
+    reg.register(
+        XformDisplayNode::ID,
+        PvRange::from_open(PV_M0),
+        Arc::new(XformDisplayFactory::default()),
+    )
+    .expect("xform.display registers");
+    reg
+}
+
+/// A compiler wired with the shipping [`shipping_registry`] and the PV1 template
+/// ([`GraphTemplate::pv1`]) — the shipping configuration [`crate::ng::Engine::new`]
+/// assembles, exposed so the PV [`manifest`] gate and per-PV tests build the same
+/// thing (task D1).
+pub fn shipping_compiler() -> RecipeCompiler {
+    let mut compiler = RecipeCompiler::with_registry(Arc::new(shipping_registry()));
+    compiler
+        .register_template(PV_M0, GraphTemplate::pv1())
+        .expect("PV1 template registers on a fresh compiler");
+    compiler
 }
 
 #[cfg(test)]
@@ -317,5 +401,74 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CompileError::TemplateAlreadyRegistered(_)));
         assert_eq!(compiler.supported_pvs(), vec![PV_M0]);
+    }
+
+    /// The shipping helpers build the same PV1 topology the manual registry does
+    /// (task D1) — the config the manifest gate and `Engine::new` share.
+    #[test]
+    fn shipping_compiler_matches_the_manual_pv1_config() {
+        let compiler = shipping_compiler();
+        assert_eq!(compiler.supported_pvs(), vec![PV_M0]);
+        let graph = compiler
+            .compile(&Recipe::identity(PV_M0), PV_M0, &source_desc())
+            .unwrap();
+        let reg = registry_with_engine_nodes();
+        assert!(graph.structurally_eq(&expected_pv1_graph(&reg)));
+    }
+
+    /// **D2: per-PV template selection — PV1 and PV999 compile to *divergent*
+    /// topologies from one compiler.** The same recipe resolves to a 3-node /
+    /// 2-edge chain under PV1 and a 2-node / 1-edge chain under PV999 (the
+    /// `util.resize` stage dropped), proving topology is a function of `(template,
+    /// pv)` and that adding a PV is data, not an engine change.
+    #[test]
+    fn per_pv_template_selection_diverges_topology() {
+        let mut compiler = RecipeCompiler::with_registry(registry_with_engine_nodes());
+        compiler
+            .register_template(PV_M0, GraphTemplate::pv1())
+            .unwrap();
+        compiler
+            .register_template(PV_TEST_999, GraphTemplate::pv_test_999())
+            .unwrap();
+        assert_eq!(compiler.supported_pvs(), vec![PV_M0, PV_TEST_999]);
+
+        // The SAME recipe (identity, schema-only at M1) under two PVs.
+        let recipe = Recipe::identity(PV_M0);
+        let g1 = compiler.compile(&recipe, PV_M0, &source_desc()).unwrap();
+        let g999 = compiler.compile(&recipe, PV_TEST_999, &source_desc()).unwrap();
+
+        assert_eq!((g1.node_count(), g1.edge_count()), (3, 2));
+        assert_eq!((g999.node_count(), g999.edge_count()), (2, 1));
+        assert!(
+            !g1.structurally_eq(&g999),
+            "PV1 and PV999 must be structurally divergent"
+        );
+        // PV999 drops util.resize: src.decoded → xform.display.
+        assert!(g999.node_index(UtilResizeNode::ID).is_none());
+        assert!(g999.node_index(SrcDecodedNode::ID).is_some());
+        assert!(g999.node_index(XformDisplayNode::ID).is_some());
+    }
+
+    /// One recipe compiles under two PVs in one session, each stable across
+    /// repeated calls (the compile-under-different-pv primitive, task D5, at the
+    /// compiler layer; the engine-level cache-independence proof is in
+    /// `tests/ng_pv.rs`).
+    #[test]
+    fn one_recipe_compiles_under_two_pvs_repeatably() {
+        let mut compiler = RecipeCompiler::with_registry(registry_with_engine_nodes());
+        compiler
+            .register_template(PV_M0, GraphTemplate::pv1())
+            .unwrap();
+        compiler
+            .register_template(PV_TEST_999, GraphTemplate::pv_test_999())
+            .unwrap();
+        let recipe = Recipe::identity(PV_M0);
+        let a1 = compiler.compile(&recipe, PV_M0, &source_desc()).unwrap();
+        let b1 = compiler.compile(&recipe, PV_M0, &source_desc()).unwrap();
+        let a999 = compiler.compile(&recipe, PV_TEST_999, &source_desc()).unwrap();
+        let b999 = compiler.compile(&recipe, PV_TEST_999, &source_desc()).unwrap();
+        assert!(a1.structurally_eq(&b1));
+        assert!(a999.structurally_eq(&b999));
+        assert!(!a1.structurally_eq(&a999));
     }
 }

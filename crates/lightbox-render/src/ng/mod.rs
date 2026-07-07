@@ -76,7 +76,10 @@ pub use types::{
 };
 
 pub use cache::{Bytes, CacheKey, CacheKeyInputs, CacheStats, CachedTile, NodeCache, PinLabel};
-pub use compile::{GraphTemplate, RecipeCompiler, SourceDesc};
+pub use compile::manifest::{PvManifest, StageDigest};
+pub use compile::{
+    shipping_compiler, shipping_registry, GraphTemplate, RecipeCompiler, SourceDesc, PV_TEST_999,
+};
 pub use engine::{
     ActiveBackend, BackendId, Engine, EngineEvent, OutFormat, OutputPayload, OutputQuality,
     RenderOutput, RenderPriority, RenderRequest, RenderState, RenderTarget, RenderTicket,

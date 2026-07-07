@@ -263,10 +263,25 @@ impl NodeFactory for XformDisplayFactory {
     }
 
     fn kernel_salt(&self) -> KernelSalt {
-        // Salt spans both the kernel and the baked color data revision.
+        // Salt spans the WGSL kernel and the *baked color data* — the shaper +
+        // 65³ LUT float layouts `lightbox-color` produces for the built-in sRGB
+        // transform. These are the exact bytes both backends sample, so the salt
+        // moves iff the color algorithm/profile moves (the D4 remit).
+        //
+        // We deliberately do NOT fold in `dt.key`: that is an xxh3 of the
+        // *serialized ICC profile*, whose header carries a creation timestamp, so
+        // it is non-deterministic across processes — which would violate spec
+        // §3.5 ("equal ingredients ⇒ equal key across processes and builds"),
+        // shred the content cache across runs, and make the PV-manifest
+        // immutability gate (task D1/D4) unpinnable. See E05-deviations.md
+        // (Phase D, D-D-fix-1).
+        let b = baked();
         let mut h = blake3::Hasher::new();
         h.update(DISPLAY_WGSL.as_bytes());
-        h.update(&baked().dt.key.to_le_bytes());
+        h.update(&b.shaper_n.to_le_bytes());
+        h.update(&b.lut_n.to_le_bytes());
+        h.update(&b.shaper_bytes);
+        h.update(&b.lut_bytes);
         KernelSalt(h.finalize())
     }
 }
