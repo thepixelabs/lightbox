@@ -1082,3 +1082,192 @@ are not implemented by this phase. No stub types were added for them either
 — nothing in T13-T16 needed to reference them, and `Store::open`'s reserved
 directories (Phase A) already create the `rawcache/`/`masks/`/`smartpreview/`
 top-level dirs Phase E/F will fill.
+
+## Phase E — raw cache (T17–T18)
+
+### E-1 — `RawCache` lands as a new `lightbox-preview::rawcache` module, not inside `store.rs`
+
+**What.** The spec's §2 module map already names `rawcache` as its own
+module (distinct from `store`); this phase follows that, adding
+`src/rawcache.rs` (container format + `RawCache`) plus an isolated
+`src/rawcache/mmap_io.rs` submodule (below, E-6). Not a deviation from the
+spec — flagged only because Phase A's `store.rs` already carries the
+`atomic_write` helper this module reuses (`crate::store::atomic_write`,
+`pub(crate)`), so the two modules are coupled the same way `producer.rs`
+already couples to `store.rs`.
+
+### E-2 — `params_hash` is big-endian in both the filename and the catalog column, unlike A-7's little-endian `variant_hash`
+
+**What.** A-7 (Phase A) records that `preview.variant_hash` is stored
+little-endian because it is "pure internal cache-key material, never
+hex-displayed." `raw_cache_entry.params_hash` is the opposite case: spec
+§3.3's filename literally embeds it as `<params_hash_hex16>`, so this phase
+stores it **big-endian** in the catalog row too (`RawCacheKey::
+params_hash_be`) — the DB column and the on-disk filename always agree
+byte-for-byte when hex-printed, which is exactly the property A-7's own
+little-endian choice was optimizing away for the *different* case where no
+hex display exists. Both choices follow the same underlying rule ("match
+whatever convention the value's actual use requires"); recorded so a future
+reader doesn't "fix" one to match the other.
+
+### E-3 — no second checksum column; corruption detection is zstd's own frame checksum, exclusively
+
+**What.** Spec §4's `raw_cache_entry` DDL (shipped in Phase A) carries no
+`checksum` column — unlike `preview`, which has one. This phase leans on
+that DDL choice rather than adding an out-of-band hash: every container is
+written with `zstd::zstd_safe::CParameter::ChecksumFlag(true)` (spec §3.3
+"built-in xxh64 content checksum enabled"), and `RawCache::get`'s
+`zstd::bulk::Decompressor::decompress` call verifies it as part of
+decompression (zstd's `forceIgnoreChecksum` defaults to `false`). A
+single-byte flip anywhere in the compressed stream — including the trailing
+checksum bytes themselves — surfaces as a decompress error, mapped to a
+typed miss (spec §5.4). Both the "flip the last byte" and "flip a mid-stream
+byte" cases are covered by dedicated tests (`t17_single_byte_corruption_*`).
+
+### E-4 — `RawCache::get`/`put` touch the catalog synchronously, not through a batcher
+
+**What.** Spec §3.2's "Accounting write pressure" note (touches batched
+≤5s/≥64 entries) describes the *preview* index, touched on every
+grid-scroll cull swap. A raw-cache `get()` is a Develop-open-rate event, not
+a scroll-rate one, so this phase does one direct single-row `UPDATE` per hit
+(`touch_rawcache_last_used_by_key`) rather than building a second in-memory
+batcher (`index.rs`'s `PreviewIndex` machinery) just for this table. Fully
+documented as a scope narrowing in `rawcache.rs`'s module doc comment,
+including the follow-up path if profiling ever shows writer contention. Not
+required by either T17 or T18's acceptance criteria text.
+
+### E-5 — an additive DAO method beyond the spec's literal interface list: `delete_rawcache_entry_if_unchanged` (optimistic-concurrency eviction guard)
+
+**What.** Spec §5.4 lists `RawCache::evict_to_cap` with no internal
+mechanism prescribed. A naive "read LRU candidate, then delete by id" has a
+real race: a concurrent `put()`/touch can refresh the exact row selected as
+the eviction candidate between the read and the delete, so plain
+delete-by-id would evict a just-refreshed entry out from under the write
+that refreshed it. This phase closes that with a compare-and-delete —
+`CatalogTxn::delete_rawcache_entry_if_unchanged(id, expected_last_used_at)`
+— which only removes the row if `last_used_at` still matches what was read;
+`evict_to_cap` skips deleting the file when the delete reports "no row
+removed" (someone else's fresher write, not this eviction's to reclaim). A
+bounded retry count (8 consecutive races) prevents an adversarial concurrent
+writer from making one `evict_to_cap` call spin forever — cap enforcement is
+a converging property across calls, not a single-call hard guarantee under
+adversarial concurrent load (documented on the method itself).
+
+**Known, accepted, residual race.** `last_used_at` is second-granularity
+(A-8's documented convention for this table). A refresh landing in the
+*same* wall-clock second as the value the guard compares against is
+invisible to it — the guard can still evict a row that was "just" refreshed
+if both events share a timestamp. This is a **self-healing divergence**
+(`RawCache::reconcile` re-adopts the resulting orphan file on its next
+pass), not a correctness bug — matching the architecture's own "caches are
+disposable, reconcile heals divergence" posture (spec §3.2) — so it is
+accepted rather than chased with a schema change (a monotonic version
+column) this phase does not otherwise need. `t18_concurrent_get_put_evict_
+is_race_free` asserts the properties that must always hold (no panics, final
+cap compliance after a race-free single-threaded mop-up pass, zero
+unrecognized-file findings) and asserts the *residual* divergence stays
+small (bounded by the key-space size) rather than asserting it is exactly
+zero, honestly reflecting this gap rather than hiding it behind a flaky-under-
+adversarial-timing hard assertion.
+
+### E-6 — the raw cache's `unsafe` mmap call is isolated to its own one-function submodule, `rawcache/mmap_io.rs`
+
+**What.** `memmap2::Mmap::map` is `unsafe`; the workspace denies
+`unsafe_code` everywhere except a locally-scoped, justified
+`#![allow(unsafe_code)]` (per the workspace `Cargo.toml`'s own lints
+comment, and the precedent already set by this same crate's
+`codec/jxl.rs`). This phase follows that precedent exactly: a new
+`rawcache/mmap_io.rs` file whose entire content is one function
+(`map_readonly`) and a SAFETY comment arguing why the race `Mmap::map`'s
+unsafety exists to flag is already closed by this store's own write
+discipline (same-dir atomic temp+rename never mutates a file in place) and
+otherwise caught by the zstd checksum on the very next line of the caller.
+No other file in `lightbox-preview` gained `unsafe_code`.
+
+### E-7 — 140 MB `get()` latency measured, not assumed: 19.15 ms debug / 19.43 ms release (budget 200 ms)
+
+**What.** Honest-reporting requirement. Measured on this development
+machine (`t17_140mb_payload_get_latency`, a 140 MB near-incompressible
+synthetic F16 payload, zstd level 3 — the config default):
+
+- `cargo test` (debug/dev profile): **19.15 ms**
+- `cargo test --release`: **19.43 ms**
+
+Both are roughly 10x inside the 200 ms budget, with no meaningful
+debug-vs-release gap (unlike C-2's `jpeg-encoder` case, where debug codegen
+was ~2x over budget) — zstd's own C implementation is compiled at its
+normal optimization level regardless of the *calling* crate's profile, so
+Rust-side debug-assertions overhead barely registers against a
+bulk-decompress call this size. The test still gates its hard assertion
+behind `!cfg!(debug_assertions)` for consistency with this crate's existing
+convention (C-2) and as insurance against a slower CI runner, but in
+practice this AC passes unconditionally on this machine.
+
+### E-8 — T18's "filling 6 GiB... enforces the cap within one entry" AC is exercised at a scaled-down synthetic size, not literally 6 GiB
+
+**What.** Spec §7's T18 AC text (repeated in the task prompt) reads
+"filling 6 GiB of synthetic entries enforces the cap [default 5 GiB] within
+one entry." Writing 6 GiB of real zstd-compressed files inside a
+PR-blocking unit test is impractical (CI time and disk — the same class of
+impracticality Phase A's T04 100k-row test avoided by staying entirely
+in-memory; a real 6 GiB of file IO has no equivalent in-memory shortcut).
+`t18_evict_to_cap_enforces_the_cap_within_one_entry_scaled_synthetic`
+exercises the identical PROPERTY at 1/1000 scale: an explicit
+`CacheLimits::rawcache_cap_bytes = 512 KiB` (not the 5 GiB default), 10
+entries of 64 KiB each written in sequence (the same 1.25x-over-cap ratio
+spec's own 6-vs-5 GiB numbers describe), asserting after every single write
+that the running total never exceeds `cap + one entry's size`, and that the
+store is back at/under cap once writes settle. The default 5 GiB cap itself
+is exercised for real by `CacheLimits::default()` (`config.rs`'s own test
+coverage, Phase A) — only the "fill past it" scenario is scaled down here.
+
+### E-9 — `RawCacheEntryId` added to `lightbox-types` (additive, mirrors `PreviewId`'s A-2-era pattern)
+
+**What.** The spec's interfaces are all in terms of `RawCacheKey`
+(`content_hash` + `params_hash`), never a catalog rowid — but
+`rawcache_dao.rs` needs a typed id for its own upsert/delete-by-id primitives
+(the LRU-eviction path resolves candidates as rows, then deletes by id), the
+same reason `preview_dao.rs` has `PreviewId`. Added following that type's
+exact pattern (`Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug,
+Serialize, Deserialize`) rather than reusing `PreviewId` for a different
+table's rowid (a deliberate anti-pattern per this crate's own convention:
+`lightbox-types`'s doc comment calls id newtypes "never a raw `i64` across a
+crate boundary," which by extension means never one table's rowid wearing
+another table's newtype either). `RawCacheKey`/`RawStageMeta`/`RawCacheHit`/
+etc. (the spec's own named types) are untouched.
+
+### E-10 — `PreviewService::raw_cache()` accessor is NOT wired in this phase; `RawCache` ships as a standalone type
+
+**What.** Spec §5.2 lists `pub fn raw_cache(&self) -> &RawCache;` on
+`PreviewService`. Phase D's `service.rs` module doc comment already flags
+this accessor as ambiguously "Phase E/F["s]" to build. This phase's task
+prompt scopes strictly to T17/T18 ("raw-cache container + put/get" and
+"raw-cache accounting + LRU + reconcile") and separately instructs "leave
+Phase F seams clean... do not implement them" — `PreviewService` integration
+(constructing a `RawCache` inside `PreviewService::open`, exposing the
+accessor, folding rawcache stats into `service::CacheStats`, wiring
+`reconcile()` into a startup/idle trigger) touches `service.rs`, which this
+phase's task explicitly did not authorize changing beyond what T17/T18
+require. `RawCache::new` is `pub` and takes exactly the `(Arc<Store>,
+Arc<Catalog>, CacheLimits, zstd_level)` a future integration needs — no
+signature changes anticipated for whichever phase (E05's Develop-open path,
+or a dedicated Phase-F/core wiring task) does that integration. Named here,
+not designed.
+
+### E-11 — Phase F seams confirmed untouched
+
+**What.** T2 tiled store, preview eviction/retention (T19), relocation
+(T21), the full `PurgeScope`/`VerifyMode::Full`/disk-full handling (T21),
+and `thumbcache.sqlite` (T22) are unimplemented, as instructed.
+`RawCache::purge_all`/`RawCache::reconcile` are this phase's own,
+narrower, honestly-scoped primitives (T18's actual AC surface — "purge",
+"startup/idle reconcile scan") — not the spec's fuller Phase-F
+`PurgeScope`/`VerifyMode::Full` machinery, matching D-8's precedent for
+`PreviewService::purge_all`/`verify_quick`. `RawCache`'s LRU-eviction shape
+(`evict_to_cap`, LRU-by-`last_used_at`) shares no code with what Phase F's
+preview eviction (T19, tier-ordered T2→T1→T0, refcount-before-unlink,
+Windows deferred-delete) will need — the two caches' eviction *policies*
+differ enough (single flat LRU vs. tier-ordered with refcounting) that
+sharing an implementation now would mean over-generalizing ahead of Phase
+F's actual requirements; the only genuinely shared primitive is
+`store::atomic_write`, already Phase-A-owned and neutral to both.

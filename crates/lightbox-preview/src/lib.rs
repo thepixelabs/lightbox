@@ -38,6 +38,10 @@ mod index;
 mod pipeline;
 mod producer;
 mod pyramid;
+// E03 Phase E (T17/T18): the raw decode cache — container format
+// (content-hash + params-hash keyed, zstd + checksum, mmap'd read) and
+// catalog-backed accounting/LRU/reconcile.
+mod rawcache;
 mod sched;
 mod service;
 mod store;
@@ -58,6 +62,11 @@ pub use pyramid::{
     derive_store_key, t0_rel_path, t1_rel_path, t2_rel_dir, PreviewColorspace, PreviewDesc,
     PreviewScope, PreviewSource, ProducerId, RelPath, StoreKey, Tier, VariantHash, VariantParams,
     VARIANT_PARAMS_ENC_VER,
+};
+// E03 Phase E (T17/T18): the raw decode cache (spec §3.3/§5.4).
+pub use rawcache::{
+    EvictReport, PlanarBuf, PlaneData, RawCache, RawCacheError, RawCacheHit, RawCacheKey,
+    RawCachePurgeReport, RawStageMeta, ReconcileReport, SampleFormat,
 };
 // E03 Phase D (T13): the priority build scheduler (spec §3.4/§5.6).
 pub use sched::{

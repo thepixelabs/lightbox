@@ -17,12 +17,14 @@ lightbox-jobs.workspace = true
 lightbox-types.workspace = true
 ciborium.workspace = true
 fast_image_resize.workspace = true
+memmap2.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
 twox-hash.workspace = true
 uuid.workspace = true
+zstd.workspace = true
 zune-jpeg.workspace = true
 # T1 JPEG backend (T10) — always available, unconditional dependency. See
 # the workspace Cargo.toml's own comment for the mozjpeg-vs-jpeg-encoder

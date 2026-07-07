@@ -2149,6 +2149,7 @@ dependencies = [
  "lightbox-decode",
  "lightbox-jobs",
  "lightbox-types",
+ "memmap2",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -2156,6 +2157,7 @@ dependencies = [
  "tracing",
  "twox-hash",
  "uuid",
+ "zstd",
  "zune-jpeg",
 ]
 

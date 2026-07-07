@@ -100,6 +100,10 @@ lcms2 = "6"
 # the manifest.
 libc = "0.2"
 fast_image_resize = "6"
+# E03 Phase E (T17): raw-cache `get()` mmap read (spec §3.3/§5.4 "mmap read").
+# MIT/Apache-2.0, no native code of its own (wraps the platform mmap syscalls
+# directly) — surface-1 clean, no cargo-deny changes needed.
+memmap2 = "0.9"
 # E03 Phase C T10: T1 JPEG backend. CODEC RECONCILIATION (see
 # E03-deviations.md, Phase C T10 for the full measurement): the spec's
 # preferred `mozjpeg` DOES build cleanly here with

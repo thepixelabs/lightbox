@@ -67,6 +67,14 @@ pub struct HistoryStepId(pub i64);
 )]
 pub struct PreviewId(pub i64);
 
+/// Rowid of a `raw_cache_entry` row (one accounted raw-cache container, E03
+/// spec §4/§5.4). Additive per E03 Phase E (T18) — the raw-cache
+/// accounting/LRU index's row identity, mirroring [`PreviewId`]'s pattern.
+#[derive(
+    Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
+pub struct RawCacheEntryId(pub i64);
+
 /// xxh3-128 of the full original file. Keys caches + relink (architecture §3.1).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ContentHash(pub [u8; 16]);
@@ -282,11 +290,19 @@ mod tests {
             serde_json::from_str::<PreviewId>(&serde_json::to_string(&preview).unwrap()).unwrap(),
             preview
         );
+        // E03 Phase E (T18): RawCacheEntryId follows the same pattern.
+        let rawcache = RawCacheEntryId(43);
+        assert_eq!(
+            serde_json::from_str::<RawCacheEntryId>(&serde_json::to_string(&rawcache).unwrap())
+                .unwrap(),
+            rawcache
+        );
 
         // Ord is derived (used by ordered id lists / future keying).
         assert!(MaskId(1) < MaskId(2));
         assert!(HistoryStepId(10) > HistoryStepId(9));
         assert!(PreviewId(1) < PreviewId(2));
+        assert!(RawCacheEntryId(1) < RawCacheEntryId(2));
     }
 
     #[test]

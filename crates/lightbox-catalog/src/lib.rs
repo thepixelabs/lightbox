@@ -50,6 +50,10 @@ mod preview_dao;
 // E02 Phase H (H1): the `camera_profile` registry — bundled-asset sync-on-open
 // + install/query DAOs (migration 0002_e02_color).
 mod profile_sync;
+// E03 Phase E (T18): the raw-cache accounting store layer — write DAOs on
+// `CatalogTxn` and the matching read surface on `ReaderHandle` for the
+// `raw_cache_entry` table (migration 0004_preview_pyramid, shipped Phase A).
+mod rawcache_dao;
 mod reader;
 mod writer;
 
@@ -67,6 +71,7 @@ pub use preview_dao::{NewPreviewRow, PreviewRow, PreviewSourceTag};
 pub use profile_sync::{
     BundledProfile, InstalledProfile, ProfileKind, ProfileSource, ProfileUpsert, SyncReport,
 };
+pub use rawcache_dao::{NewRawCacheEntryRow, RawCacheEntryRow};
 pub use reader::{CatalogCounts, FolderNode, ImageDetail, ReaderHandle};
 pub use writer::{CatalogTxn, WriterHandle};
 

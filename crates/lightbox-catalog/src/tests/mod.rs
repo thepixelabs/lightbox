@@ -12,6 +12,7 @@ mod fts_tests;
 mod open_create_tests;
 mod pages_tests;
 mod preview_dao_tests;
+mod rawcache_dao_tests;
 
 use std::path::Path;
 
