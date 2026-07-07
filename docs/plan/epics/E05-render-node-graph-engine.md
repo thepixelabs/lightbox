@@ -381,7 +381,7 @@ pub trait TileSink: Send + Sync {
 }
 ```
 
-**Interim reality at M1 (stated so no planner guesses):** `SourceProvider::DecodedFull` returns **already-demosaiced RGB** from E02 (rawler / interim LibRaw path, CPU) — the v1 graph's source port is `LinearRgbaF16`, and `MosaicU16` stays dormant until E11 moves demosaic onto the graph. The engine's <100 ms budget is slider-to-screen with a warm source (raw cache, E03); first-open cost is decode-bound and covered by the §4.3 progressive ladder, not by this epic.
+**Interim reality at M1 (stated so no planner guesses):** `SourceProvider::DecodedFull` returns **already-demosaiced RGB** from E02 (via E02's out-of-process LibRaw-proxy path, CPU; **rawler is banned from the crate graph** — see E02) — the v1 graph's source port is `LinearRgbaF16`, and `MosaicU16` stays dormant until E11 moves demosaic onto the graph. The engine's <100 ms budget is slider-to-screen with a warm source (raw cache, E03); first-open cost is decode-bound and covered by the §4.3 progressive ladder, not by this epic.
 
 ---
 

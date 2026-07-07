@@ -76,6 +76,10 @@ Mandate amended to **v2.1**: (1) AI Looks (image-adaptive cinematic grading) pro
 
 - E02 decode-spine reconciled: **LibRaw-proxy-primary, rawler crate-banned; parallel-wave execution.** See `epics/E02-decode-color-foundation.md` §0 + §5.1 and `epics/E02-deviations.md`.
 
+### E05 execution (2026-07-07)
+
+- E05 (render node-graph engine, CTO-approved/specced) execution **began under the parallel-wave method** (scaffold → Wave A {core ∥ gpu} → {B ∥ C ∥ E} → {D ∥ F} → verify), generalizing E01's Engine seed in place. Disposition + BUILDABLE-NOW/DEFERRED table (F1/F2 reference-perf + cross-OS-GPU HW, F4/D3 nightly long-runs, C7/C10 reduced-scale-local) in `epics/E05-deviations.md` §0; §3.8 source-seam wording corrected to E02-as-built (LibRaw-proxy, rawler crate-banned).
+
 ## 8. Approval status board
 
 | Milestone/change | Approver | Verdict | Date |
