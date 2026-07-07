@@ -435,7 +435,9 @@ mod tests {
         // The SAME recipe (identity, schema-only at M1) under two PVs.
         let recipe = Recipe::identity(PV_M0);
         let g1 = compiler.compile(&recipe, PV_M0, &source_desc()).unwrap();
-        let g999 = compiler.compile(&recipe, PV_TEST_999, &source_desc()).unwrap();
+        let g999 = compiler
+            .compile(&recipe, PV_TEST_999, &source_desc())
+            .unwrap();
 
         assert_eq!((g1.node_count(), g1.edge_count()), (3, 2));
         assert_eq!((g999.node_count(), g999.edge_count()), (2, 1));
@@ -465,8 +467,12 @@ mod tests {
         let recipe = Recipe::identity(PV_M0);
         let a1 = compiler.compile(&recipe, PV_M0, &source_desc()).unwrap();
         let b1 = compiler.compile(&recipe, PV_M0, &source_desc()).unwrap();
-        let a999 = compiler.compile(&recipe, PV_TEST_999, &source_desc()).unwrap();
-        let b999 = compiler.compile(&recipe, PV_TEST_999, &source_desc()).unwrap();
+        let a999 = compiler
+            .compile(&recipe, PV_TEST_999, &source_desc())
+            .unwrap();
+        let b999 = compiler
+            .compile(&recipe, PV_TEST_999, &source_desc())
+            .unwrap();
         assert!(a1.structurally_eq(&b1));
         assert!(a999.structurally_eq(&b999));
         assert!(!a1.structurally_eq(&a999));
