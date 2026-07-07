@@ -60,6 +60,11 @@ blake3.workspace = true
 # E05 Phase B micro-benches (task B8): tail-only recompute vs full-graph,
 # cache hit rate under slider churn.
 criterion.workspace = true
+# E05 Phase E: the CPU/GPU parity gate (E6, ng_parity.rs) reuses the testkit's
+# validated ΔE2000 (Sharma-Wu-Dalal) / PSNR comparators as the single ground
+# truth. This is a dev-only edge — the render *library* never depends on the
+# dev/test testkit; only its test target does (Cargo permits the dev-dep cycle).
+lightbox-render-testkit = { path = "../lightbox-render-testkit" }
 
 [[bench]]
 name = "cache"

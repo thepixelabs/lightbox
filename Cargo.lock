@@ -1911,6 +1911,7 @@ dependencies = [
  "lightbox-color",
  "lightbox-edit",
  "lightbox-jobs",
+ "lightbox-render-testkit",
  "lightbox-types",
  "naga",
  "petgraph",
