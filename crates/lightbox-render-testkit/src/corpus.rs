@@ -18,9 +18,9 @@ use std::sync::Arc;
 use lightbox_jobs::CancelToken;
 use lightbox_render::ng::node::{NodeDescriptor, ParamsSchema, ParamsSchemaRef};
 use lightbox_render::ng::{
-    CpuBackend, CpuEvalCtx, CpuTileView, Executor, Extent, GpuEvalCtx, NodeCache, NodeError, NodeId,
-    ParamBlock, ParamValue, PixelBuf, PixelFormat, PortDecl, PortType, RenderGraph, RenderNode,
-    RenderScale, Roi, TileView, PV_TEST_999,
+    CpuBackend, CpuEvalCtx, CpuTileView, Executor, Extent, GpuEvalCtx, NodeCache, NodeError,
+    NodeId, ParamBlock, ParamValue, PixelBuf, PixelFormat, PortDecl, PortType, RenderGraph,
+    RenderNode, RenderScale, Roi, TileView, PV_TEST_999,
 };
 use lightbox_types::ProcessVersion;
 use serde::{Deserialize, Serialize};
@@ -283,7 +283,14 @@ fn render_checker_gain(width: u32, height: u32, gain: f64) -> Vec<[u8; 4]> {
     graph
         .connect(checker, gain_node, "in")
         .expect("checker→gain edge type-checks");
-    render_probe_graph_srgb8(&graph, Extent { w: width, h: height }, ProcessVersion(1))
+    render_probe_graph_srgb8(
+        &graph,
+        Extent {
+            w: width,
+            h: height,
+        },
+        ProcessVersion(1),
+    )
 }
 
 /// Render a probe graph on the **CPU reference path** ([`Executor`] over
@@ -292,7 +299,11 @@ fn render_checker_gain(width: u32, height: u32, gain: f64) -> Vec<[u8; 4]> {
 /// the engine's `Buffer` readback uses. Deterministic → the committed golden is a
 /// stable regression pin (§4.4 / R3). Shared by the A16 golden and the per-PV
 /// matrix (task D3).
-fn render_probe_graph_srgb8(graph: &RenderGraph, extent: Extent, pv: ProcessVersion) -> Vec<[u8; 4]> {
+fn render_probe_graph_srgb8(
+    graph: &RenderGraph,
+    extent: Extent,
+    pv: ProcessVersion,
+) -> Vec<[u8; 4]> {
     let exec = Executor::new(Arc::new(CpuBackend::new(None)));
     let cache = NodeCache::new();
     let cancel = CancelToken::new();
@@ -403,12 +414,7 @@ pub fn run_golden(case: &GoldenCase) -> GoldenReport {
 /// Compare rendered sRGB8 texels to a committed golden PNG at `path` within the
 /// §4.4 tolerance (ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB); under `LIGHTBOX_BLESS=1`
 /// (re)write the golden. Shared by the A16 golden and the per-PV matrix runner.
-fn compare_srgb8_to_golden(
-    path: &Path,
-    w: u32,
-    h: u32,
-    rendered: &[[u8; 4]],
-) -> GoldenReport {
+fn compare_srgb8_to_golden(path: &Path, w: u32, h: u32, rendered: &[[u8; 4]]) -> GoldenReport {
     let rendered_bytes: Vec<u8> = rendered.iter().flatten().copied().collect();
     let golden_bytes = golden_bytes_or_bless(path, w, h, &rendered_bytes);
     let golden_texels: Vec<[u8; 4]> = golden_bytes
@@ -571,8 +577,9 @@ fn build_matrix_graph(case: &MatrixCase) -> RenderGraph {
 
     if case.pv == PV_TEST_999 {
         // Divergent PV999 stage: a radius-`blur_radius` box blur.
-        let blur_params = ParamBlock::from_fields([("radius", ParamValue::Float(case.blur_radius))])
-            .expect("radius builds");
+        let blur_params =
+            ParamBlock::from_fields([("radius", ParamValue::Float(case.blur_radius))])
+                .expect("radius builds");
         let blur = graph.add_node_with_params(Arc::new(BlurRProbe::default()), blur_params);
         graph
             .connect(gain, blur, "in")
@@ -603,7 +610,8 @@ pub fn run_matrix(cases: &[MatrixCase]) -> Vec<(MatrixCase, GoldenReport)> {
 mod tests {
     use super::*;
     use crate::compare::TOLERANCE_DELTA_E;
-    use lightbox_render::ng::RecomputeProbe;
+    use crate::probes::{BlurRFactory, GainFactory};
+    use lightbox_render::ng::{KernelSalt, NodeFactory, NodeRegistry, PvRange, RecomputeProbe};
 
     #[test]
     fn corpus_manifest_json_round_trips() {
@@ -714,7 +722,11 @@ mod tests {
                 ));
             }
         }
-        assert!(failures.is_empty(), "matrix drift:\n{}", failures.join("\n"));
+        assert!(
+            failures.is_empty(),
+            "matrix drift:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// **D2: the same recipe pins *distinct* goldens under PV1 vs PV999.** The
@@ -738,11 +750,8 @@ mod tests {
             extent,
             ProcessVersion(1),
         );
-        let pv999 = render_probe_graph_srgb8(
-            &build_matrix_graph(&mk(PV_TEST_999)),
-            extent,
-            PV_TEST_999,
-        );
+        let pv999 =
+            render_probe_graph_srgb8(&build_matrix_graph(&mk(PV_TEST_999)), extent, PV_TEST_999);
         assert_ne!(
             pv1, pv999,
             "PV999's blur stage must make its golden differ from PV1's"
@@ -775,8 +784,16 @@ mod tests {
             h: MATRIX_EXTENT.h,
         };
         let run = |pv| {
-            exec.evaluate(&graph, pv, roi, RenderScale::OneToOne, &cache, &cancel, None)
-                .expect("render ok")
+            exec.evaluate(
+                &graph,
+                pv,
+                roi,
+                RenderScale::OneToOne,
+                &cache,
+                &cancel,
+                None,
+            )
+            .expect("render ok")
         };
 
         run(ProcessVersion(1));
@@ -798,13 +815,18 @@ mod tests {
         );
     }
 
-    /// **D4: an algorithm change to a PV999 kernel trips the golden gate.** We
-    /// render a PV999 case with a deliberately different blur radius (5 vs the
-    /// committed 2) and assert it no longer matches the committed PV999 golden —
-    /// i.e. `run_matrix_case` would fail the build. This is the intentional
-    /// kernel tweak from D4 as a *permanent, green* regression guard (the real
-    /// trip-then-revert against the committed golden was performed once and
-    /// recorded in E05-deviations.md).
+    /// **D4: an algorithm change to a PV999 kernel trips the golden gate, and
+    /// reverting it is green again.** We render a PV999 case with a
+    /// deliberately different blur radius (5 vs the committed 2) and assert it
+    /// no longer matches the committed PV999 golden — i.e. `run_matrix_case`
+    /// would fail the build — then rebuild the untouched case and assert it is
+    /// green again. This is the intentional kernel tweak from D4 as a
+    /// *permanent, green* regression guard, run live in this test (tweak →
+    /// trip → revert → green), entirely against the test-only PV999 case so
+    /// PV1 is never disturbed. See also
+    /// [`d4_registered_pv999_kernel_salt_change_trips_then_reverts_the_matrix_gate`]
+    /// below, which performs the same proof through the real
+    /// `NodeRegistry`/`KernelSalt` mechanism rather than a `MatrixCase` field.
     #[test]
     fn pv999_kernel_tweak_trips_the_golden_gate() {
         // The committed PV999 golden for (highfreq, gain 2.0).
@@ -817,13 +839,14 @@ mod tests {
             extent: MATRIX_EXTENT,
             golden_path: matrix_golden_path("highfreq", 2.0, PV_TEST_999),
         };
-        // Sanity: the untweaked case passes its committed golden.
+        // Baseline (green): the untweaked case passes its committed golden.
         assert!(
             run_matrix_case(&committed).passed,
             "baseline PV999 case must match its committed golden"
         );
 
-        // A "changed kernel": same case, larger blur radius.
+        // Tweak (trips): same case, larger blur radius — "someone touched the
+        // kernel".
         let tweaked = MatrixCase {
             blur_radius: 5.0,
             ..committed.clone()
@@ -834,6 +857,219 @@ mod tests {
             "a PV999 blur-radius change (algorithm change) must trip the golden gate \
              (ΔE2000 max {:.4}, PSNR {:.2} dB)",
             report.stats.max, report.psnr_db
+        );
+
+        // Revert (green again): rebuild the original, untouched case and
+        // confirm the gate is green — proving the trip came from the tweak,
+        // not from non-determinism, and that nothing shipped was disturbed.
+        assert!(
+            run_matrix_case(&committed).passed,
+            "reverting the PV999 kernel tweak must restore a green gate"
+        );
+    }
+
+    /// A [`NodeFactory`] for `test.blur_r` that reports a caller-supplied
+    /// [`KernelSalt`] — used by
+    /// [`d4_registered_pv999_kernel_salt_change_trips_then_reverts_the_matrix_gate`]
+    /// to stand in for two different registered revisions of the same node
+    /// (the shipped baseline and a deliberate tweak) without touching the real
+    /// [`BlurRFactory`]'s committed salt.
+    struct TaggedBlurFactory(KernelSalt);
+
+    impl NodeFactory for TaggedBlurFactory {
+        fn instantiate(&self) -> Arc<dyn RenderNode> {
+            Arc::new(BlurRProbe::default())
+        }
+        fn kernel_salt(&self) -> KernelSalt {
+            self.0
+        }
+    }
+
+    /// A scratch [`NodeRegistry`] with `test.gain`/`test.blur_r` registered
+    /// **only** for the test-only [`PV_TEST_999`] range (never PV1), with
+    /// `test.blur_r` tagged with `salt` — the D4 kernel-salt trip-then-revert
+    /// test's fixture. `PvRange::single` (not `from_open`) keeps this
+    /// registration scoped to exactly PV999.
+    fn pv999_matrix_registry(salt: KernelSalt) -> NodeRegistry {
+        let mut reg = NodeRegistry::new();
+        reg.register(
+            NodeId("test.gain"),
+            PvRange::single(PV_TEST_999),
+            Arc::new(GainFactory::default()),
+        )
+        .expect("test.gain registers for PV999");
+        reg.register(
+            NodeId("test.blur_r"),
+            PvRange::single(PV_TEST_999),
+            Arc::new(TaggedBlurFactory(salt)),
+        )
+        .expect("test.blur_r registers for PV999");
+        reg
+    }
+
+    /// Builds and renders the `source → gain → blur` PV999 matrix graph
+    /// (mirrors [`build_matrix_graph`]'s PV999 shape) but resolves `gain` and
+    /// `blur` through `reg` — `graph.add_node_full(node, params,
+    /// registry.kernel_salt(..))` — exactly as `RecipeCompiler::compile` stamps
+    /// the registry salt onto each stage (spec §3.5), instead of the
+    /// id-derived default `add_node_with_params` would use.
+    fn render_via_registry(
+        reg: &NodeRegistry,
+        gain: f64,
+        radius: f64,
+        extent: Extent,
+    ) -> Vec<[u8; 4]> {
+        let mut graph = RenderGraph::new();
+        let src = graph.add_node(Arc::new(CorpusSourceProbe::new(
+            CorpusKind::HighFrequency,
+            extent,
+        )));
+
+        let gain_id = NodeId("test.gain");
+        let gain_node = reg
+            .resolve(gain_id, PV_TEST_999)
+            .expect("test.gain resolves for PV999");
+        let gain_salt = reg
+            .kernel_salt(gain_id, PV_TEST_999)
+            .expect("test.gain salt registered for PV999");
+        let gain_params =
+            ParamBlock::from_fields([("gain", ParamValue::Float(gain))]).expect("gain builds");
+        let gain_idx = graph.add_node_full(gain_node, gain_params, gain_salt);
+        graph
+            .connect(src, gain_idx, "in")
+            .expect("src→gain type-checks");
+
+        let blur_id = NodeId("test.blur_r");
+        let blur_node = reg
+            .resolve(blur_id, PV_TEST_999)
+            .expect("test.blur_r resolves for PV999");
+        let blur_salt = reg
+            .kernel_salt(blur_id, PV_TEST_999)
+            .expect("test.blur_r salt registered for PV999");
+        let blur_params = ParamBlock::from_fields([("radius", ParamValue::Float(radius))])
+            .expect("radius builds");
+        let blur_idx = graph.add_node_full(blur_node, blur_params, blur_salt);
+        graph
+            .connect(gain_idx, blur_idx, "in")
+            .expect("gain→blur type-checks");
+
+        render_probe_graph_srgb8(&graph, extent, PV_TEST_999)
+    }
+
+    /// Compares `rendered` to the **already-committed** golden at `path`
+    /// read-only — unlike [`compare_srgb8_to_golden`], this never writes under
+    /// `LIGHTBOX_BLESS=1`. The D4 salt-tweak test deliberately renders
+    /// off-tolerance pixels partway through and must never let a stray
+    /// `LIGHTBOX_BLESS=1` local run overwrite a committed golden with them.
+    fn compare_committed_readonly(
+        path: &Path,
+        w: u32,
+        h: u32,
+        rendered: &[[u8; 4]],
+    ) -> GoldenReport {
+        let (gw, gh, golden_bytes) =
+            read_png(path).unwrap_or_else(|e| panic!("committed golden {path:?} unreadable ({e})"));
+        assert_eq!(
+            (gw, gh),
+            (w, h),
+            "golden {path:?} is {gw}x{gh}, render is {w}x{h}"
+        );
+        let golden_texels: Vec<[u8; 4]> = golden_bytes
+            .chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect();
+        let rendered_bytes: Vec<u8> = rendered.iter().flatten().copied().collect();
+        let stats = delta_e_stats(&golden_texels, rendered);
+        let psnr_db = psnr(&golden_bytes, &rendered_bytes);
+        let passed = stats.within_tolerance() && psnr_db >= TOLERANCE_PSNR_DB;
+        GoldenReport {
+            stats,
+            psnr_db,
+            passed,
+        }
+    }
+
+    /// **D4 (the registry-mechanism proof): changing a *registered* PV999
+    /// kernel salt trips the D3 matrix gate; reverting it is green again.**
+    ///
+    /// Unlike [`pv999_kernel_tweak_trips_the_golden_gate`] (which tweaks a
+    /// `MatrixCase` field directly), this test goes through the actual
+    /// mechanism the spec's §3.5/§4.5 discipline governs: a [`NodeRegistry`]
+    /// registration for `test.blur_r` under the test-only [`PV_TEST_999`]
+    /// range, each carrying its own [`KernelSalt`] — precisely what
+    /// `RecipeCompiler::compile` stamps onto the content cache key for every
+    /// registered stage (task B2; `salt_change_flips_the_key_b1` in
+    /// `ng::cache` proves the cache-key side separately).
+    ///
+    /// * **Baseline (green):** `test.blur_r` registered under PV999 with the
+    ///   real, shipped [`BlurRFactory`] salt and the matrix's default radius
+    ///   ([`MATRIX_BLUR_RADIUS`]) reproduces the **existing committed** PV999
+    ///   golden (`highfreq/gain200/pv999.png`) exactly — proving the
+    ///   registry-driven path renders the same pixels the raw-graph matrix
+    ///   runner does.
+    /// * **Tweak (trips):** a scratch registry registers the **same** node id
+    ///   under PV999 with a **different** [`KernelSalt`]
+    ///   (`test.blur_r@pv999-tweaked-v2`, distinct from the shipped
+    ///   `test.blur_r@v1`) *and* a different radius — standing in for "a
+    ///   contributor touched `test.blur_r`'s CPU body and, per discipline (the
+    ///   `manifest` module doc's contributor workflow), bumped its
+    ///   `KernelSalt`". Its render drifts beyond ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB
+    ///   from the committed golden — the D3-style gate trips, read-only (never
+    ///   writes the committed golden, even under `LIGHTBOX_BLESS=1`).
+    /// * **Revert (green again):** re-registering the *original* salt +
+    ///   radius renders byte-identical to the baseline and passes the gate
+    ///   again. PV1 and the real `BlurRFactory`/`GainFactory` registrations are
+    ///   never touched by any of this — only a scratch, test-scoped registry.
+    #[test]
+    fn d4_registered_pv999_kernel_salt_change_trips_then_reverts_the_matrix_gate() {
+        let extent = MATRIX_EXTENT;
+        let golden_path = matrix_golden_path("highfreq", 2.0, PV_TEST_999);
+
+        // Baseline (green): the shipped salt + shipped default radius,
+        // resolved through a real registry.
+        let baseline_salt = BlurRFactory::default().kernel_salt();
+        let baseline_reg = pv999_matrix_registry(baseline_salt);
+        let baseline_px = render_via_registry(&baseline_reg, 2.0, MATRIX_BLUR_RADIUS, extent);
+        let baseline_report =
+            compare_committed_readonly(&golden_path, extent.w, extent.h, &baseline_px);
+        assert!(
+            baseline_report.passed,
+            "registry-resolved baseline render must match the committed PV999 golden \
+             (ΔE2000 max {:.4}, PSNR {:.2} dB)",
+            baseline_report.stats.max, baseline_report.psnr_db
+        );
+
+        // Tweak (trips): a distinct registered kernel salt, paired with the
+        // algorithm change it is supposed to flag.
+        let tweaked_salt = KernelSalt(blake3::hash(b"test.blur_r@pv999-tweaked-v2"));
+        assert_ne!(
+            tweaked_salt.0, baseline_salt.0,
+            "the tweak must carry a kernel salt distinct from the shipped one"
+        );
+        let tweaked_reg = pv999_matrix_registry(tweaked_salt);
+        let tweaked_px = render_via_registry(&tweaked_reg, 2.0, 5.0, extent);
+        let tweaked_report =
+            compare_committed_readonly(&golden_path, extent.w, extent.h, &tweaked_px);
+        assert!(
+            !tweaked_report.passed,
+            "a registered PV999 kernel-salt change (algorithm change) must trip the D3 \
+             golden gate (ΔE2000 max {:.4}, PSNR {:.2} dB)",
+            tweaked_report.stats.max, tweaked_report.psnr_db
+        );
+
+        // Revert (green again): the original salt + radius, resolved fresh —
+        // byte-identical to the baseline and green again. Never touches PV1.
+        let reverted_reg = pv999_matrix_registry(baseline_salt);
+        let reverted_px = render_via_registry(&reverted_reg, 2.0, MATRIX_BLUR_RADIUS, extent);
+        assert_eq!(
+            reverted_px, baseline_px,
+            "reverting to the original salt+radius must reproduce the exact baseline render"
+        );
+        let reverted_report =
+            compare_committed_readonly(&golden_path, extent.w, extent.h, &reverted_px);
+        assert!(
+            reverted_report.passed,
+            "after reverting the kernel-salt tweak, the D3 gate must be green again"
         );
     }
 
@@ -847,7 +1083,11 @@ mod tests {
         let cases = matrix_cases(MatrixScope::Full);
         assert_eq!(cases.len(), 7 * 3 * 2);
         for (case, report) in run_matrix(&cases) {
-            assert!(report.passed, "nightly matrix drift on {:?}", case.golden_path);
+            assert!(
+                report.passed,
+                "nightly matrix drift on {:?}",
+                case.golden_path
+            );
         }
     }
 }

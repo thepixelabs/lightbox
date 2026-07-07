@@ -820,3 +820,114 @@ warnings` · `cargo fmt --all --check` · `cargo deny check` — all green (test
 merge report). The four §10.1 phase gates (A16 golden, B5 tail-invalidation, C2 fit-view ≤~8 MP, E5
 degrade-keeps-editing) and the E6 CPU/GPU parity + determinism gates all pass on the real Metal
 adapter post-merge.
+
+## Phase D completion — DoD #2 (per-PV golden immutability guard) — 2026-07-07
+
+**Context.** The agent originally assigned Phase D (D1–D5) died mid-task (API failure) before
+wiring the gates or writing this section. Its artifacts (`ng/compile/manifest.rs`, `pv-manifests/
+pv1.json`, the per-PV template logic in `ng/compile/mod.rs`, `corpus.rs`'s golden-matrix runner,
+the 12 committed matrix goldens, `tests/ng_pv.rs`) were salvaged onto `main` as-is at `35a66d4` /
+merged at `d28195b` ("salvaged PV registry — D2/D3/D4 gates to be completed"). An independent
+verify pass flagged DoD #2 as unsatisfied: `run_matrix` allegedly never called by a test, PV999's
+divergent topology unconfirmed, and no kernel-salt trip-then-revert test. This entry (branch
+`e05-d2`, worktree off `d28195b`) closes the gap and records what was actually found.
+
+**Re-verification finding: two of the three flagged gaps were already closed on `main` at
+`d28195b`.** Building + testing the salvaged worktree before touching anything showed:
+
+- **D3 (`run_matrix` wiring) was already real.** `corpus::tests::per_pv_matrix_subset_within_tolerance`
+  calls `run_matrix(&matrix_cases(MatrixScope::Subset))` (12 cases: 3 corpus kinds × 2 gains × 2
+  PVs) and asserts every case's `GoldenReport::passed`. It is **not** `#[ignore]`d, runs inside
+  `cargo test --workspace`, and CI's PR gate (`.github/workflows/ci.yml`, `test:` step) is
+  literally `cargo test --workspace` on all three OSes with no filtering — so this gate was already
+  PR-blocking. All 12 committed goldens under `crates/lightbox-render-testkit/goldens/matrix/`
+  matched current render output within ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB; **no goldens needed reblessing.**
+- **D2 (PV999 divergent topology) was already real, at two levels.** At the compiler/template
+  level, `GraphTemplate::pv_test_999()` (`ng/compile/mod.rs`) drops the `util.resize` stage PV1
+  carries (3 nodes/2 edges vs 2 nodes/1 edge — `per_pv_template_selection_diverges_topology`). At
+  the golden-matrix level, `corpus::build_matrix_graph` adds a `test.blur_r` stage for PV999 that
+  PV1 does not have (`source → gain` vs `source → gain → blur`), producing **distinct committed
+  goldens** (`pv1_and_pv999_produce_distinct_goldens`). `CacheKey::derive` (`ng/cache/mod.rs`)
+  folds `pv` directly into the hash (independent of `kernel_salt`), and
+  `corpus::tests::no_cross_pv_cache_pollution` proves this behaviorally — rendering PV1 then PV999
+  through one shared cache re-evaluates every PV999 node (no stale PV1 tile served).
+
+**The one gap that was real: D4's "trip-then-revert" tests existed but were not honest about their
+own provenance, and neither exercised the actual registered-kernel-salt mechanism.** Both
+`manifest.rs::a_salt_change_on_a_shipped_stage_is_detected` and
+`corpus.rs::pv999_kernel_tweak_trips_the_golden_gate` carried a doc comment claiming "the real
+trip-then-revert … was performed once and recorded in `E05-deviations.md`" — **no such record
+existed anywhere in this file.** That claim was false. Separately, neither test actually drove a
+change through `NodeRegistry`/`NodeFactory::kernel_salt()` (the literal "registered PV's kernel
+salt" the task names): `manifest.rs`'s test mutated a `PvManifest` struct post-hoc, and
+`corpus.rs`'s test mutated a `MatrixCase.blur_radius` field directly — both bypass the registry
+entirely (the golden-matrix's probe nodes are wired with `graph.add_node`/`add_node_with_params`,
+which stamp an id-derived `default_salt`, not a registry-resolved one — see the doc comment on
+`ng::graph::default_salt`).
+
+**Fix — `crates/lightbox-render-testkit/src/corpus.rs`:**
+
+1. Added `d4_registered_pv999_kernel_salt_change_trips_then_reverts_the_matrix_gate`: a scratch
+   `NodeRegistry` registers `test.gain`/`test.blur_r` **only** for `PV_TEST_999`
+   (`PvRange::single`, never `PV1`), resolved via `registry.resolve` + `registry.kernel_salt` and
+   stamped with `graph.add_node_full` — the exact mechanism `RecipeCompiler::compile` uses (task
+   B2). The test renders three times against the **existing committed**
+   `goldens/matrix/highfreq/gain200/pv999.png` (no new golden files added):
+   - **Baseline (green):** the shipped `BlurRFactory` salt (`test.blur_r@v1`) + shipped default
+     radius (`MATRIX_BLUR_RADIUS` = 2.0), resolved through the registry, reproduces the committed
+     golden exactly — also a cross-check that the registry-driven path renders the same pixels as
+     `build_matrix_graph`'s raw-`Arc` path.
+   - **Tweak (trips):** a second registry registers the same node id under PV999 with a
+     **different** `KernelSalt` (`blake3(b"test.blur_r@pv999-tweaked-v2")`, distinct from the
+     shipped `test.blur_r@v1`) *and* a different radius (5.0) — standing in for "a contributor
+     touched `test.blur_r`'s CPU body and, per discipline, bumped its `KernelSalt`". This render
+     drifts beyond ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB from the committed golden — the D3-style gate trips,
+     for real, inside the test run.
+   - **Revert (green again):** a third registry, identical to the baseline (same salt, same
+     radius), renders byte-identical pixels and passes the gate again.
+   - Comparison goes through a new **read-only** `compare_committed_readonly` helper (not the
+     existing `compare_srgb8_to_golden`), which never writes the golden file even under
+     `LIGHTBOX_BLESS=1` — the existing blessable comparator would have let a stray
+     `LIGHTBOX_BLESS=1` local run overwrite the committed PV999 golden with the *tweaked* (wrong)
+     pixels partway through this test. This is a real footgun the salvaged code did not guard
+     against for any multi-render-per-golden test; `compare_committed_readonly` closes it for this
+     one.
+2. Strengthened `pv999_kernel_tweak_trips_the_golden_gate` (the pre-existing `MatrixCase`-level
+   test) with an explicit third step — re-running the untouched `committed` case after the tweak
+   and asserting it passes again — so the tweak → trip → revert → green cycle is fully live in one
+   test run, not just implied by the untouched baseline having been checked first.
+3. Removed the false "recorded in `E05-deviations.md`" claims from both tests' doc comments;
+   pointed them at this entry and at the new registry-mechanism test.
+
+**Fix — `crates/lightbox-render/src/ng/compile/manifest.rs`:** corrected
+`a_salt_change_on_a_shipped_stage_is_detected`'s doc comment the same way — it remains a valid
+*manifest-layer* mechanism proof (a salt bump flips manifest equality), but no longer claims a
+prior live trip-then-revert that never happened; it now points at the real one in `corpus.rs`.
+
+**Formatting.** `cargo fmt --all --check` was **not** clean on the salvaged `d28195b` commit inside
+Phase D's own files (`ng/compile/manifest.rs`, `ng/compile/mod.rs`,
+`lightbox-render-testkit/src/corpus.rs` — all pre-existing drift, not introduced by this pass; no
+other crate had drift). Ran `cargo fmt --all` (formatting only, no logic changes) so the exit bar's
+fmt gate is genuinely green.
+
+**Exit bar, this worktree (`e05-d2`, off `d28195b`), all green:**
+`cargo xtask fixtures` (14 fixtures, cached after first run) →
+`cargo build --workspace` ok →
+`cargo test --workspace` ok, 0 failed (includes the 3 `lightbox-cli e02_e2e` tests, which need the
+fixture corpus and pass once it's fetched) →
+`cargo clippy --workspace --all-targets -- -D warnings` clean →
+`cargo fmt --all --check` clean →
+`cargo deny check` — `advisories ok, bans ok, licenses ok, sources ok` (pre-existing duplicate
+`windows_x86_64_*` warnings only, unrelated to E05, not new).
+
+**DoD #2 status: genuinely satisfied and PR-blocking.** The corpus × recipe × registered-PV matrix
+(`per_pv_matrix_subset_within_tolerance`) runs on every PR across all three CI OSes with no
+filtering and fails the build on any drift beyond ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB; PV999's divergent
+topology is real at both the template and golden-matrix layers with no cross-PV cache pollution
+(`pv` folded directly into `CacheKey`); a registered PV999 kernel-salt change demonstrably trips
+that gate and reverting it is green again, proven live through the actual `NodeRegistry` mechanism
+in `d4_registered_pv999_kernel_salt_change_trips_then_reverts_the_matrix_gate`. The full nightly
+matrix (`corpus::tests::full_matrix_nightly`, `#[ignore]`d in the PR gate per the §0 disposition) is
+unchanged by this pass. The "new algorithm ⇒ new PV" contributor workflow is documented in
+`ng/compile/manifest.rs`'s module doc (§ "Contributor workflow when you need to change a shipped
+node's algorithm").

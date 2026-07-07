@@ -209,8 +209,13 @@ mod tests {
     /// is detected.** We simulate a contributor touching a shipped kernel by
     /// mutating one stage's salt digest and assert the manifest no longer equals
     /// the committed one — i.e. the sync gate above would trip. This proves the
-    /// discipline without leaving a red build (the real trip-then-revert against
-    /// the committed file was performed once and recorded in E05-deviations.md).
+    /// discipline at the manifest layer without leaving a red build. The *live*
+    /// tweak → trip → revert → green cycle (never simulated, run for real
+    /// through the actual `NodeRegistry`/`KernelSalt` mechanism and the D3
+    /// golden comparator, entirely on the test-only PV999 so PV1 is never
+    /// touched) is
+    /// `lightbox_render_testkit::corpus::tests::d4_registered_pv999_kernel_salt_change_trips_then_reverts_the_matrix_gate`,
+    /// recorded in `docs/plan/epics/E05-deviations.md` (Phase D).
     #[test]
     fn a_salt_change_on_a_shipped_stage_is_detected() {
         let compiler = shipping_compiler();
@@ -235,7 +240,10 @@ mod tests {
     fn manifest_of_unregistered_pv_is_typed() {
         let compiler = shipping_compiler();
         let err = PvManifest::of_compiler(&compiler, ProcessVersion(4242)).unwrap_err();
-        assert!(matches!(err, CompileError::UnsupportedPv(ProcessVersion(4242))));
+        assert!(matches!(
+            err,
+            CompileError::UnsupportedPv(ProcessVersion(4242))
+        ));
     }
 
     /// A template referencing a stage with no registered node under the PV
