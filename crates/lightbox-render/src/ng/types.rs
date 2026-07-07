@@ -52,27 +52,92 @@ pub struct Roi {
 }
 
 impl Roi {
+    /// The right edge (exclusive), in `i64` to avoid `i32`/`u32` overflow.
+    #[inline]
+    fn right(&self) -> i64 {
+        self.x as i64 + self.w as i64
+    }
+
+    /// The bottom edge (exclusive).
+    #[inline]
+    fn bottom(&self) -> i64 {
+        self.y as i64 + self.h as i64
+    }
+
+    /// The pixel area (`w * h`).
+    #[inline]
+    pub fn area(&self) -> u64 {
+        self.w as u64 * self.h as u64
+    }
+
     /// Apron growth for neighborhood nodes: expand on every side by `margin`
-    /// (spec §3.1). **A2 owns the real algebra.**
+    /// (spec §3.1). The origin moves up-and-left (possibly negative, past the
+    /// image border) and the extent grows by `2 * margin`; saturating so a huge
+    /// margin can never wrap.
     pub fn expand(&self, margin: u32) -> Roi {
-        let _ = margin;
-        unimplemented!("A2 (A-core): Roi::expand — apron growth for neighborhood nodes")
+        let m = margin as i64;
+        let nx = (self.x as i64 - m).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let ny = (self.y as i64 - m).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        Roi {
+            x: nx,
+            y: ny,
+            w: self.w.saturating_add(margin.saturating_mul(2)),
+            h: self.h.saturating_add(margin.saturating_mul(2)),
+        }
     }
 
-    /// Intersection with `other`, or `None` when disjoint (spec §3.1).
-    /// **A2 owns the real algebra.**
+    /// Intersection with `other`, or `None` when the two are disjoint (spec
+    /// §3.1). Empty inputs (`w == 0` or `h == 0`) never intersect.
     pub fn intersect(&self, other: &Roi) -> Option<Roi> {
-        let _ = other;
-        unimplemented!("A2 (A-core): Roi::intersect")
+        if self.w == 0 || self.h == 0 || other.w == 0 || other.h == 0 {
+            return None;
+        }
+        let x0 = self.x.max(other.x) as i64;
+        let y0 = self.y.max(other.y) as i64;
+        let x1 = self.right().min(other.right());
+        let y1 = self.bottom().min(other.bottom());
+        if x1 > x0 && y1 > y0 {
+            Some(Roi {
+                x: x0 as i32,
+                y: y0 as i32,
+                w: (x1 - x0) as u32,
+                h: (y1 - y0) as u32,
+            })
+        } else {
+            None
+        }
     }
 
-    /// The `size`²-tile grid covering this ROI (256² default; spec §3.1/§4.3).
-    ///
-    /// SCAFFOLD placeholder yields nothing; **A2 implements the real tiling**
-    /// (kept as `impl Iterator` per the frozen signature).
+    /// The `size`²-tile grid covering this ROI, anchored to the global
+    /// source-pixel grid at the origin so tile coordinates are stable across
+    /// ROIs (256² default; spec §3.1/§4.3). Apron regions past the top/left
+    /// border are clamped to the grid origin. `scale_q` is left `0` — the
+    /// executor stamps the render's quantized scale (spec §3.5).
     pub fn tiles(&self, size: u32) -> impl Iterator<Item = TileCoord> {
-        let _ = size;
-        std::iter::empty()
+        let size = size.max(1) as i64;
+        let mut coords = Vec::new();
+        if self.w != 0 && self.h != 0 {
+            let left = self.x.max(0) as i64;
+            let top = self.y.max(0) as i64;
+            let right = self.right().max(0);
+            let bottom = self.bottom().max(0);
+            if right > left && bottom > top {
+                let tx0 = left / size;
+                let tx1 = (right - 1) / size;
+                let ty0 = top / size;
+                let ty1 = (bottom - 1) / size;
+                for ty in ty0..=ty1 {
+                    for tx in tx0..=tx1 {
+                        coords.push(TileCoord {
+                            tx: tx as u32,
+                            ty: ty as u32,
+                            scale_q: 0,
+                        });
+                    }
+                }
+            }
+        }
+        coords.into_iter()
     }
 }
 
@@ -122,4 +187,118 @@ pub enum TilePrecision {
     F16,
     /// `rgba32float` — accumulation-sensitive stages (§4.2).
     F32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roi(x: i32, y: i32, w: u32, h: u32) -> Roi {
+        Roi { x, y, w, h }
+    }
+
+    #[test]
+    fn expand_grows_all_sides_and_may_go_negative() {
+        let r = roi(10, 20, 100, 80).expand(4);
+        assert_eq!(r, roi(6, 16, 108, 88));
+        // Apron past the top-left border.
+        let a = roi(2, 1, 8, 8).expand(4);
+        assert_eq!(a, roi(-2, -3, 16, 16));
+    }
+
+    #[test]
+    fn expand_by_zero_is_identity() {
+        let r = roi(-5, 7, 3, 9);
+        assert_eq!(r.expand(0), r);
+    }
+
+    #[test]
+    fn intersect_overlap_disjoint_and_touching() {
+        let a = roi(0, 0, 100, 100);
+        assert_eq!(
+            a.intersect(&roi(50, 50, 100, 100)),
+            Some(roi(50, 50, 50, 50))
+        );
+        // Fully disjoint.
+        assert_eq!(a.intersect(&roi(200, 0, 10, 10)), None);
+        // Edge-touching (right edge == left edge) is NOT an overlap.
+        assert_eq!(a.intersect(&roi(100, 0, 10, 100)), None);
+        // Containment.
+        assert_eq!(a.intersect(&roi(10, 10, 20, 20)), Some(roi(10, 10, 20, 20)));
+        assert!(a.intersect(&a).is_some());
+    }
+
+    #[test]
+    fn intersect_is_commutative_and_empty_never_hits() {
+        let a = roi(3, 4, 30, 40);
+        let b = roi(10, 10, 50, 5);
+        assert_eq!(a.intersect(&b), b.intersect(&a));
+        assert_eq!(a.intersect(&roi(3, 4, 0, 40)), None);
+    }
+
+    #[test]
+    fn tiles_cover_and_align_to_global_grid() {
+        // A ROI straddling three 256-tiles horizontally, two vertically.
+        let t: Vec<_> = roi(200, 100, 400, 300).tiles(256).collect();
+        // x: [200,600) → tx 0,1,2 ; y: [100,400) → ty 0,1
+        let txs: Vec<u32> = t.iter().map(|c| c.tx).collect();
+        let tys: Vec<u32> = t.iter().map(|c| c.ty).collect();
+        assert_eq!(t.len(), 6);
+        assert_eq!(*txs.iter().max().unwrap(), 2);
+        assert_eq!(*txs.iter().min().unwrap(), 0);
+        assert_eq!(*tys.iter().max().unwrap(), 1);
+        assert!(t.iter().all(|c| c.scale_q == 0));
+    }
+
+    #[test]
+    fn tiles_exact_tile_boundaries() {
+        // Exactly one tile.
+        assert_eq!(roi(0, 0, 256, 256).tiles(256).count(), 1);
+        // 257 wide spills into a second column.
+        assert_eq!(roi(0, 0, 257, 256).tiles(256).count(), 2);
+        // Empty ROI yields nothing.
+        assert_eq!(roi(0, 0, 0, 256).tiles(256).count(), 0);
+    }
+
+    #[test]
+    fn serde_round_trip_of_derived_types() {
+        let vals = [
+            serde_json::to_string(&Extent { w: 640, h: 480 }).unwrap(),
+            serde_json::to_string(&roi(-1, 2, 3, 4)).unwrap(),
+            serde_json::to_string(&TileCoord {
+                tx: 1,
+                ty: 2,
+                scale_q: 64,
+            })
+            .unwrap(),
+            serde_json::to_string(&RenderScale::Fit(Extent { w: 3840, h: 2160 })).unwrap(),
+            serde_json::to_string(&RenderScale::Ratio(0.5)).unwrap(),
+            serde_json::to_string(&PortType::LinearRgbaF16).unwrap(),
+            serde_json::to_string(&TilePrecision::F32).unwrap(),
+        ];
+        assert_eq!(
+            serde_json::from_str::<Extent>(&vals[0]).unwrap(),
+            Extent { w: 640, h: 480 }
+        );
+        assert_eq!(
+            serde_json::from_str::<Roi>(&vals[1]).unwrap(),
+            roi(-1, 2, 3, 4)
+        );
+        assert_eq!(
+            serde_json::from_str::<TileCoord>(&vals[2]).unwrap(),
+            TileCoord {
+                tx: 1,
+                ty: 2,
+                scale_q: 64
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<PortType>(&vals[5]).unwrap(),
+            PortType::LinearRgbaF16
+        );
+        assert_eq!(
+            serde_json::from_str::<TilePrecision>(&vals[6]).unwrap(),
+            TilePrecision::F32
+        );
+    }
 }

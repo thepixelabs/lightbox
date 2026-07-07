@@ -4,21 +4,34 @@
 //! Probe nodes for the cache / ROI / parity gates (spec §5; tasks A4, B5, C1,
 //! C8).
 //!
-//! Owner: **A-core** (`test.gain` A4, `test.accum` C8, `test.checker`) and
-//! **C** (`test.blur_r` radius-dependent apron, C1). These are **test-only**
-//! nodes — they never register in the shipping engine. Each implements
-//! [`lightbox_render::ng::RenderNode`]; bodies are stubs until their gate lands.
+//! Owner: **A-core** (`test.gain` A4, `test.checker` A16) and **C**
+//! (`test.blur_r` radius-dependent apron C1, `test.accum` F32 C8). These are
+//! **test-only** nodes — they never register in the shipping engine. Each
+//! implements [`lightbox_render::ng::RenderNode`].
+//!
+//! The GPU kernels for the A-core probes land with the **A-gpu** executor
+//! (merge — CPU/GPU parity is task E6); on the CPU-only path `eval_gpu` returns
+//! a typed error rather than panicking.
 
-use lightbox_render::ng::node::{ParamsSchema, ParamsSchemaRef};
+use std::sync::Arc;
+
+use lightbox_render::ng::node::{NodeFactory, ParamsSchema, ParamsSchemaRef};
 use lightbox_render::ng::{
-    CpuEvalCtx, CpuTileView, GpuEvalCtx, NodeDescriptor, NodeError, NodeId, ParamBlock, PortDecl,
-    PortType, RenderNode, TilePrecision, TileView,
+    CpuEvalCtx, CpuTileView, GpuEvalCtx, KernelSalt, NodeDescriptor, NodeError, NodeId, ParamBlock,
+    PixelBuf, PortDecl, PortType, RenderNode, TilePrecision, TileView,
 };
 
 static SCHEMA: ParamsSchema = ParamsSchema::EMPTY;
 
-/// `test.gain` — multiply each channel by a constant. The cache/tail-invalidation
-/// probe (spec A4/B5). **A4 fills the bodies.**
+fn gpu_deferred(node: &str) -> NodeError {
+    NodeError::Gpu(format!(
+        "{node} GPU kernel lands with the A-gpu executor (merge; parity gate E6)"
+    ))
+}
+
+/// `test.gain` — multiply each colour channel by a constant `gain` param
+/// (default `2.0`), leaving alpha. The cache/tail-invalidation probe (spec
+/// A4/B5). Point-wise, so tiled == untiled trivially.
 #[derive(Default)]
 pub struct GainProbe {}
 
@@ -42,12 +55,11 @@ impl RenderNode for GainProbe {
 
     fn eval_gpu(
         &self,
-        ctx: &mut GpuEvalCtx<'_>,
-        inputs: &[TileView<'_>],
-        params: &ParamBlock,
+        _ctx: &mut GpuEvalCtx<'_>,
+        _inputs: &[TileView<'_>],
+        _params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("A4 (A-core): GainProbe::eval_gpu")
+        Err(gpu_deferred("test.gain"))
     }
 
     fn eval_cpu(
@@ -56,8 +68,38 @@ impl RenderNode for GainProbe {
         inputs: &[CpuTileView<'_>],
         params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("A4/A14 (A-core): GainProbe::eval_cpu")
+        let input = inputs
+            .first()
+            .ok_or_else(|| NodeError::Cpu("test.gain needs one input".to_owned()))?
+            .pixels;
+        let gain = params.get_f64_or("gain", 2.0) as f32;
+        let out = ctx.output();
+        let (w, fmt, bpp) = (
+            out.extent.w,
+            out.format,
+            out.format.bytes_per_pixel() as usize,
+        );
+        out.par_fill_rows(|y, row| {
+            for x in 0..w {
+                let p = input.get_rgba_f32(x, y);
+                let g = [p[0] * gain, p[1] * gain, p[2] * gain, p[3]];
+                PixelBuf::encode_pixel(fmt, &mut row[x as usize * bpp..], g);
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Factory for [`GainProbe`].
+#[derive(Default)]
+pub struct GainFactory {}
+
+impl NodeFactory for GainFactory {
+    fn instantiate(&self) -> Arc<dyn RenderNode> {
+        Arc::new(GainProbe::default())
+    }
+    fn kernel_salt(&self) -> KernelSalt {
+        KernelSalt(blake3::hash(b"test.gain@v1"))
     }
 }
 
@@ -155,10 +197,29 @@ impl RenderNode for AccumProbe {
     }
 }
 
-/// `test.checker` — a source node emitting a checker pattern (no inputs); a
-/// deterministic graph root for tests (spec A16). **A16 fills the bodies.**
+/// `test.checker` — a source node emitting a fixed 2-colour checker (no inputs);
+/// a deterministic graph root for the first golden (spec A16). Cell edge is
+/// [`CheckerProbe::CELL`] pixels; the two colours are scene-linear working
+/// values.
 #[derive(Default)]
 pub struct CheckerProbe {}
+
+impl CheckerProbe {
+    /// Checker cell edge, pixels.
+    pub const CELL: u32 = 8;
+    /// The two scene-linear working colours (RGBA).
+    pub const COLOR_A: [f32; 4] = [0.20, 0.45, 0.70, 1.0];
+    pub const COLOR_B: [f32; 4] = [0.85, 0.15, 0.50, 1.0];
+
+    /// The working colour at pixel `(x, y)`.
+    pub fn color_at(x: u32, y: u32) -> [f32; 4] {
+        if (x / Self::CELL + y / Self::CELL).is_multiple_of(2) {
+            Self::COLOR_A
+        } else {
+            Self::COLOR_B
+        }
+    }
+}
 
 static CHECKER_DESC: NodeDescriptor = NodeDescriptor {
     id: NodeId("test.checker"),
@@ -177,21 +238,47 @@ impl RenderNode for CheckerProbe {
 
     fn eval_gpu(
         &self,
-        ctx: &mut GpuEvalCtx<'_>,
-        inputs: &[TileView<'_>],
-        params: &ParamBlock,
+        _ctx: &mut GpuEvalCtx<'_>,
+        _inputs: &[TileView<'_>],
+        _params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("A16 (A-core): CheckerProbe::eval_gpu")
+        Err(gpu_deferred("test.checker"))
     }
 
     fn eval_cpu(
         &self,
         ctx: &mut CpuEvalCtx<'_>,
-        inputs: &[CpuTileView<'_>],
-        params: &ParamBlock,
+        _inputs: &[CpuTileView<'_>],
+        _params: &ParamBlock,
     ) -> Result<(), NodeError> {
-        let _ = (ctx, inputs, params);
-        unimplemented!("A16 (A-core): CheckerProbe::eval_cpu")
+        let out = ctx.output();
+        let (w, fmt, bpp) = (
+            out.extent.w,
+            out.format,
+            out.format.bytes_per_pixel() as usize,
+        );
+        out.par_fill_rows(|y, row| {
+            for x in 0..w {
+                PixelBuf::encode_pixel(
+                    fmt,
+                    &mut row[x as usize * bpp..],
+                    CheckerProbe::color_at(x, y),
+                );
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Factory for [`CheckerProbe`].
+#[derive(Default)]
+pub struct CheckerFactory {}
+
+impl NodeFactory for CheckerFactory {
+    fn instantiate(&self) -> Arc<dyn RenderNode> {
+        Arc::new(CheckerProbe::default())
+    }
+    fn kernel_salt(&self) -> KernelSalt {
+        KernelSalt(blake3::hash(b"test.checker@v1"))
     }
 }

@@ -217,3 +217,83 @@ All E05 modules are under `crates/lightbox-render/src/ng/`. Every method is an `
 | **F** | `lightbox-core` wiring + `lightbox-cli render` + engine book (docs) + fuzz targets + `scenario.rs` perf harness (F1); **F5 promotes `ng` → crate root, deletes the seed, rewires consumers** |
 | **Scaffold-frozen** (deviation to touch) | `ng/exec/backend.rs` (`trait Backend`, R8 seam) · `ng/tile.rs` (tile currency) |
 | **Retained seed** (no wave owner; F5 deletes) | crate-root `engine.rs node.rs planner.rs gpu.rs pool.rs source.rs error.rs nodes/**` — **do not modify** unless your task explicitly ports from it |
+
+## Wave A — A-core (graph / trait / registry / compiler / engine / CPU / testkit) — 2026-07-07
+
+Branch `e05-core` (worktree). Tasks landed: **A2 A3 A4 A5 A8 A11 A12 A14 A15 A16**. Full five-gate
+exit bar green in the worktree (`build` · `test` · `clippy --all-targets -D warnings` · `fmt --check` ·
+`deny check`); fixtures fetched via `cargo xtask fixtures` (E02 CLI e2e preconditions, unrelated to
+E05). Commit: `E05 Phase A-core: graph/registry/compiler/engine/cpu/testkit + first golden`.
+
+Test coverage added: `ng::types` (roi expand/intersect/tiles + serde), `ng::node::param` (canonical-CBOR
+order-independence property, NaN reject, `-0.0` normalize, schema validation), `ng::node::registry`
+(overlap/edge/open-range resolve, supported_pvs), `ng::graph` (topo/cycle/typed-edge/multi-input/structural-eq),
+`ng::compile` (PV1 topology, unsupported-pv, missing-node, stable topology), `ng::exec::cpu` (gain parity,
+cancel), `ng::engine` (submit<50ms / poll→Complete / cancel-mid-render / unsupported-pv-typed / recompute
+count), `ng::stats`; testkit `compare` (34 Sharma-Wu-Dalal ΔE2000 vectors, PSNR), `corpus`
+(**first single-node golden**, determinism, recipe-fragment parse).
+
+### D-A-core-1 (STRUCTURAL): `TileHandle` gains a CPU payload field (touching the frozen `ng/tile.rs` seam)
+
+**What.** `ng/tile.rs`'s `TileHandle` — a scaffold-frozen empty `#[non_exhaustive]` struct — gains one
+additive private field `cpu: Option<Arc<PixelBuf>>` plus `from_cpu`/`from_cpu_arc`/`cpu`/`cpu_arc`
+accessors, and `PixelBuf` gains real body (alloc, `get/set_rgba_f32`, `encode_pixel`, `par_fill_rows`).
+**Why.** The frozen `Backend` seam threads `TileHandle` between nodes; the A-core CPU backend must carry
+CPU-resident working tiles through it. `tile.rs` is listed as a **"Scaffold-frozen (deviation to touch)"**
+file, so this is expected. **Merge shape.** A-gpu adds its GPU-texture payload as a **second additive
+field** on the same struct (both waves fill the frozen seam disjointly, Risk R8). The merge is a struct-field
+union — a handful of lines, same class as the planned `Cargo.toml`/`lib.rs` union. `Default`/`Clone`/`Debug`
+all stay derivable. **Rollback.** Remove the `cpu` field + accessors; the CPU path is the only consumer.
+
+### D-A-core-2: `ParamBlock` / `ParamsSchema` concretized (A3)
+
+`ParamsSchema { fields: &'static [FieldDecl] }` is const-constructible for `NodeDescriptor`s (`EMPTY`
+preserved); `ParamValue` is `Float(f64)|Int(i64)|Bool(bool)|Text(String)`; `ParamBlock::from_fields`
+validates against the schema, **rejects NaN**, **normalizes `-0.0 → 0.0`**, and encodes **canonical CBOR
+over a sorted (field-order-independent) map** (proptest-pinned). `ParamBlock::hash` (scaffold-tagged B1)
+is implemented here (blake3 over canonical bytes) since the compiler/executor reference it; B1 is a no-op
+verify on merge. Blast radius: `ng/node/param.rs` only; the scaffold's method signatures are unchanged.
+
+### D-A-core-3: Engine renders the CPU path; GPU-backend selection + source upload are merge-wired
+
+- `Engine::new`/`with_compiler` build a **`CpuBackend` for every `BackendPref`** in A-core (`ForceCpu`
+  honored today). GPU-backend selection (build `DeviceCtx` from `dp.current()`, `GpuBackend::new`, fall
+  back to CPU on failure) is a clearly-marked seam in `with_compiler` that **A-gpu wires at merge** — so
+  the A-core worktree is constructible and rendering without a live adapter and never calls an A-gpu stub.
+- `Engine::with_compiler(dp, sp, compiler, cfg)` added (additive to the spec `new`) so **D** can inject
+  extra-PV templates and tests can drive probe graphs; `new` delegates to it after registering PV1.
+- **Source injection**: the compiled graph's source node (`src.decoded`, 0 inputs) produces the working
+  tile; a node with no inputs is evaluated as a generator on the CPU path. The **`SourceProvider` upload**
+  path (`Uploader`, A10) and the **`Canvas`** double-buffer target (A13) are A-gpu — the A-core engine
+  renders `Buffer` targets and returns a typed error for `Canvas`. A worker-thread panic (an A-gpu stub
+  reached on the CPU-only path) is caught and surfaced typed, never aborting the render worker.
+- `Executor::evaluate` threads the `NodeCache` but **does not consult it** (v1 always recomputes; **B**
+  wires content-keyed get/put + tail invalidation). `Executor::with_probe` shares the recompute probe so
+  `Engine::stats` observes the same counters. A v1 placeholder `CacheKey` (node id + graph index) is
+  constructed directly (not via the B2-owned `CacheKey::derive`).
+- `NodeRegistry::supported_pvs` returns the sorted distinct **lower bounds** of registered ranges (the
+  discrete entry-point PVs); `Engine::supported_pvs` reflects the compiler's registered templates.
+
+### D-A-core-4: First golden — `test.checker → test.gain(×2)` on the CPU reference path (A16, the §10.1 E05.1 gate)
+
+The committed golden is `crates/lightbox-render-testkit/goldens/test.gain/pv1/checker-gain.png`
+(64×64 RGBA8), rendered by `Executor` over `CpuBackend` (the CPU reference path, §4.4/R3) and read back
+with a straight linear quantization (no display encoding — that is `xform.display`'s job; the harness holds
+zero color science). PR-blocking test `first_single_node_golden_within_tolerance` compares within
+**ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB** using the self-contained comparators (validated against the 34
+Sharma-Wu-Dalal vectors). Regenerate with `LIGHTBOX_BLESS=1`; a missing golden **fails** (never
+self-certifies). `corpus::run_matrix` (D3) is a thin `map(run_golden)` for D to extend; `run_golden`
+currently renders the checker→gain reference graph (D wires the full case→graph mapping).
+
+### DEFERRED at A-core — wired at the A-gpu merge (nothing faked)
+
+| Item | Why deferred | Lights up when |
+|---|---|---|
+| **A9** 2-node **GPU** readback (`src.decoded → test.gain` on the real Metal device) | needs A-gpu's `GpuBackend`/`TilePool`/`KernelBuilder` (their files, stubbed in this worktree) | A-gpu lands; run single-process on `main` at the merge/verify pass on the real Metal adapter |
+| **E6** CPU/**GPU** parity (ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB) for the probe + engine-owned nodes | same — no GPU backend in the A-core worktree; the comparators + CPU determinism ship and are green | A-gpu GPU backend present at merge; parity asserted on Metal |
+| `Engine::active_backend` (E4), `events` emission (E) | E owns device-lost / degradation | Wave E |
+| `Canvas` target (A13), `SourceProvider` upload (A10), GPU-pref backend select | A-gpu owns the device seam | A-gpu merge |
+
+The CPU path, self-contained ΔE2000/PSNR comparators, and the first golden are **green in the worktree
+now**; the GPU-dependent parity/readback is honestly deferred to the single-process merge on the real
+Metal box, per the disposition above.

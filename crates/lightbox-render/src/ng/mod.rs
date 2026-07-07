@@ -82,12 +82,14 @@ pub use engine::{
     RenderOutput, RenderPriority, RenderRequest, RenderState, RenderTarget, RenderTicket,
 };
 pub use exec::backend::{Backend, BackendEvalRequest};
+pub use exec::cpu::CpuBackend;
 pub use exec::Executor;
 pub use gpu::{DeviceCtx, KernelBuilder, TilePool};
 pub use graph::RenderGraph;
 pub use node::{
-    AuxRequirements, CachePolicy, CpuEvalCtx, GpuEvalCtx, InputRois, KernelSalt, NodeDescriptor,
-    NodeFactory, NodeRegistry, ParamBlock, ParamDelta, ParamHash, PortDecl, PvRange, RenderNode,
+    AuxRequirements, CachePolicy, CpuEvalCtx, FieldDecl, GpuEvalCtx, InputRois, KernelSalt,
+    NodeDescriptor, NodeFactory, NodeRegistry, ParamBlock, ParamDelta, ParamHash, ParamKind,
+    ParamValue, PortDecl, PvRange, RenderNode,
 };
 pub use recover::{DegradeState, RecoverStateMachine};
 pub use sched::{CanvasFrame, JobsHandle, RenderScheduler, ViewState, Zoom};

@@ -58,6 +58,10 @@ pub enum CompileError {
     /// A recipe field references a stage with no node in this PV's template.
     #[error("unknown stage {0:?} for this process version")]
     UnknownStage(String),
+    /// A template was already registered for this process version (append-only;
+    /// old PVs are never replaced — §4.5).
+    #[error("a graph template is already registered for {0:?}")]
+    TemplateAlreadyRegistered(ProcessVersion),
     /// Two edges disagree on [`crate::ng::PortType`] at a connection.
     #[error("port-type mismatch at {at}: {detail}")]
     TypeMismatch {
@@ -111,6 +115,11 @@ pub enum RenderError {
     /// The engine is shutting down; the ticket will never run.
     #[error("render engine is shutting down")]
     ShuttingDown,
+    /// An internal engine invariant was violated (e.g. a compiled graph with no
+    /// single terminal, or a missing upstream tile) — a bug, surfaced typed
+    /// rather than panicked.
+    #[error("internal render error: {0}")]
+    Internal(String),
     /// Cancelled via [`crate::ng::Engine::cancel`] or latest-wins supersession.
     #[error("render cancelled")]
     Cancelled,
