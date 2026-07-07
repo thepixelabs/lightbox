@@ -50,6 +50,13 @@ eframe = { version = "0.35", default-features = false, features = [
   "x11",
 ] }
 ciborium = "0.2"
+# Preset identity (spec §2 / §3.7): `lb:PresetId` is a uuid v4, stable across
+# renames. Already in the graph (transitive); E09 makes it a direct dep. MIT/
+# Apache-2.0 (surface-1 allowlist-clean). Note (E09-deviations E-1): the spec also
+# lists `directories` for the preset config dir, but it pulls `option-ext`
+# (MPL-2.0) which is not on the exhaustive cargo-deny allowlist; E09 resolves the
+# config dir from platform env vars instead (no new license surface).
+uuid = { version = "1", features = ["v4"] }
 # XMP substrate (spec §1.6 / §3.5). The architecture's primary is the Adobe ISO
 # 16684 XMP Toolkit via the `xmp_toolkit` bindings (CTO sign-off, 02-approval.md);
 # the NAMED reversal fallback (§1.6 / Risk R1) is our own RDF/XML behind the same

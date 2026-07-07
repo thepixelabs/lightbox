@@ -38,9 +38,12 @@
 //! [`ParamDelta`]: crate::params::ParamDelta
 
 pub mod cbor;
+pub mod history;
 pub mod leaves;
 pub mod params;
+pub mod preset;
 pub mod recipe;
+pub mod transfer;
 pub mod xmp_map;
 
 // ---- Frozen surface: `lightbox_edit::Recipe` resolves at the crate root, as
@@ -48,6 +51,24 @@ pub mod xmp_map;
 pub use recipe::{Applied, Geometry, GlobalStages, Recipe, RecipeError, RecipeRead, RECIPE_SCHEMA};
 
 pub use params::{group_of, ParamDelta, ParamGroup, ParamId, ParamSubset, ParamValue};
+
+// History vocabulary (spec §3.3). Phase E ships `StepLabel` (the label every
+// durable edit txn carries); Phase B extends this module with the history engine.
+pub use history::StepLabel;
+
+// Presets (spec §3.7 / Phase E): the file-backed store, the preset model, and the
+// pure hover `preview_recipe`.
+pub use preset::{
+    preview_recipe, DevelopPreset, PresetError, PresetId, PresetImportResult, PresetLoadError,
+    PresetMeta, PresetOrigin, PresetStore,
+};
+
+// Settings transfer (spec §3.8 / Phase E): copy/paste buffer + batched sync engine
+// (against the Phase-B `EditSink` seam).
+pub use transfer::{
+    apply_previous, paste_settings, reset_edits, sync_to, CancelFlag, CancelSignal, CommitStep,
+    CopiedSettings, EditSink, NeverCancel, SyncOptions, SyncProgress, SyncReport, TransferError,
+};
 
 // The `crs:`/`lb:` mapping layer (spec §3.6 / Phase D): `Recipe::to_xmp`,
 // `Recipe::read_xmp`, `Recipe::from_lr_crs`, and the `CrsImportReport` seam.

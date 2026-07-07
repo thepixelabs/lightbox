@@ -194,3 +194,103 @@ proptest over fuzzed `crs:` soup for totality.
 sidecar/preset corpus (and asserting per-file expected reports against it) is the
 E16/M4 interop-hardening leg — the mechanism + fixtures here are sufficient for
 E16 to start (the named spill point, spec §5 "T21 corpus breadth").
+
+---
+
+## Phase E — presets & settings transfer (T23–T28)
+
+### E-1 — Config dir resolved from env vars, not the `directories` crate (T23)
+
+**What.** [`preset::default_preset_dir`] resolves `<config>/Lightbox/presets` from
+platform env vars (`HOME`/`Library/Application Support` on macOS, `APPDATA` on
+Windows, `XDG_CONFIG_HOME`/`HOME/.config` elsewhere) rather than the spec §2
+`directories` crate.
+
+**Why.** `directories` is not in the current dependency graph; adding it pulls
+`dirs-sys` → `option-ext`, which is **MPL-2.0** — not on `deny.toml`'s exhaustive
+surface-1 allowlist (MIT/BSD-2/BSD-3/Apache-2.0/Unicode-3.0/ISC). Adding a global
+allowlist entry requires a licensing-review PR (the file says so), and a scoped
+per-crate exception for weak-copyleft is a licensing decision outside this phase's
+authority. The env-var resolution is functionally equivalent for the preset store,
+adds **zero** new license surface, and keeps `cargo deny` green. Reversal: if the
+owner wants `directories`, it is a one-function swap behind `default_preset_dir`
+plus the licensing-review PR.
+
+### E-2 — `StepLabel` shipped in `lightbox_edit::history` ahead of Phase B (T25)
+
+**What.** Phase E defines [`history::StepLabel`] (spec §3.3) — a pure leaf enum the
+preset/transfer engines stamp onto steps. The **rest** of `lightbox_edit::history`
+(the `recipe_at`/`list`/`clear` engine, keyframe replay, `HistoryStepMeta`) is
+**Phase B (T5–T9), not present in this worktree**.
+
+**Why / action for Phase B.** Phase E's public surface (`sync_to`, the apply
+paths) is typed on `StepLabel`, so it must exist for the crate to compile and be
+testable now. Phase D already referenced `StepLabel::XmpRead` (deviations D-2).
+Phase B **extends `history.rs` in place and reuses this exact enum** — it must not
+redefine it. (If Phase B is authored on a parallel branch, this is the merge
+reconciliation point.)
+
+### E-3 — Preset delete is a permanent remove, not OS trash (T24)
+
+**What.** [`PresetStore::delete`] performs `fs::remove_file`, not an OS-trash move.
+
+**Why.** T24 says "OS trash where available", but no trash crate is on the vetted
+§2 dep list; a `trash` dependency needs its own licensing/platform review (it pulls
+platform frameworks). The seam is one function; wiring a vetted trash crate later
+is additive and changes no caller. **DEFERRED** with that trigger.
+
+### E-4 — Transfer engine written against an `EditSink` seam, not `EditStore` (T27)
+
+**What.** The spec signature is `sync_to(store: &EditStore, …)`, but `EditStore`
+is a **Phase B** type absent here. The engine ([`transfer::sync_to`] and the
+apply paths) is written against a minimal [`transfer::EditSink`] trait
+(`recipe_of` + `commit_batch` = one WAL txn). A local [`transfer::CancelFlag`] /
+[`transfer::CancelSignal`] provides cooperative cancellation without pulling the
+`lightbox-jobs` (tokio) runtime into `lightbox-edit` (which would grow
+render/shell's graph, cf. A-2/D-3).
+
+**Why.** This keeps the genuinely-Phase-E logic — ~64/txn batching, one step per
+target, progress events, cancel-between-chunks, "Previous" semantics — **real and
+fully unit-tested now** against an in-memory fake sink, while the DB binding stays
+Phase B's. Phase B's `EditStore` implements `EditSink` (or the dispatcher adapts in
+a few lines) and passes a `CancelFlag` driven by the E06 `CancelToken`.
+
+### E-5 — Command-bus / CLI / kill-9 legs of T25/T27/T28 DEFERRED to Phase B
+
+**What.** These T25/T27/T28 items depend on Phase B artifacts that do **not exist
+in this worktree** (no `EditStore`/`EditHub`, no `Command::Edit` dispatcher, no
+catalog edit DAOs, no `lightbox-cli edit/preset/xmp` subcommands — only the 0003
+migration SQL landed):
+
+- the `Command::Edit(ApplyPreset / PasteSettings / ResetEdits / ApplyPrevious /
+  SyncSettings)` **dispatcher arms** and the core-held `CopiedSettings` / "Previous"
+  buffer wiring;
+- the **full `lightbox-cli` E2E scenario** (import → gestures → history walk →
+  snapshot → preset create/apply → LR import → xmp write → fresh open → xmp read →
+  equality + divergence → kill-9 leg);
+- the **500-target-against-SQLite** criterion number and the commit-txn/`recipe_at`
+  perf rows (need the catalog DAOs).
+
+**What ships instead (real, tested).** The complete file-backed `PresetStore`
+(create/rename/delete/export/import, cold scan, refresh, quarantine), the pure
+`preview_recipe`, `CopiedSettings`, and the batched transfer engine — all exercised
+end-to-end at the crate layer in `tests/preset_transfer_e2e.rs` against the on-disk
+store and the in-memory `EditSink`. The perf ACs measurable without the DB are met
+(criterion `preset_transfer` bench: cold-scan 500 ≈ 55 ms < 100 ms; in-memory sync
+500 ≈ 0.7 ms « 1 s). Phase B wires the deferred legs onto this surface with no
+change to the Phase-E types.
+
+### E-6 — Criterion benches ship; the nightly perf-dashboard wiring is DEFERRED
+
+**What.** `benches/preset_transfer.rs` (criterion) ships `preset_cold_scan_500` and
+`sync_500_targets`. Uploading these into the **nightly perf dashboard / lbx-perf
+baseline** is DEFERRED-to-nightly (as the task directs) — it is CI plumbing, not
+shipped code.
+
+### E-7 — T28 rustdoc pass fixed 8 pre-existing broken intra-doc links in `xmp_map`
+
+**What.** The T28 "cargo doc clean" pass surfaced 8 `rustdoc::broken_intra_doc_links`
+warnings in the Phase-D `xmp_map/mod.rs` module docs (`[`Recipe::…`]`/`[`XmpDoc`]`
+referenced from a module that does not import those names). Phase E fully-qualified
+them (`crate::Recipe::…`, `lightbox_meta::xmp::XmpDoc`); `RUSTDOCFLAGS="-D warnings"
+cargo doc -p lightbox-edit` is now clean. No runtime code changed.

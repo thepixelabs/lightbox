@@ -11,6 +11,15 @@ for every §3.2 recipe field, the corresponding Adobe Camera Raw / Lightroom
 E16 extends this table for the M4 honor-LR-sidecar-on-open flow; it never forks
 it.
 
+> **Review status (T28 / DoD §9.7).** Walked and confirmed at the E09 Phase-E
+> gate against the shipped `FIELD_TABLE`, `to_xmp`/`from_lr_crs`, and the Phase-E
+> preset-import present-key subset detection (which consumes the same field paths):
+> every §3.2 global/geometry field is classified, and the skipped-by-design set
+> (masks/retouch, PV≤2 tone, administrative flags) is complete. The formal
+> cross-epic sign-off named in DoD §9.7 (**E16 owner + one pixel-stream engineer**)
+> is **DEFERRED** — those roles are not present in this execution context; the
+> document is stable and ready for that sign-off (recorded in `E09-deviations.md`).
+
 ## Scope and the two directions
 
 Lightbox owns this mapping **regardless of the XMP substrate** (architecture

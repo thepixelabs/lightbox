@@ -4,13 +4,13 @@
 //! The `crs:`/`lb:` mapping layer (spec §3.6 / Phase D) — the part Lightbox owns
 //! **regardless of the XMP substrate** (§1.6).
 //!
-//! - [`Recipe::to_xmp`] — a projection (read-only materialization, §3.1): full
+//! - [`crate::Recipe::to_xmp`] — a projection (read-only materialization, §3.1): full
 //!   recipe → `lb:` (schema-versioned, CBOR-faithful) **plus** best-effort `crs:`
 //!   compatibility fields for Lightroom readers **plus** `xmp_passthrough` foreign
 //!   fields re-emitted verbatim.
-//! - [`Recipe::read_xmp`] — read our own sidecar: `lb:` primary; a `crs:`-only doc
-//!   falls through to [`Recipe::from_lr_crs`].
-//! - [`Recipe::from_lr_crs`] — the `crs:` read **mechanism** (Risk 9): total, never
+//! - [`crate::Recipe::read_xmp`] — read our own sidecar: `lb:` primary; a `crs:`-only doc
+//!   falls through to [`crate::Recipe::from_lr_crs`].
+//! - [`crate::Recipe::from_lr_crs`] — the `crs:` read **mechanism** (Risk 9): total, never
 //!   fails on unknown fields (they land in `xmp_passthrough` + `report.skipped`),
 //!   with a per-field [`CrsImportReport`]. E09 wires it into preset import + the
 //!   explicit `ReadMetadata` command; the sidecar-honoring OPEN flow and legacy-PV
@@ -41,7 +41,7 @@ pub mod lb {
     pub const CREATOR_TOOL: &str = "CreatorTool";
 }
 
-/// Provenance context for [`Recipe::to_xmp`] (spec §3.6).
+/// Provenance context for [`crate::Recipe::to_xmp`] (spec §3.6).
 #[derive(Clone, Copy, Debug)]
 pub struct XmpWriteCtx<'a> {
     /// App version string, emitted as `lb:CreatorTool`.
@@ -68,16 +68,16 @@ pub enum XmpMapError {
     Malformed(String),
 }
 
-/// Which namespace a [`Recipe::read_xmp`] result was reconstructed from.
+/// Which namespace a [`crate::Recipe::read_xmp`] result was reconstructed from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum XmpSource {
     /// The authoritative `lb:` full-fidelity payload (exact).
     Lb,
-    /// A foreign `crs:` doc, imported via [`Recipe::from_lr_crs`].
+    /// A foreign `crs:` doc, imported via [`crate::Recipe::from_lr_crs`].
     Crs,
 }
 
-/// The result of reading a recipe out of an [`XmpDoc`] (spec §3.6).
+/// The result of reading a recipe out of an [`lightbox_meta::xmp::XmpDoc`] (spec §3.6).
 #[derive(Clone, Debug)]
 pub struct RecipeFromXmp {
     /// The reconstructed recipe.

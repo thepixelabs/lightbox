@@ -23,8 +23,11 @@ serde.workspace = true
 # CBOR is the authoritative recipe serialization (spec §3.2 / T3). Deterministic
 # hand-built encode over ciborium::value::Value (deviations A-3).
 ciborium.workspace = true
-# xxh3-128 canonical_hash — big-endian per the E01 pin convention (T4).
+# xxh3-128 canonical_hash — big-endian per the E01 pin convention (T4); also the
+# stable path-derived id for foreign preset files (Phase E / T23).
 twox-hash.workspace = true
+# Preset identity (spec §3.7 / T23): `lb:PresetId` uuid v4, stable across renames.
+uuid.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -32,6 +35,17 @@ proptest.workspace = true
 # `CrsImportReport` is a serde `Serialize` seam (spec §3.6); the Phase D tests
 # assert it serializes for the E08/E16 fidelity-surfacing consumers.
 serde_json.workspace = true
+# Phase E temp preset stores / sidecar round-trip tests.
+tempfile.workspace = true
+# Phase E perf micro-benches (T28; nightly perf harness). The nightly
+# perf-dashboard wiring is DEFERRED (E09-deviations E-6).
+criterion.workspace = true
+
+# Preset cold-scan (500 files < 100 ms) + settings-sync (500 targets < 1 s)
+# micro-benches (spec §6 perf table / T27 / T28).
+[[bench]]
+name = "preset_transfer"
+harness = false
 
 [lints]
 workspace = true
