@@ -465,3 +465,82 @@ worktree `a9_gpu_backend_src_decoded_copies_source` proved only the backend in i
 `lightbox-render-testkit corpus::tests::first_single_node_golden_within_tolerance` passes against
 the committed `goldens/test.gain/pv1/checker-gain.png` within ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB (CPU
 reference path, landed by A-core; unaffected by the merge). PR-blocking golden gate live.
+
+## Phase B — E05.2 content-keyed cache & tail invalidation — 2026-07-07 (branch `e05-b`)
+
+Phase B (B1–B8) implements the content-keyed cache, tail invalidation, the source-stage RAM pin,
+latest-wins scheduling coalescing, and cache integrity under cancellation. It owns `cache/` (real
+impl), the `CacheKey` derivation + propagation, and the scheduler's coalescing; it necessarily
+touched a few adjacent files to wire those through (each noted below; all coordinated with the R8
+`exec ↔ cache/compile` seam the spec §7 flags as jointly owned).
+
+### Files touched beyond `cache/` + `sched/`
+
+- **`graph/mod.rs` (A-core file, extended by B).** `NodeEntry` gains a per-node `KernelSalt`;
+  `add_node_full(node, params, salt)` + a `salt(idx)` accessor added; `add_node`/`add_node_with_params`
+  default the salt to a stable hash of the node id. The content key (spec §3.5) needs a per-node salt
+  and the graph is its natural carrier. Structural-equality + existing tests are unaffected (they
+  ignore the salt).
+- **`compile/mod.rs`.** The compiler now stamps the registered kernel salt (`registry.kernel_salt(id,
+  pv)`, already present) onto each graph node via `add_node_full`. Without this the salt ingredient
+  would be dead; wiring it also readies D4's salt-discipline gate. This is a cache-derivation concern
+  that lives in D-owned `compile/`; it is additive (2 lines) and does not touch per-PV template
+  selection.
+- **`exec/mod.rs` (B2/B5/B7).** Replaced the placeholder key with the real §3.5 `CacheKey::derive` +
+  forward propagation through the topo walk; the walk now consults the cache (hit ⇒ serve + skip
+  eval; miss ⇒ eval + `put`). `Executor::evaluate` gains a `pv: ProcessVersion` param and the source
+  argument becomes `Option<SourceInject { idx, tile, key }>` (extends the earlier A-gpu-merge source
+  tuple). The flat 8-arg signature carries `#[allow(clippy::too_many_arguments)]` — it is the frozen
+  R8 seam and clearer positional than wrapped. **`cache.put` happens only after a successful backend
+  eval**, so a cancelled/failed node never inserts a partial tile (B7).
+- **`engine.rs`.** The `NodeCache` is built with a byte budget from `EngineConfig::vram_budget`
+  (`Bytes(n)` verbatim; `Auto` ⇒ the cache's default 512 MiB cap — adapter probing lands with the GPU
+  device-lost work) and shares the executor's `RecomputeProbe` (VRAM gauge). The source stage is now
+  **pre-checked against the cache** (`peek`) and, on a miss, fetched once and RAM-pinned
+  (`pin_tile(source_key, …, SourceStage)`) — a warm pin means **zero** `SourceProvider::fetch` (B4).
+  `Engine::stats()` merges executor hits/misses/nodes_evaluated with cache evictions/bytes.
+- **testkit `corpus.rs`.** The single `evaluate(..)` call updated for the new `pv` argument (passes
+  `ProcessVersion(1)`); the A16 golden is byte-unchanged (the walk still evaluates every node cold).
+- **`Cargo.toml`.** Dev-deps `blake3` + `criterion` added and a `[[bench]] name = "cache"` entry
+  (B8). No new workspace deps — both are already in the workspace graph (MIT/Apache; `cargo deny`
+  clean).
+
+### Decisions / interpretations (nothing faked)
+
+- **Source-stage key is scale-independent + image-discriminated.** `SourceProvider::DecodedFull`
+  returns the full source regardless of preview scale, so `source_key` folds `(image, pv, kernel_salt,
+  params)` but **not** `scale_q` (RAM pin per image+pv, per open-Q5's "pin at the active scale"
+  spirit). Downstream nodes fold `scale_q` into their own keys, so a scale change still invalidates the
+  tail while the pinned source is reused with zero re-fetch. The B4 engine gate exercises exactly this
+  (render at `Ratio(1.0)` then `Ratio(0.5)`: fetch count stays 1, downstream recomputes) — the M1
+  `Recipe` carries no develop params yet (E09), so the literal per-node **param** change is proven at
+  the executor level (B2/B5), and the engine-level B4 proof uses a downstream-invalidating render.
+- **In-flight pinning** is realized by `TileHandle`'s `Arc` backing: a returned `CachedTile` keeps its
+  tile alive even if the map entry is later evicted, so a render in flight never loses a tile it is
+  consuming; `get` also LRU-touches. The explicit RAM pin tier is the non-evictable set (its bytes are
+  unbudgeted). An entry whose cost alone exceeds the budget is **never admitted**, keeping the
+  "budget never exceeded" invariant strict (proven by a 5 000-op randomized fuzz).
+- **B6 coalescing** is proven in two layers: the pure `Coalescer` state machine deterministically
+  bounds a 1 000-update burst to ≤ 2 dispatches with final-wins (unit test), and an engine-level
+  integration test drives a 200-call `set_recipe` burst against a ~12 ms render ⇒ **≤ 2 engine
+  submissions** and the **final** request's sequence wins (`tests/ng_cache.rs::b6_…`). The
+  `RenderScheduler` drives `Buffer`-target renders on a background thread; observable via
+  `submissions()` / `last_output()`.
+- **`RenderScheduler::canvas()` stays A13/A-gpu + F5.** The GPU canvas double-buffer publisher needs
+  the shell's shared device (not available at `RenderScheduler::new(engine, jobs)`); the B6 coalescing
+  mechanism is fully wired and headless-provable without it. `canvas()` remains the A13/F5 stub.
+- **B8 benches** compile and run reduced locally (`cargo bench -p lightbox-render`: `full_graph_cold`
+  vs `tail_only_warm` vs `slider_churn_last_node`). Per §8 the p95/regression baseline is the nightly
+  job (perf regressions tracked, not PR-blocking); no perf number is recorded here as a gate.
+
+### Gate status (worktree, single-process on this Metal box)
+
+- **B5 tail-invalidation gate (PR-blocking, §10.1 E05.2): GREEN** —
+  `tests/ng_cache.rs::b5_tail_invalidation_recompute_probe_chain`: on a 6-node chain, changing node k
+  evaluates exactly the tail and the upstream all cache-hit (plus the source-node edge case: changing
+  the source re-keys the whole chain). B2 (chains **and** diamonds), B4 (zero re-fetch), B6 (≤ 2
+  submissions + final-wins), B7 (poisoning fuzz == never-cancelled reference) all green.
+- Exit bar in the worktree: `build`, `clippy -D warnings`, `fmt --check`, `deny check` all green;
+  `cargo test --workspace` green **except** the pre-existing `lightbox-cli/tests/e02_e2e.rs` cases,
+  which require the downloaded fixture corpus (`cargo xtask fixtures`) — an environmental precondition
+  unrelated to Phase B (they pass on `main` where fixtures are present; B touches no CLI/decode code).

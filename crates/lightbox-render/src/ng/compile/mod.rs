@@ -23,7 +23,7 @@ use lightbox_types::ImageId;
 use crate::ng::colorimetry::{SourceColorimetry, SourceKind};
 use crate::ng::error::CompileError;
 use crate::ng::graph::RenderGraph;
-use crate::ng::node::NodeRegistry;
+use crate::ng::node::{KernelSalt, NodeRegistry, ParamBlock};
 use crate::ng::nodes::{
     decoded::SrcDecodedNode, display::XformDisplayNode, resize::UtilResizeNode,
 };
@@ -159,7 +159,16 @@ impl RecipeCompiler {
                 .registry
                 .resolve(stage_id, pv)
                 .ok_or(CompileError::NodeNotRegistered { id: stage_id, pv })?;
-            let idx = graph.add_node(node);
+            // Stamp the registered kernel salt onto the graph node so the
+            // content key (spec §3.5) flips when a shipped kernel changes
+            // (task B2; the salt-discipline gate is D4). A resolvable node
+            // always has a salt, but fall back to the id-derived default rather
+            // than panicking if the two seams ever disagree.
+            let salt = self
+                .registry
+                .kernel_salt(stage_id, pv)
+                .unwrap_or_else(|| KernelSalt(blake3::hash(stage_id.0.as_bytes())));
+            let idx = graph.add_node_full(node, ParamBlock::default(), salt);
             if let Some(prev_idx) = prev {
                 // Wire the upstream output into this stage's (single) input port.
                 let to_port = graph.node(idx).descriptor().inputs.first().map(|p| p.name);
