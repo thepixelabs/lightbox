@@ -12,6 +12,19 @@ publish.workspace = true
 
 [dependencies]
 lightbox-types.workspace = true
+# `Recipe::default_for(pv, &AssetProbe)` is a frozen §3.2 seam signature; AssetProbe
+# is owned by lightbox-decode. See E09-deviations.md A-2 for the transitive-weight note.
+lightbox-decode.workspace = true
+serde.workspace = true
+# CBOR is the authoritative recipe serialization (spec §3.2 / T3). Deterministic
+# hand-built encode over ciborium::value::Value (deviations A-3).
+ciborium.workspace = true
+# xxh3-128 canonical_hash — big-endian per the E01 pin convention (T4).
+twox-hash.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

@@ -1813,7 +1813,13 @@ dependencies = [
 name = "lightbox-edit"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
+ "lightbox-decode",
  "lightbox-types",
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+ "twox-hash",
 ]
 
 [[package]]
