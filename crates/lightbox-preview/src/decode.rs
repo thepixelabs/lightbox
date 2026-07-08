@@ -152,6 +152,10 @@ pub(crate) fn open_pixels(
     max_long_edge: Option<u32>,
 ) -> Result<DecodedPreview, PreviewError> {
     let abs = store.resolve(&desc.store_path);
+    // Phase F (T19): hold the store's live-read guard across the actual file
+    // read so a concurrent eviction pass never unlinks this exact file out
+    // from under us (`Store::unlink_tracked` checks `is_referenced` first).
+    let _read_guard = store.begin_read(&desc.store_path);
     let bytes = read_stored(&abs)?;
     let (px, w, h) = decode_for_display(&bytes, orientation, max_long_edge)?;
     Ok(DecodedPreview {

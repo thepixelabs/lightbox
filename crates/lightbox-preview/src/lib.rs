@@ -45,6 +45,25 @@ mod rawcache;
 mod sched;
 mod service;
 mod store;
+// E03 Phase F (T20): the T2 tiled preview store — tile addressing, manifest,
+// aggregate accounting, and a synthetic producer for tests (E05 supplies the
+// real one at M1+).
+mod t2;
+// E03 Phase F (T20) AC: "manifest survives kill-loop" — a real SIGKILL
+// crash-loop test, kept as its own module (not `tests/`) so it can drive
+// `t2::ensure_t2_synthetic`/`t2_tile_read` directly without widening this
+// crate's public API just for a test harness.
+#[cfg(test)]
+mod t2_crash_loop;
+// E03 Phase F (T19): eviction/retention (tier order, refcount-before-unlink).
+mod evict;
+// E03 Phase F (T21): journaled relocate.
+mod relocate;
+// E03 Phase F (T22): the hot thumbnail atlas (`thumbcache.sqlite`, a
+// separate, delete-safe SQLite DB — NOT the catalog).
+mod thumbs;
+// E03 Phase F (T21): verify_store(Quick|Full) + PurgeScope.
+mod verify;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,9 +79,11 @@ pub use error::StoreError;
 pub use index::{now_unix_seconds, PreviewIndex};
 pub use pyramid::{
     derive_store_key, t0_rel_path, t1_rel_path, t2_rel_dir, PreviewColorspace, PreviewDesc,
-    PreviewScope, PreviewSource, ProducerId, RelPath, StoreKey, Tier, VariantHash, VariantParams,
-    VARIANT_PARAMS_ENC_VER,
+    PreviewScope, PreviewSource, ProducerId, RelPath, StoreKey, Tier, TierSet, VariantHash,
+    VariantParams, VARIANT_PARAMS_ENC_VER,
 };
+// E03 Phase F (T20): the T2 tile store's public vocabulary.
+pub use t2::{EncodedTile, TileCoord, TileGrid};
 // E03 Phase E (T17/T18): the raw decode cache (spec §3.3/§5.4).
 pub use rawcache::{
     EvictReport, PlanarBuf, PlaneData, RawCache, RawCacheError, RawCacheHit, RawCacheKey,
@@ -70,12 +91,20 @@ pub use rawcache::{
 };
 // E03 Phase D (T13): the priority build scheduler (spec §3.4/§5.6).
 pub use sched::{
-    BuildFn, BuildFuture, BuildKey, BuildPriority, BuildRuntime, BulkHandle, EnqueueError,
-    EventSink, PreviewEvent, Scheduler,
+    BuildFn, BuildFuture, BuildKey, BuildPriority, BuildRuntime, BulkHandle, CacheKind,
+    EnqueueError, EventSink, PreviewEvent, Scheduler,
 };
 // E03 Phase D (T14-T16): the `PreviewService` facade (spec §5.2).
 pub use service::{CacheStats, PreviewRequest, PreviewService, PurgeReport, QuickVerifyReport};
 pub use store::{BlobNamespace, BlobRef, BlobStore, Store, StoreManifest, STORE_FORMAT_VERSION};
+// E03 Phase F (T19): eviction/retention/discard report.
+pub use evict::PreviewEvictReport;
+// E03 Phase F (T21): journaled relocation.
+pub use relocate::{ProgressSink, RelocateError, RelocateProgress};
+// E03 Phase F (T22): the thumbnail atlas's payload type.
+pub use thumbs::EncodedThumb;
+// E03 Phase F (T21): verify_store + PurgeScope.
+pub use verify::{PurgeScope, VerifyMode, VerifyReport};
 
 /// Which rendition of an image is being asked for (spec §3.6).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]

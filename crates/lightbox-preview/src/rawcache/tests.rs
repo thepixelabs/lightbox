@@ -446,3 +446,132 @@ fn t18_concurrent_get_put_evict_is_race_free() {
         );
     }
 }
+
+// ── T21: ENOSPC pre-flight ───────────────────────────────────────────────
+
+/// A deterministic, injectable [`DiskSpaceProbe`] — the mechanism that makes
+/// "simulated ENOSPC during build" a real, reproducible test rather than a
+/// root-privileged quota hack.
+struct FakeDiskSpaceProbe {
+    available: std::sync::atomic::AtomicU64,
+}
+
+impl FakeDiskSpaceProbe {
+    fn new(available: u64) -> Arc<FakeDiskSpaceProbe> {
+        Arc::new(FakeDiskSpaceProbe {
+            available: std::sync::atomic::AtomicU64::new(available),
+        })
+    }
+}
+
+impl DiskSpaceProbe for FakeDiskSpaceProbe {
+    fn available_bytes(&self, _path: &Path) -> std::io::Result<u64> {
+        Ok(self.available.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
+fn harness_with_probe(
+    rawcache_cap_bytes: u64,
+    probe: Arc<dyn DiskSpaceProbe>,
+    pressure: Option<EventSink>,
+) -> (tempfile::TempDir, RawCache) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let catalog = Arc::new(Catalog::create(&dir.path().join("t.lbdata")).unwrap());
+    let cfg = PreviewStoreConfig::with_defaults(dir.path().to_path_buf());
+    let store = Arc::new(Store::open(&cfg).unwrap());
+    let limits = CacheLimits {
+        preview_cap_bytes: u64::MAX,
+        rawcache_cap_bytes,
+    };
+    let rc = RawCache::with_probe(store, catalog, limits, 3, probe, pressure);
+    (dir, rc)
+}
+
+/// T21 AC: simulated ENOSPC during a build emits a `CachePressure` event and
+/// a typed [`RawCacheError::DiskFull`] failure — never a panic, never a
+/// torn write (the file must not exist afterward).
+#[test]
+fn t21_simulated_enospc_emits_pressure_and_a_typed_failure_no_panic() {
+    let probe = FakeDiskSpaceProbe::new(1024); // far less than the payload below
+    let events_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ev2 = Arc::clone(&events_seen);
+    let sink: EventSink = Arc::new(move |ev| ev2.lock().unwrap().push(ev));
+    let (_dir, rc) = harness_with_probe(u64::MAX, probe, Some(sink));
+
+    let key = RawCacheKey {
+        content_hash: ContentHash([77; 16]),
+        params_hash: 1,
+    };
+    let meta = sample_meta();
+    let payload = synthetic_payload(1_000_000, 2); // 1 MB >> the fake 1 KiB available
+
+    let err = rc.put(key, meta, PlaneData(&payload)).unwrap_err();
+    assert!(matches!(err, RawCacheError::DiskFull { .. }), "{err:?}");
+    assert!(
+        !rc.contains(&key),
+        "a failed pre-flight must never write anything"
+    );
+    assert!(
+        !rc.store.resolve(&key.rel_path()).exists(),
+        "no torn/partial file must be left behind"
+    );
+
+    let events = events_seen.lock().unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PreviewEvent::CachePressure {
+                kind: CacheKind::RawCache,
+                ..
+            }
+        )),
+        "expected at least one CachePressure event, got {events:?}"
+    );
+}
+
+/// T21 AC (the non-failure half): when the probe reports JUST enough room,
+/// `put` succeeds normally — the pre-flight is not a blanket refusal, only a
+/// genuine-shortage guard.
+#[test]
+fn t21_enospc_preflight_does_not_block_a_write_that_fits() {
+    let probe = FakeDiskSpaceProbe::new(100 * 1024 * 1024); // plenty (well over the 16 MiB margin)
+    let (_dir, rc) = harness_with_probe(u64::MAX, probe, None);
+    let key = RawCacheKey {
+        content_hash: ContentHash([78; 16]),
+        params_hash: 1,
+    };
+    let meta = sample_meta();
+    let payload = synthetic_payload(1024, 3);
+    rc.put(key, meta, PlaneData(&payload)).unwrap();
+    assert!(rc.contains(&key));
+}
+
+/// T21 AC: when eviction alone reclaims enough room, the pre-flight retries
+/// and the write proceeds (never fails just because the FIRST check was
+/// tight) — a rising probe reading simulates "eviction actually freed
+/// space" without needing real disk I/O to observe it.
+#[test]
+fn t21_enospc_preflight_recovers_after_eviction_frees_room() {
+    // A probe that reports "0 available" on the FIRST check (triggering
+    // evict_to_cap) and "plenty" on the re-check — modeling "the eviction
+    // pass itself is what freed room" deterministically, without needing a
+    // real evict to actually reclaim anything from an otherwise-empty cache.
+    struct RisingProbe(std::sync::atomic::AtomicU32);
+    impl DiskSpaceProbe for RisingProbe {
+        fn available_bytes(&self, _path: &Path) -> std::io::Result<u64> {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(if n == 0 { 0 } else { 100 * 1024 * 1024 })
+        }
+    }
+    let rising: Arc<dyn DiskSpaceProbe> =
+        Arc::new(RisingProbe(std::sync::atomic::AtomicU32::new(0)));
+    let (_dir, rc) = harness_with_probe(u64::MAX, rising, None);
+
+    let key = RawCacheKey {
+        content_hash: ContentHash([79; 16]),
+        params_hash: 1,
+    };
+    let payload = synthetic_payload(1024, 4);
+    rc.put(key, sample_meta(), PlaneData(&payload)).unwrap();
+    assert!(rc.contains(&key));
+}

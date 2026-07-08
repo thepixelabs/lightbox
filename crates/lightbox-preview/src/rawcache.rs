@@ -75,8 +75,36 @@ use lightbox_types::ContentHash;
 
 use crate::config::CacheLimits;
 use crate::pyramid::RelPath;
+use crate::sched::{CacheKind, EventSink, PreviewEvent};
 use crate::store::{atomic_write, Store};
 
+/// Free-space probe seam (Phase F, T21 ENOSPC pre-flight). Injectable so
+/// tests can simulate "the disk is full" deterministically without real
+/// quotas/root privileges. [`RealDiskSpaceProbe`] is the production impl.
+pub(crate) trait DiskSpaceProbe: Send + Sync {
+    /// Bytes free on the filesystem backing `path` (a directory that
+    /// exists). Errs only on a genuine OS-level failure to query.
+    fn available_bytes(&self, path: &Path) -> std::io::Result<u64>;
+}
+
+/// Real free-space query. Unix: `statvfs` (via `libc`, already an in-graph
+/// workspace dependency — E02's LibRaw sandbox). Windows: no
+/// `GetDiskFreeSpaceExW` binding exists in this workspace's dependency graph
+/// yet (would need `windows-sys`, not currently pulled in by anything) — this
+/// reports `u64::MAX` ("assume plenty of room") on that platform, which
+/// means the ENOSPC pre-flight is a real, tested mechanism on unix and an
+/// inert no-op on Windows today. Recorded as DEFERRED in
+/// `docs/plan/epics/E03-deviations.md`, Phase F — coding a real Windows probe
+/// is future work, not faked here.
+pub(crate) struct RealDiskSpaceProbe;
+
+impl DiskSpaceProbe for RealDiskSpaceProbe {
+    fn available_bytes(&self, path: &Path) -> std::io::Result<u64> {
+        diskspace::available_bytes(path)
+    }
+}
+
+mod diskspace;
 mod mmap_io;
 
 // ── container format (T17) ──────────────────────────────────────────────
@@ -211,6 +239,12 @@ pub enum RawCacheError {
     Io(#[from] std::io::Error),
     #[error("catalog: {0}")]
     Catalog(String),
+    /// Phase F (T21) ENOSPC pre-flight: even after evicting to cap, the
+    /// filesystem does not report enough free space for this write. Never
+    /// surfaced as a panic or a torn write — `put()` returns this BEFORE
+    /// `atomic_write` is attempted.
+    #[error("disk full: need ~{needed} bytes headroom, {available} available")]
+    DiskFull { needed: u64, available: u64 },
 }
 
 fn encode_header(meta: &RawStageMeta, payload_len: u64) -> [u8; HEADER_LEN] {
@@ -362,13 +396,26 @@ pub struct ReconcileReport {
 pub struct RawCache {
     store: Arc<Store>,
     catalog: Arc<Catalog>,
-    limits: CacheLimits,
+    limits: Mutex<CacheLimits>,
     zstd_level: i32,
     /// Serializes `evict_to_cap` sweeps within this process (spec T18 AC:
     /// "concurrent get/put during eviction is race-free"). Does not protect
     /// against multi-PROCESS eviction races — this store is single-process
     /// per catalog, per architecture §3.1's single-writer model.
     evict_lock: Mutex<()>,
+    /// Phase F (T21): the ENOSPC pre-flight's free-space source. Injectable
+    /// (see [`DiskSpaceProbe`]) so tests can simulate a full disk
+    /// deterministically.
+    probe: Arc<dyn DiskSpaceProbe>,
+    /// Phase F (T21): notified with `PreviewEvent::CachePressure` when a
+    /// `put()` had to evict to make room, or ultimately failed for lack of
+    /// space. `None` (the default via [`RawCache::new`]) is a valid,
+    /// silent no-op sink.
+    pressure: Option<EventSink>,
+    /// Bytes of headroom the pre-flight check demands beyond the payload's
+    /// own compressed size — real filesystems keep reserved blocks/metadata
+    /// overhead; a fixed 16 MiB margin is a simple, conservative default.
+    enospc_margin_bytes: u64,
 }
 
 impl RawCache {
@@ -381,10 +428,47 @@ impl RawCache {
         RawCache {
             store,
             catalog,
-            limits,
+            limits: Mutex::new(limits),
             zstd_level,
             evict_lock: Mutex::new(()),
+            probe: Arc::new(RealDiskSpaceProbe),
+            pressure: None,
+            enospc_margin_bytes: 16 * 1024 * 1024,
         }
+    }
+
+    /// [`Self::new`] plus an injected free-space probe and an optional
+    /// `CachePressure` sink (Phase F, T21). The production path
+    /// (`lightbox-core`'s session wiring) uses [`Self::new`]; tests use this
+    /// to simulate ENOSPC deterministically.
+    pub(crate) fn with_probe(
+        store: Arc<Store>,
+        catalog: Arc<Catalog>,
+        limits: CacheLimits,
+        zstd_level: i32,
+        probe: Arc<dyn DiskSpaceProbe>,
+        pressure: Option<EventSink>,
+    ) -> RawCache {
+        RawCache {
+            store,
+            catalog,
+            limits: Mutex::new(limits),
+            zstd_level,
+            evict_lock: Mutex::new(()),
+            probe,
+            pressure,
+            enospc_margin_bytes: 16 * 1024 * 1024,
+        }
+    }
+
+    /// Runtime cap update (spec §5.6 `SetCacheLimits`). Takes effect on the
+    /// next `evict_to_cap`/`put` call.
+    pub fn set_limits(&self, limits: CacheLimits) {
+        *self.limits.lock().unwrap_or_else(PoisonError::into_inner) = limits;
+    }
+
+    fn limits(&self) -> CacheLimits {
+        *self.limits.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Miss on absent OR checksum-failed (spec §5.4). Never returns `Err`
@@ -437,12 +521,38 @@ impl RawCache {
     /// direction (an on-disk orphan with no row, or — impossible here since
     /// the row upsert happens strictly after the file write — a dangling
     /// row).
+    ///
+    /// **ENOSPC pre-flight (Phase F, T21).** Before touching disk, checks
+    /// [`DiskSpaceProbe::available_bytes`] against the payload's compressed
+    /// size (estimated conservatively as the uncompressed size — zstd only
+    /// ever shrinks) plus [`Self::enospc_margin_bytes`]. If short, evicts to
+    /// cap FIRST (reclaiming space is tried before failing) and re-checks;
+    /// only if STILL short does this return [`RawCacheError::DiskFull`] —
+    /// never a panic, never a torn write (nothing was written yet at that
+    /// point). Either the eviction or the final failure fires
+    /// [`PreviewEvent::CachePressure`] on the configured sink, if any.
     pub fn put(
         &self,
         key: RawCacheKey,
         meta: RawStageMeta,
         planes: PlaneData<'_>,
     ) -> Result<(), RawCacheError> {
+        let estimated_needed = planes.0.len() as u64 + self.enospc_margin_bytes;
+        if let Some(available) = self.available_bytes() {
+            if available < estimated_needed {
+                self.notify_pressure(available);
+                self.evict_to_cap();
+                let available = self.available_bytes().unwrap_or(available);
+                if available < estimated_needed {
+                    self.notify_pressure(available);
+                    return Err(RawCacheError::DiskFull {
+                        needed: estimated_needed,
+                        available,
+                    });
+                }
+            }
+        }
+
         let compressed = compress_container(&meta, planes.0, self.zstd_level)?;
         let rel = key.rel_path();
         let abs = self.store.resolve(&rel);
@@ -463,6 +573,20 @@ impl RawCache {
 
         self.evict_to_cap();
         Ok(())
+    }
+
+    fn available_bytes(&self) -> Option<u64> {
+        self.probe.available_bytes(self.store.root()).ok()
+    }
+
+    fn notify_pressure(&self, _available: u64) {
+        if let Some(sink) = &self.pressure {
+            (sink)(PreviewEvent::CachePressure {
+                kind: CacheKind::RawCache,
+                used_bytes: self.total_bytes(),
+                cap_bytes: self.limits().rawcache_cap_bytes,
+            });
+        }
     }
 
     /// Index-only existence check (spec §5.4) — trusts the catalog, never
@@ -517,7 +641,7 @@ impl RawCache {
         let mut consecutive_races = 0u32;
         const MAX_CONSECUTIVE_RACES: u32 = 8;
         loop {
-            if self.total_bytes() <= self.limits.rawcache_cap_bytes {
+            if self.total_bytes() <= self.limits().rawcache_cap_bytes {
                 break;
             }
             let Some(row) = self

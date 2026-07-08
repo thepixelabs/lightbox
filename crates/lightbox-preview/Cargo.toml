@@ -26,6 +26,18 @@ twox-hash.workspace = true
 uuid.workspace = true
 zstd.workspace = true
 zune-jpeg.workspace = true
+# E03 Phase F (T22): `thumbcache.sqlite` is its OWN store — a separate SQLite
+# DB/connection, deliberately NOT routed through `lightbox-catalog`'s
+# single-writer `Catalog` type (that type IS the main edit/catalog DB; a
+# delete-safe, disposable thumbnail atlas is not part of that invariant).
+# `rusqlite` is already in-graph transitively via `lightbox-catalog`; this is
+# a direct dependency, not a new license/native surface (bundled SQLite
+# amalgamation, public domain — same as the workspace-pinned feature set).
+rusqlite.workspace = true
+# E03 Phase F (T21): `statvfs` for the ENOSPC pre-flight free-space probe
+# (unix only; `rawcache/diskspace.rs`). Already an in-graph workspace
+# dependency (E02's LibRaw sandbox) — no new license/native surface.
+libc.workspace = true
 # T1 JPEG backend (T10) — always available, unconditional dependency. See
 # the workspace Cargo.toml's own comment for the mozjpeg-vs-jpeg-encoder
 # codec reconciliation (measured latency, not a build-failure fallback).

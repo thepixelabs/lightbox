@@ -131,6 +131,26 @@ pub enum PreviewEvent {
     /// a [`BulkHandle::progress`] read gives an authoritative per-session
     /// count regardless).
     BulkProgress { done: u64, total: u64 },
+    /// Phase F (T19): a preview row + (if unreferenced) its file was
+    /// reclaimed by cap-based eviction, the T2 retention sweep, or an
+    /// explicit `DiscardPreviews`. Fired once per evicted row.
+    Evicted { image: ImageId, tier: Tier },
+    /// Phase F (T21): a build (preview or raw-cache) hit disk pressure —
+    /// eviction ran to make room, or, if that still wasn't enough, the build
+    /// failed with a typed error rather than panicking or corrupting
+    /// anything (spec §5.2, the ENOSPC pre-flight AC).
+    CachePressure {
+        kind: CacheKind,
+        used_bytes: u64,
+        cap_bytes: u64,
+    },
+}
+
+/// Which cache a [`PreviewEvent::CachePressure`] event is about (spec §5.2).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum CacheKind {
+    Preview,
+    RawCache,
 }
 
 /// A future the scheduler hands to a [`BuildRuntime`]. No internal `.await`

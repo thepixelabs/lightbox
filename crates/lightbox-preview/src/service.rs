@@ -37,22 +37,28 @@
 //! Recorded in `docs/plan/epics/E03-deviations.md`, Phase D.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lightbox_catalog::Catalog;
 use lightbox_jobs::CancelToken;
 use lightbox_types::ImageId;
 
-use crate::config::PreviewStoreConfig;
+use crate::config::{CacheLimits, PreviewStoreConfig, Retention};
+use crate::evict;
 use crate::index::PreviewIndex;
 use crate::producer;
-use crate::pyramid::{PreviewDesc, RelPath, Tier};
+use crate::pyramid::{PreviewDesc, RelPath, Tier, TierSet, VariantHash};
+use crate::rawcache::{RawCache, RealDiskSpaceProbe};
+use crate::relocate::{self, ProgressSink, RelocateError};
 use crate::sched::{
     BuildFn, BuildKey, BuildPriority, BuildRuntime, BulkHandle, EnqueueError, EventSink, Scheduler,
 };
 use crate::store::Store;
-use crate::{PreviewError, PreviewTicket};
+use crate::t2::{self, TileCoord};
+use crate::thumbs::ThumbCache;
+use crate::verify::{self, PurgeScope, VerifyMode, VerifyReport};
+use crate::{EncodedThumb, EncodedTile, PreviewError, PreviewEvictReport, PreviewTicket};
 
 /// One [`PreviewService::request`] (spec §5.2). No `variant` field — see
 /// `sched.rs`'s `BuildKey` doc comment for why `(image, tier)` is a
@@ -106,10 +112,14 @@ pub struct QuickVerifyReport {
     pub missing_files: Vec<PathBuf>,
 }
 
-/// [`PreviewService::purge_all`]'s report.
+/// [`PreviewService::purge_all`]/[`PreviewService::purge`]'s report.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PurgeReport {
+    /// Preview-pyramid rows deleted.
     pub rows_deleted: u64,
+    /// Phase F (T21): raw-cache rows deleted (`0` unless `scope` included
+    /// `PurgeScope::RawCache`/`All`).
+    pub rawcache_rows_deleted: u64,
 }
 
 struct ServiceInner {
@@ -128,6 +138,23 @@ struct ServiceInner {
     /// viewport-managed image, so `set_viewport` can diff cheaply instead of
     /// re-deriving everything from the scheduler's own state.
     viewport: Mutex<HashMap<ImageId, (PreviewTicket, BuildPriority)>>,
+    /// Phase F: retained so eviction/discard/retention (T19) can publish
+    /// `PreviewEvent::Evicted`/`CachePressure` directly, not just the
+    /// scheduler's own Ready/Failed/BulkProgress stream.
+    events: EventSink,
+    /// Phase F (T19/T21): the preview-pyramid cap; runtime-settable via
+    /// `SetCacheLimits`. The raw cache keeps its OWN copy in sync (see
+    /// `set_limits`) rather than sharing this lock — the two caches are
+    /// evicted independently.
+    limits: Mutex<CacheLimits>,
+    t2_retention: Retention,
+    /// Phase F (T21, closes deviation E-10): the raw decode cache, finally
+    /// composed into the facade the spec's §5.2 `raw_cache()` accessor
+    /// always named. Constructed here (not by the caller) exactly the way
+    /// `RawCache::new`'s signature was left ready for (E-10's own note).
+    raw_cache: RawCache,
+    /// Phase F (T22): the hot thumbnail atlas.
+    thumbs: ThumbCache,
 }
 
 /// The facade `lightbox-core` registers (spec §5.2). Clone-cheap (`Arc`
@@ -163,9 +190,25 @@ impl PreviewService {
             Arc::clone(&store),
             Arc::clone(&catalog),
             Arc::clone(&index),
-            cfg,
+            cfg.clone(),
         );
-        let scheduler = Scheduler::new(rt, build_fn, events);
+        let scheduler = Scheduler::new(rt, build_fn, events.clone());
+
+        // Phase F (T21, closes E-10): the raw cache, wired with the real
+        // free-space probe and this service's own event sink (so a
+        // `CachePressure` event during a raw-cache `put` rides the same
+        // stream as everything else).
+        let raw_cache = RawCache::with_probe(
+            Arc::clone(&store),
+            Arc::clone(&catalog),
+            cfg.limits,
+            cfg.zstd_level,
+            Arc::new(RealDiskSpaceProbe),
+            Some(events.clone()),
+        );
+        // Phase F (T22): thumbcache.sqlite, a sibling of the catalog/store
+        // (spec §3.2's tree) — never fails to open (see `thumbs.rs`).
+        let thumbs = ThumbCache::open(&store.root().join("thumbcache.sqlite"));
 
         Ok(PreviewService {
             inner: Arc::new(ServiceInner {
@@ -174,6 +217,11 @@ impl PreviewService {
                 index,
                 scheduler,
                 viewport: Mutex::new(HashMap::new()),
+                events,
+                limits: Mutex::new(cfg.limits),
+                t2_retention: cfg.t2_retention,
+                raw_cache,
+                thumbs,
             }),
         })
     }
@@ -371,7 +419,195 @@ impl PreviewService {
         std::fs::create_dir_all(&previews_dir)?;
 
         *self.lock_index() = PreviewIndex::empty();
-        Ok(PurgeReport { rows_deleted: n })
+        Ok(PurgeReport {
+            rows_deleted: n,
+            rawcache_rows_deleted: 0,
+        })
+    }
+
+    // ── Phase F (T19): eviction, retention, discard ─────────────────────
+
+    /// Runtime cap update (spec §5.6 `SetCacheLimits`) — updates BOTH this
+    /// service's own preview-pyramid cap and the composed [`RawCache`]'s
+    /// (the two caches are evicted independently, but `SetCacheLimits`
+    /// carries both caps in one [`CacheLimits`] value, spec §5.7).
+    pub fn set_limits(&self, limits: CacheLimits) {
+        *self.lock_limits() = limits;
+        self.inner.raw_cache.set_limits(limits);
+    }
+
+    fn lock_limits(&self) -> std::sync::MutexGuard<'_, CacheLimits> {
+        self.inner
+            .limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// LRU-to-cap eviction, tier order T2 → T1 → T0 (spec §3.2, T19).
+    pub fn evict_to_cap(&self) -> PreviewEvictReport {
+        let cap = self.lock_limits().preview_cap_bytes;
+        evict::evict_to_cap(
+            &self.inner.store,
+            &self.inner.catalog,
+            &self.inner.index,
+            cap,
+            &self.inner.events,
+        )
+    }
+
+    /// T2 age-retention sweep (spec §3.2; `PreviewStoreConfig::t2_retention`,
+    /// default 30 days). `lightbox-core`/a future E06 idle tick is the
+    /// natural periodic caller — this method itself is just the primitive.
+    pub fn sweep_t2_retention(&self) -> PreviewEvictReport {
+        evict::sweep_t2_retention(
+            &self.inner.store,
+            &self.inner.catalog,
+            &self.inner.index,
+            &self.inner.events,
+            self.inner.t2_retention,
+            crate::index::now_unix_seconds(),
+        )
+    }
+
+    /// `DiscardPreviews { images, tiers }` (spec §5.6). See
+    /// [`crate::evict::discard`]'s doc comment for the T0 asset-scope
+    /// sharing note.
+    pub fn discard(&self, images: Vec<ImageId>, tiers: TierSet) -> PreviewEvictReport {
+        evict::discard(
+            &self.inner.store,
+            &self.inner.catalog,
+            &self.inner.index,
+            &self.inner.events,
+            &images,
+            tiers,
+        )
+    }
+
+    /// Retries any paths queued for deferred deletion (Windows sharing
+    /// violations — spec Risk R4, T19). A no-op on platforms that never
+    /// populate the queue. Returns the count removed.
+    pub fn retry_deferred_deletes(&self) -> usize {
+        self.inner.store.retry_deferred_deletes()
+    }
+
+    // ── Phase F (T20): T2 tiled reads ────────────────────────────────────
+
+    /// T2 tile read for the 1:1 loupe (spec §5.2; producer: E05, M1+ — at
+    /// M0 only the synthetic test producer ever populates a T2 row).
+    /// `Ok(None)` for a tile not built yet, or an image with no T2 row at
+    /// all for `variant`.
+    pub fn t2_tile(
+        &self,
+        image: ImageId,
+        variant: VariantHash,
+        tile: TileCoord,
+    ) -> Result<Option<EncodedTile>, PreviewError> {
+        let asset = self
+            .inner
+            .catalog
+            .reader()
+            .image_detail(image)
+            .ok()
+            .map(|d| d.asset);
+        let Some(asset) = asset else { return Ok(None) };
+        let Some(desc) = self
+            .lock_index()
+            .lookup_variant(image, asset, Tier::T2, variant)
+        else {
+            return Ok(None);
+        };
+        t2::t2_tile_read(&self.inner.store, &desc.store_path, tile)
+    }
+
+    // ── Phase F (T22): thumbnail atlas ───────────────────────────────────
+
+    /// Grid fast path: an encoded ~`px`-long-edge thumb from
+    /// `thumbcache.sqlite`, build-through on miss (spec §5.2). `Ok(None)`
+    /// when nothing has been built for `image` at ANY tier yet — this method
+    /// builds an encoded thumb from whatever preview tier already exists, it
+    /// does not itself trigger T0/T1 extraction (that's `request`/
+    /// `bulk_build`'s job). `recipe_rev` is always `0` at M0 (nothing bumps
+    /// it yet — mirrors every embedded-sourced `preview` row's own
+    /// convention), so a warm hit needs no catalog read at all.
+    pub fn thumb(&self, image: ImageId, px: u32) -> Result<Option<EncodedThumb>, PreviewError> {
+        const RECIPE_REV: u64 = 0;
+        if let Some(bytes) = self.inner.thumbs.lookup(image, RECIPE_REV, px) {
+            return Ok(Some(EncodedThumb { bytes, px }));
+        }
+        let Some(desc) = self.best_available(image, 0) else {
+            return Ok(None);
+        };
+        let detail = self
+            .inner
+            .catalog
+            .reader()
+            .image_detail(image)
+            .map_err(|e| PreviewError::Catalog(e.to_string()))?;
+        let decoded =
+            crate::decode::open_pixels(&self.inner.store, &desc, detail.orientation, Some(px))?;
+        let rgb = rgba_to_rgb(&decoded.pixels);
+        let encoded = crate::codec::resolve(crate::config::Codec::Jpeg)
+            .encode(
+                &crate::codec::RgbImage {
+                    px: rgb,
+                    width: decoded.width,
+                    height: decoded.height,
+                },
+                85,
+            )
+            .map_err(|e| PreviewError::Encode(e.to_string()))?;
+        self.inner.thumbs.insert(image, RECIPE_REV, px, 0, &encoded);
+        Ok(Some(EncodedThumb { bytes: encoded, px }))
+    }
+
+    // ── Phase F (T21): raw cache accessor, relocate, purge, verify_store ──
+
+    /// The composed raw decode cache (spec §5.2; closes deviation E-10).
+    pub fn raw_cache(&self) -> &RawCache {
+        &self.inner.raw_cache
+    }
+
+    /// Journaled relocation of the E03-owned cache surfaces to `new_root`
+    /// (spec §5.2/§3.2, T21). See `relocate.rs`'s module doc comment for
+    /// exact scope (previews/rawcache/smartpreview/masks + `store.toml`;
+    /// never the catalog database or `thumbcache.sqlite`) and the
+    /// resumability contract. This call does NOT hot-swap `self` onto the
+    /// new root — the caller reopens a fresh session/service pointed at
+    /// `new_root` afterward (matching the spec's own framing: "config points
+    /// at the new root via the core prefs store").
+    pub fn relocate(&self, new_root: &Path, progress: ProgressSink) -> Result<(), RelocateError> {
+        relocate::relocate(self.inner.store.root(), new_root, &progress)
+    }
+
+    /// Scoped purge (spec §5.6 `PurgeCaches(PurgeScope)`), a fuller sibling
+    /// of [`Self::purge_all`] (which is always `PurgeScope::Previews`, kept
+    /// for the existing CLI/tests — see D-8).
+    pub fn purge(&self, scope: PurgeScope) -> Result<PurgeReport, PreviewError> {
+        let mut report = PurgeReport::default();
+        if matches!(scope, PurgeScope::Previews | PurgeScope::All) {
+            report.rows_deleted = self.purge_all()?.rows_deleted;
+        }
+        if matches!(scope, PurgeScope::RawCache | PurgeScope::All) {
+            report.rawcache_rows_deleted = self
+                .inner
+                .raw_cache
+                .purge_all()
+                .map_err(|e| PreviewError::Catalog(e.to_string()))?
+                .rows_deleted;
+        }
+        Ok(report)
+    }
+
+    /// The spec's fuller `verify_store(Quick|Full)` (T21) — see `verify.rs`'s
+    /// module doc comment. [`Self::verify_quick`] (Phase D, D-8) remains as
+    /// the narrower missing-file-only primitive it always was.
+    pub fn verify_store(&self, mode: VerifyMode) -> VerifyReport {
+        verify::verify_store(
+            &self.inner.store,
+            &self.inner.catalog,
+            &self.inner.index,
+            mode,
+        )
     }
 
     fn lock_index(&self) -> std::sync::MutexGuard<'_, PreviewIndex> {
@@ -501,6 +737,17 @@ fn plan_viewport(
         }
     }
     plan
+}
+
+/// Strips alpha from interleaved RGBA8 (Phase F, T22 — [`PreviewService::
+/// thumb`]'s JPEG re-encode needs [`crate::codec::RgbImage`], which carries
+/// no alpha channel; T0's own convention already carries none either).
+fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        out.extend_from_slice(&px[..3]);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -894,5 +1141,94 @@ mod tests {
         // tests above.
         let elsewhere: Vec<ImageId> = h.images[5..8].to_vec();
         h.service.set_viewport(elsewhere, vec![]);
+    }
+
+    // ── Phase F: the full facade wired together ──────────────────────────
+
+    /// End-to-end proof that T19-T22's additions actually compose through
+    /// `PreviewService`, not just in their own modules' unit tests:
+    /// `thumb()` build-through + warm hit, `raw_cache()`, `discard`,
+    /// `evict_to_cap`, `set_limits`, `verify_store`, and `purge(scope)`.
+    #[test]
+    fn t19_t21_t22_facade_methods_compose_end_to_end() {
+        let h = harness(1, 2);
+        let image = h.images[0];
+
+        let ticket = h
+            .service
+            .request(PreviewRequest {
+                image,
+                tier: Tier::T1,
+                priority: BuildPriority::Visible,
+                allow_embedded: true,
+            })
+            .unwrap();
+        let _ = ticket;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while h.service.best_available(image, 0).is_none() {
+            assert!(Instant::now() < deadline, "T1 build never landed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // T22: thumb() build-through on miss, warm hit returns identical bytes.
+        let thumb1 = h
+            .service
+            .thumb(image, 128)
+            .unwrap()
+            .expect("something to build from");
+        assert!(!thumb1.bytes.is_empty());
+        let thumb2 = h.service.thumb(image, 128).unwrap().unwrap();
+        assert_eq!(
+            thumb1.bytes, thumb2.bytes,
+            "warm hit must return the same bytes"
+        );
+
+        // A never-requested image with nothing built yet: thumb() has
+        // nothing to build FROM, so it is a clean `Ok(None)`, not an error.
+        assert!(h.service.thumb(ImageId(999_999), 128).unwrap().is_none());
+
+        // T21: raw_cache() accessor is live (closes E-10) — a direct
+        // put/get round-trips through the SAME store this service opened.
+        let rc = h.service.raw_cache();
+        let key = crate::rawcache::RawCacheKey {
+            content_hash: lightbox_types::ContentHash([55; 16]),
+            params_hash: 1,
+        };
+        rc.put(
+            key,
+            crate::rawcache::RawStageMeta {
+                payload_schema: 1,
+                width: 4,
+                height: 4,
+                channels: 1,
+                sample: crate::rawcache::SampleFormat::U16,
+                color_state: 0,
+            },
+            crate::rawcache::PlaneData(&[0u8; 32]),
+        )
+        .unwrap();
+        assert!(rc.get(&key).unwrap().is_some());
+
+        // T21: verify_store(Quick) reports a clean store.
+        let quick = h.service.verify_store(VerifyMode::Quick);
+        assert_eq!(quick.missing_files, 0, "{quick:?}");
+
+        // T19: evict_to_cap with a cap of 0 must reclaim the T1 row (T0 too,
+        // since both are over any positive cap).
+        let stats_before = h.service.stats().unwrap();
+        assert!(stats_before.total_count() > 0);
+        h.service.set_limits(CacheLimits {
+            preview_cap_bytes: 0,
+            rawcache_cap_bytes: u64::MAX,
+        });
+        let evict_report = h.service.evict_to_cap();
+        assert!(evict_report.rows_deleted > 0, "{evict_report:?}");
+        assert_eq!(h.service.stats().unwrap().total_count(), 0);
+
+        // T21: purge(RawCache) clears the raw cache without touching an
+        // (already-empty) preview store, and reports it distinctly.
+        let purge_report = h.service.purge(PurgeScope::RawCache).unwrap();
+        assert_eq!(purge_report.rawcache_rows_deleted, 1, "{purge_report:?}");
+        assert!(!h.service.raw_cache().contains(&key));
     }
 }

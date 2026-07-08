@@ -281,6 +281,49 @@ pub fn t2_rel_dir(key: StoreKey) -> RelPath {
     RelPath(format!("previews/{}/{}.t2", key.fanout_hh(), key.to_hex()))
 }
 
+/// Which tiers a Phase F operation targets (spec §5.6
+/// `Command::DiscardPreviews { tiers: TierSet, .. }`). A plain flag triple
+/// rather than a bitflags dependency — three known values, no need for a new
+/// crate.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct TierSet {
+    pub t0: bool,
+    pub t1: bool,
+    pub t2: bool,
+}
+
+impl TierSet {
+    pub const ALL: TierSet = TierSet {
+        t0: true,
+        t1: true,
+        t2: true,
+    };
+
+    /// Everything except the asset-shared T0 (a common "discard the
+    /// heavyweight renditions, keep the cheap embedded badge" choice).
+    pub const RENDERED_ONLY: TierSet = TierSet {
+        t0: false,
+        t1: true,
+        t2: true,
+    };
+
+    pub fn only(tier: Tier) -> TierSet {
+        TierSet {
+            t0: tier == Tier::T0,
+            t1: tier == Tier::T1,
+            t2: tier == Tier::T2,
+        }
+    }
+
+    pub fn contains(self, tier: Tier) -> bool {
+        match tier {
+            Tier::T0 => self.t0,
+            Tier::T1 => self.t1,
+            Tier::T2 => self.t2,
+        }
+    }
+}
+
 /// A resolved preview descriptor (spec §5.1/§5.2) — what
 /// `PreviewService::best_available` (Phase D) returns.
 #[derive(Clone, PartialEq, Eq, Debug)]

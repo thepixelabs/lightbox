@@ -377,6 +377,83 @@ impl ReaderHandle {
         }
         Ok(out)
     }
+
+    // ── Phase F (T19/T21) additions ─────────────────────────────────────
+
+    /// How many `preview` rows currently point at `store_path` (spec §3.2:
+    /// "eviction refcounts `store_path` across index rows before
+    /// unlinking"). At M0 this is almost always 0 or 1 (each `(scope, tier,
+    /// variant)` derives a distinct store key, spec §3.1) but the check is
+    /// cheap and load-bearing the moment two rows ever legitimately share a
+    /// physical file. Backed by `idx_preview_path` (migration 0004).
+    pub fn preview_store_path_refcount(&self, store_path: &str) -> Result<u64> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM preview WHERE store_path = ?1",
+            params![store_path],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// Every row scoped to `image` (T1/T2 — `image_id IS NOT NULL`), any
+    /// tier. Used by `DiscardPreviews`/eviction-by-selection (Phase F, T19).
+    pub fn preview_rows_for_image(&self, image: ImageId) -> Result<Vec<PreviewRow>> {
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT id, asset_id, image_id, content_hash, tier, variant_hash, source, \
+                    recipe_rev, stale, colorspace, store_path, width, height, bytes, \
+                    checksum, built_at, last_used_at \
+             FROM preview WHERE image_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![image.0], map_preview_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Every asset-scope row (T0 — `image_id IS NULL`) for `asset`. T0 is
+    /// shared by every virtual copy of `asset` (spec §3.1); discarding it
+    /// through one image necessarily discards it for all of them — see
+    /// `PreviewService::discard`'s doc comment.
+    pub fn preview_asset_scope_rows(&self, asset: AssetId) -> Result<Vec<PreviewRow>> {
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT id, asset_id, image_id, content_hash, tier, variant_hash, source, \
+                    recipe_rev, stale, colorspace, store_path, width, height, bytes, \
+                    checksum, built_at, last_used_at \
+             FROM preview WHERE asset_id = ?1 AND image_id IS NULL",
+        )?;
+        let rows = stmt.query_map(params![asset.0], map_preview_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Rows at `tier` whose `built_at` predates `built_before_unix` — the T2
+    /// age-retention sweep primitive (spec §3.2: "T2 additionally has an
+    /// age-based retention sweep... default 30 days"). Deliberately keyed on
+    /// `built_at`, not `last_used_at` (unlike LRU eviction): retention is
+    /// "how old is this rendition", not "how recently was it read".
+    pub fn preview_rows_older_than(
+        &self,
+        tier: u8,
+        built_before_unix: i64,
+    ) -> Result<Vec<PreviewRow>> {
+        let mut stmt = self.conn().prepare_cached(
+            "SELECT id, asset_id, image_id, content_hash, tier, variant_hash, source, \
+                    recipe_rev, stale, colorspace, store_path, width, height, bytes, \
+                    checksum, built_at, last_used_at \
+             FROM preview WHERE tier = ?1 AND built_at < ?2",
+        )?;
+        let rows = stmt.query_map(params![i64::from(tier), built_before_unix], map_preview_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 fn map_preview_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PreviewRow> {
