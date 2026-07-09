@@ -53,7 +53,9 @@ mod cpu;
 pub mod group;
 pub mod model;
 mod progress;
+pub mod retry;
 pub mod sched;
+pub mod stage;
 pub mod system;
 mod token;
 
@@ -66,7 +68,9 @@ pub use model::{
     JobSpec, JobState, Outcome, Priority, ProgressStyle,
 };
 pub use progress::{ProgressSink, ProgressView};
+pub use retry::{retry, RetryError, RetryPolicy};
 pub use sched::{JobContext, JobHandle, Scheduler};
+pub use stage::{StageReceiver, StageSender};
 pub use token::{Interrupted, PauseGate};
 
 // E01 seed (frozen surface): still exported at the root under the seed's
