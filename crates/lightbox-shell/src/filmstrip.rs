@@ -21,8 +21,9 @@
 //! * **B4** — [`nav_delta`] (repeatable ←/→, one step per key-repeat
 //!   event), instant scroll-to-active, plain-wheel horizontal scrolling,
 //!   ⌘/⇧-click multi-select retained (dormant) for M2 batch ops. The
-//!   nav-swap latency probe stays where Phase A left it (`LoupeView::
-//!   nav_swap_ms`, surfaced in the F1 overlay); the formal p95 gate is H2.
+//!   nav-swap latency probe stays where Phase A left it (`EditorCanvas::
+//!   nav_swap_ms` as of Phase C, surfaced in the F1 overlay); the formal
+//!   p95 gate is H2.
 //! * **B5** — drag-resize (48–160 pt via the host panel's `size_range`,
 //!   read back into [`FilmstripState`]), collapse toggle
 //!   ([`collapsed_bar_ui`]), and the overflow position indicator

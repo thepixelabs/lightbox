@@ -8,11 +8,11 @@ or a decision the spec left to the implementer is recorded here with its
 rationale. Reference: CLAUDE.md exit-bar rule ("Record spec deviations in
 `docs/plan/epics/<EPIC>-deviations.md`") and the honest-reporting rule.
 
-**E08 is NOT done.** This log covers **Phases A and B** (A: chassis rescope,
-entry intake, working-set view model, replace semantics, the smoke driver,
-and the mandate-v2.2 folder-explorer UI; B: the session filmstrip, B1–B5).
-Phases C–H are separate, later work; do not read this file as epic
-completion.
+**E08 is NOT done.** This log covers **Phases A, B, and C** (A: chassis
+rescope, entry intake, working-set view model, replace semantics, the smoke
+driver, and the mandate-v2.2 folder-explorer UI; B: the session filmstrip,
+B1–B5; C: the editor canvas, C1–C5). Phases D–H are separate, later work; do
+not read this file as epic completion.
 
 ---
 
@@ -434,3 +434,194 @@ if it recurs.
 * **Prefs round-trip for height/collapsed** — Phase G (see the B5 deviation above).
 * **Formal p95 perf gates + `--perf-strip`** — Phase H (H2), per the spec's B4 note.
 * **Batch operations over the multi-selection** — M2; the selection state ships dormant.
+
+---
+
+## Phase C — editor canvas (C1–C5)
+
+`loupe.rs` is retired; `crates/lightbox-shell/src/canvas/{mod,xform,view,states,gizmo}.rs`
+replace it per the spec's own crate-map note. `EditorCanvas` (in `view.rs`) is the `LoupeView`
+successor; `lib.rs` now projects the active working-set entry's `ItemState` into a
+`canvas::CanvasContent` every frame instead of only ever calling the canvas for `Ready` entries.
+
+### C1 — `ViewXform`'s round-trip AC is a deterministic sampled sweep, not `proptest`
+
+**What.** The spec names it a "property test." `canvas/xform.rs`'s
+`round_trip_within_half_a_pixel_across_zoom_pan_orientation` sweeps 4 image sizes × 8
+orientations × 7 zooms × 3 `ppp` values × 3 pans × 6 sample points per image (≈ 6,048 checks)
+deterministically rather than via `proptest` — this crate carries no `proptest` dependency and
+none of E08's own deviations (or E04's — A0-6 cross-reference) have added one. Same convention
+already recorded for this workspace.
+
+**Why.** No behavior gap — the sweep is dense enough to catch any of the 8 orientation
+transforms being wrong (each has a distinct algebraic form; a single mis-signed term would fail
+dozens of the swept cases, not just an unlucky random one). `outside_the_image_maps_to_none` and
+`orientation_swaps_display_dimensions_for_90_and_270` cover the AC's other two clauses directly.
+
+### C1 — `ViewXform` implements the full 8-way EXIF transform now, but the canvas only ever builds it with `Orientation::O1`
+
+**What.** `lightbox-render`'s node graph does not yet apply EXIF orientation to rendered pixels
+— `lightbox-core::render_source`'s own (pre-existing, E05-owned) deviation note says this is
+explicitly E11's job, deferred past M1. `canvas/view.rs`'s `ready_ui` therefore always constructs
+`ViewXform::new(..., Orientation::O1, ...)` — image space and display space coincide for every
+image in this build, exactly matching the pre-Phase-C loupe's behavior (which had no orientation
+concept at all).
+
+**Why / impact.** `ViewXform` is still built as the general, correct, 8-orientation-tested type
+the spec's §6.4/§6.6 "one authority for compositing AND gizmos" language calls for — so Phase F's
+gizmo hit-testing and a future E11 landing won't need `ViewXform` itself to change, only the
+`Orientation::O1` literal in `view.rs` to become the entry's real effective orientation. No
+regression: a raw file with a non-identity EXIF orientation displays exactly as unrotated as it
+did before this phase (a known, pre-existing, already-recorded gap — not new here).
+
+### C2 — the engine submit key deliberately excludes `ZoomMode`
+
+**What.** `RenderScheduler::to_request` (`lightbox-render`, unchanged by this phase) builds every
+`RenderRequest` with `scale: RenderScale::Fit(view.viewport)` and never reads
+`ViewState::zoom`/`ViewState::pan` — the engine always renders "fit to the submitted viewport
+pixels"; zoom/pan are entirely display-side crops of that texture. The pre-Phase-C loupe's
+`SubmitKey` included its (then-binary) zoom mode anyway, forcing one wasted resubmit on every
+Fit↔100% toggle for zero rendering benefit (both branches sent the same `Zoom(1.0)` — dead code).
+C2/C3's `SubmitKey { image, out, recipe_rev }` drops it: zoom/wheel-ladder changes never touch
+the engine at all, only `ViewXform`/pan math.
+
+**Why / impact.** Fewer wasted engine submits during a zoom-ladder walk (every wheel step
+previously would have forced a full re-render under the old key shape; now zero). No behavior
+loss — the spec's "latest-wins per-viewport coalescing unchanged" is about the scheduler's own
+mechanism (untouched), not about which shell-side state the shell chooses to key its submits on.
+Consistent with `E05-deviations.md`'s already-recorded "Phase-C tiling not yet wired into live
+`Engine::submit`" note — the render request genuinely doesn't vary with zoom yet at the engine
+level, so keying on it would be dishonest busywork.
+
+### C3 — `RecipeSource`/`SessionRecipeSource` seam, not a literal `EditBinding` (by design — spec's own instruction)
+
+**What.** The spec explicitly asks Phase C to "build C3 against a small `RecipeSource` trait /
+test double so Phase E slots in cleanly," reserving the real `EditBinding` gesture contract
+(preview-while-dragging, `begin/preview/end_gesture`) for Phase E. `canvas::view::RecipeSource`
+is that trait (`recipe_for(&mut self, image) -> RecipeSnapshot { recipe, pv, rev }`); the
+production implementation, `SessionRecipeSource`, wraps E09's **persisted** `EditStore::recipe_of`
+(not the in-memory `EditHub::working_recipe` a live gesture would use) with the exact same
+dirty-flag caching discipline `filmstrip::EditedBadges` already uses for the `edit_index`
+projection (§7 "no per-frame SQL"): a read happens only the first time an image is seen, or after
+`lib.rs` marks it dirty on `Event::EditCommitted`. `Event::EditWorkingChanged` (the in-memory,
+DB-free per-gesture signal — nothing fires it yet since no UI issues gestures) is deliberately
+**not** wired to mark anything dirty here: it reflects state the persisted store hasn't caught up
+to yet, so acting on it would just cause a wasted `recipe_of` read returning the same value.
+
+**Why / impact.** Exactly the seam the spec asked for. Phase E's `EditBinding` adapter can either
+implement `RecipeSource` directly (trivial — `recipe_for` becomes a cheap read of the in-memory
+working `Arc<Recipe>` plus its own rev counter) or `EditorCanvas`'s call site can grow a second
+parameter; either way nothing in `submit_if_changed`/`ViewXform`/`ProgressiveDisplay` needs to
+change. Verified end-to-end against a REAL headless (CPU-forced, no GPU) `RenderScheduler` — see
+the testing note below.
+
+### C4 — the tier badge comes from `DecodedImage::tier`, not `Queries::preview_state`/`PreviewService::best_available`
+
+**What.** The spec's §6.4 prose names `best_available` as the tier-badge source
+("tier-badged, exactly like the M0 loupe badges 'embedded preview'"). `best_available` (reachable
+via `Queries::preview_state`, `Session::query().preview_state(image)`) is a **synchronous index
+lookup** — "what's on disk" — a different signal from "what got decoded and is about to be
+composited." `canvas::view::TierPreview` instead requests `PreviewClass::Loupe` through the same
+`PreviewProvider` seam `ThumbCache` already uses, and badges with the `SourceTier` the resulting
+`DecodedImage` actually reports it decoded from. As of this build `SourceTier` has exactly one
+variant, `EmbeddedPreview` (E03's M0-era decode-for-display path — its own doc comment says so:
+"M0: embedded preview only"), so the two signals coincide today and the badge text
+("embedded preview") matches the spec's own example verbatim; `info_overlay`'s match has an
+honest `Some(_) => "preview"` fallback arm for whichever additional tier E03 adds next (`SourceTier`
+is `#[non_exhaustive]`), so this doesn't silently drift when that lands.
+
+**Why / impact.** Avoids a second query surface (`Queries::preview_state`) whose answer could, in
+principle, disagree with what actually got decoded (e.g. an index row exists but the file read
+fails) — badging on the thing that's ACTUALLY about to be shown is the more honest signal, and it
+comes for free from the request the canvas already has to make to get pixels at all. No AC
+impact: the C4 AC is about pixels landing next frame + one swap + the same-image-failure rule, not
+about which specific query backs the badge text.
+
+### C5 — "Failed" vs. "missing" maps to two different `CanvasPlacard` arms driven by two different layers, not one working-set state
+
+**What.** The spec's §6.4/§7 canvas-states language implies a "missing" condition distinct from a
+decode/probe failure. E04's shipped `WorkingSetItem`/`ItemState` exposes only `Failed` (free-text
+`decode_error`, no separate missing-file variant) at the SOURCE level. `canvas::states` therefore
+maps: `CanvasPlacard::SourceFailed` ← the working-set `ItemState::Failed` (probe/hash/registration
+never reached `Ready`); `CanvasPlacard::RenderFailed` ← a `Ready` entry whose render keeps failing
+and has never composited anything yet (exactly §7's "missing file, deleted mid-session → placard
++ badge on next render failure" scenario — the entry itself opened fine, but rendering it now
+fails). The SAME render-failure condition after a good frame already exists is instead the
+stale-frame + non-modal error chip (`ready_ui`), never a placard — per §6.4's explicit rule.
+
+**Why / impact.** No information is lost or conflated — every §7 failure-mode row still has a
+distinct, honest rendering; the mapping is recorded so a reader comparing this code against the
+spec's prose doesn't conclude a "missing" state was skipped. `canvas/states.rs`'s module doc
+comment carries the same note.
+
+### `EditorCanvas::ui`'s real signature diverges from the spec's illustrative §6.4 snippet
+
+**What.** The spec shows `fn ui(&mut self, ui, engine: &Engine, entry: &ReadyEntry, edit: &mut
+dyn EditBinding, gizmos: &mut GizmoLayer) -> Option<CanvasAction>`. The shipped signature is `fn
+ui(&mut self, ui, scheduler: &RenderScheduler, max_tex_dim: u32, content: CanvasContent<'_>,
+recipe_source: &mut dyn RecipeSource, idx: usize, total: usize, device_degraded: Option<&str>) ->
+Option<CanvasAction>` — `scheduler`/`max_tex_dim` are carried forward unchanged from the
+pre-Phase-C `LoupeView::ui` (the real E05-F5 seam, per this phase's explicit "preserve the render
+path" instruction); `content` replaces `entry: &ReadyEntry` because C5 needs the canvas to render
+non-`Ready` states too (§6.4's own canvas-states table); `recipe_source` is C3's seam (see above,
+by design); `idx`/`total` are the nav/info-overlay context the pre-existing loupe already
+threaded through; `device_degraded` is C5's chip driver; **`gizmos: &mut GizmoLayer` is not a
+parameter yet** — `canvas/gizmo.rs` ships only the stub type per this phase's explicit
+instruction ("Leave the gizmo LAYER hook for Phase F… can be a thin stub/seam — Phase F builds
+it"), and Phase F is the one that adds the parameter alongside the real hit-routing/paint-pass
+wiring.
+
+**Why / impact.** Every divergence traces to an explicit instruction in this phase's brief or an
+already-recorded neighbor deviation; nothing here is an accidental drift from the spec.
+
+### Testing note — the GPU texture-registration path (`swap_displayed`) stays smoke-only, not newly unit-tested
+
+**What.** `EditorCanvas::swap_displayed` (`register_native_texture`/`free_texture` against a real
+`eframe::egui_wgpu::RenderState`) is unchanged, verbatim logic carried forward from the
+pre-Phase-C `LoupeView::swap_displayed`, which itself had zero unit/kittest coverage (a
+`RenderState` needs a live-or-headless wgpu device to construct; the pre-Phase-C loupe's only
+verification of this path was `--smoke`). Phase C does not add that coverage either — what it
+DOES add is thorough headless coverage of everything ELSE that used to be entangled with it:
+`submit_if_changed` (C3) is integration-tested against a REAL, CPU-forced (`BackendPref::
+ForceCpu`, no GPU/`RenderState` at all) `RenderScheduler` driving the actual PV1 node graph
+(mirrors `lightbox-render/tests/ng_f5_canvas.rs`'s own `f5_scheduler_without_canvas_stays_on_
+buffer_targets` pattern, reused here); `ProgressiveDisplay` (C4's tier→engine/same-image-failure
+decision core) and `TierPreview` (C4's CPU-decoded-texture request/poll cache, which uses
+`ctx.load_texture` — no GPU needed) are both fully unit-tested headless; `ViewXform`/zoom-ladder/
+pan-clamp/zoom-to-cursor (C1/C2) are pure-function unit/property tests. The actual zero-copy GPU
+swap is exercised for real by `--smoke 60`, manually re-verified this phase on real Metal
+hardware (`adapter="Apple M5 Max"`): `seam-2 smoke: frames=61 texture_swaps=1 filmstrip_shown=true
+seam_proven=true`.
+
+**Why / impact.** Same honest posture the codebase already had for this exact code path before
+this phase — not a new gap introduced by Phase C, and the surface AROUND it (everything Phase C
+actually changed: submit decisions, progressive state, zoom math) is now more thoroughly tested
+than before, not less.
+
+### Pre-existing flake observed once, unrelated to this phase's changes
+
+**What.** One full-workspace `cargo test --workspace` run during Phase C's exit-bar sequence had
+1 failure: `lightbox-preview`'s `t2_crash_loop::kill9_during_t2_builds_leaves_every_present_
+tile_readable` (a real-`SIGKILL` fault-injection test, evidently load/timing-sensitive under full
+workspace parallelism — the same family of flake Phase B's own deviations log and commit
+`76f8a97` already recorded/patched once). Phase C touches nothing in `lightbox-preview`. Re-run in
+isolation immediately after: passed. A second full-workspace run (used for this phase's final
+exit-bar report) was 100% green. Recorded for honesty; owner E03 if it recurs.
+
+### Not built in Phase C (named, not silently skipped)
+
+* **The gizmo layer's real functionality** — `canvas/gizmo.rs` is a stub per this phase's own
+  instruction; Phase F builds `GizmoId`/`HitId`/the `Gizmo` trait/`GizmoLayer`'s hit-routing and
+  paint pass, and adds the `&mut GizmoLayer` parameter to `EditorCanvas::ui`.
+* **Live `EditBinding`/gesture-driven recipes** — Phase E; C3's `RecipeSource` seam is what it
+  plugs into (see above).
+* **EXIF orientation actually applied to composited pixels** — E11 (pre-existing gap, not new
+  here); `ViewXform` is orientation-correct and tested but wired at `Orientation::O1` (see C1
+  above).
+* **`recipe_rev` sourced from anything other than a full recipe equality diff** —
+  `SessionRecipeSource` currently detects "changed" via `Recipe: PartialEq` on the whole decoded
+  recipe (cheap at this scale: one image's recipe, read only on dirty-mark/first-see, never
+  per-frame) rather than a cheaper structural/hash-based revision E09 might expose later; fine for
+  Phase C's scope, worth revisiting if Phase E's live binding needs something cheaper per-keystroke
+  (it will use its own in-memory rev counter instead, per the C3 deviation above, so this doesn't
+  block it).

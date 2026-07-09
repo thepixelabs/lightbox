@@ -33,15 +33,17 @@
 //! geometry, virtualized chrome, §6.3 badges, nav/multi-select,
 //! resize/collapse/overflow polish — see `filmstrip.rs`'s module docs,
 //! including the Phase-G persistence seam for the strip height/collapse
-//! prefs). The canvas keeps rendering exactly as the E01 loupe did (Phase C
-//! generalizes it); the develop-panel rail is a placeholder (Phase E); the
+//! prefs). **Phase C** generalizes the E01/F5 loupe into the `canvas`
+//! module (`ViewXform`, the zoom ladder, recipe-driven submit, progressive
+//! tier→engine display, and canvas states — see `canvas/mod.rs`'s module
+//! docs); the develop-panel rail is still a placeholder (Phase E); the
 //! keymap (Phase D) and prefs store (Phase G) do not exist yet.
 
+mod canvas;
 mod empty_state;
 mod explorer;
 mod filmstrip;
 mod intake;
-mod loupe;
 mod smoke;
 mod thumbs;
 mod working_set;
@@ -54,14 +56,15 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use lightbox_core::{
-    ClosePolicy, Command, Core, CoreConfig, Event, OpenOrigin, OpenRequest, Session,
+    ClosePolicy, Command, Core, CoreConfig, Event, ItemState, OpenOrigin, OpenRequest, Session,
 };
 use lightbox_render::GpuContext;
+use lightbox_types::ImageId;
 
+use crate::canvas::{ActiveEntry, CanvasAction, CanvasContent, EditorCanvas, SessionRecipeSource};
 use crate::empty_state::empty_state_ui;
 use crate::explorer::{ExplorerAction, FolderExplorer};
 use crate::filmstrip::{EditedBadges, FilmstripAction, FilmstripState};
-use crate::loupe::{ActiveEntry, LoupeAction, LoupeView};
 use crate::smoke::SmokeDriver;
 use crate::thumbs::ThumbCache;
 use crate::working_set::WorkingSetView;
@@ -178,7 +181,18 @@ struct LightboxApp {
 
     working_set: WorkingSetView,
     thumbs: ThumbCache,
-    loupe: LoupeView,
+    canvas: EditorCanvas,
+    /// C3 recipe seam: E09's persisted `EditStore::recipe_of`, cached with
+    /// the same dirty-flag discipline `badges` uses (marked dirty on
+    /// `Event::EditCommitted` in `drain_events`). Phase E's live
+    /// `EditBinding` replaces this — `EditorCanvas` doesn't change either
+    /// way (see `canvas::RecipeSource`'s doc comment).
+    recipe_source: SessionRecipeSource,
+    /// `Some(reason)` once `Event::DeviceDegraded` has fired this session
+    /// (spec §7/C5: M0 posture — no device-recovery event exists yet, so
+    /// this is sticky rather than cleared; the full rebuild harness is
+    /// E05.5). Drives the canvas's non-modal corner chip.
+    device_degraded: Option<String>,
     /// B4/B5 strip UI state (selection, height, collapse) — in-session;
     /// Phase G persists height/collapsed (see `filmstrip.rs` module docs).
     filmstrip: FilmstripState,
@@ -188,7 +202,7 @@ struct LightboxApp {
     /// The active image the canvas last rendered — compared each frame so a
     /// change (click/nav/auto-activation) resets zoom/pan exactly once
     /// (mirrors the retired `enter_loupe`'s reset-on-entry behavior).
-    last_shown_image: Option<lightbox_types::ImageId>,
+    last_shown_image: Option<ImageId>,
     status: String,
 
     stats: FrameStats,
@@ -277,11 +291,13 @@ impl LightboxApp {
         }
 
         let thumbs = ThumbCache::new(session.previews());
-        let loupe = LoupeView::new(
+        let canvas = EditorCanvas::new(
             render_state,
             Arc::clone(&outcome),
             &session.render_scheduler(),
+            session.previews(),
         );
+        let recipe_source = SessionRecipeSource::new(session.clone());
         let working_set = WorkingSetView::new(&session);
         Ok(LightboxApp {
             working_set,
@@ -289,7 +305,9 @@ impl LightboxApp {
             events,
             gpu,
             thumbs,
-            loupe,
+            canvas,
+            recipe_source,
+            device_degraded: None,
             filmstrip: FilmstripState::new(),
             badges: EditedBadges::new(),
             explorer: FolderExplorer::closed(),
@@ -337,9 +355,13 @@ impl LightboxApp {
                     // B3: new/changed entries need a fresh badge pull.
                     self.badges.mark_dirty();
                 }
-                Ok(Event::EditCommitted { .. }) => {
+                Ok(Event::EditCommitted { image, .. }) => {
                     // B3: a durable edit may flip an `is_edited` badge.
                     self.badges.mark_dirty();
+                    // C3: the persisted recipe for this image changed —
+                    // the canvas's next `recipe_for` re-reads it (no
+                    // per-frame SQL otherwise, spec §7).
+                    self.recipe_source.mark_dirty(image);
                 }
                 Ok(Event::CommandFailed { error, .. }) => {
                     self.status = format!("command failed: {error}");
@@ -349,6 +371,9 @@ impl LightboxApp {
                 }
                 Ok(Event::DeviceDegraded { reason }) => {
                     self.status = format!("GPU device degraded: {reason}");
+                    // C5: the canvas's non-modal chip (sticky — see the
+                    // `device_degraded` field doc comment).
+                    self.device_degraded = Some(reason);
                 }
                 Ok(_) => {}
                 Err(TryRecvError::Lagged(_)) => {
@@ -386,12 +411,11 @@ impl LightboxApp {
                 self.explorer.open_at(explorer::default_start_dir());
             }
             ui.separator();
-            let zoom_label = match self.loupe.zoom_mode() {
-                loupe::LoupeZoom::Fit => "Fit",
-                loupe::LoupeZoom::OneToOne => "100%",
-            };
-            if ui.button(format!("Zoom: {zoom_label}")).clicked() {
-                self.loupe.toggle_zoom_button();
+            if ui
+                .button(format!("Zoom: {}", self.canvas.zoom_mode().label()))
+                .clicked()
+            {
+                self.canvas.toggle_zoom_button();
             }
 
             ui.with_layout(
@@ -446,7 +470,7 @@ impl LightboxApp {
         let thumb_stats = self.thumbs.stats();
         let frame_p95 = percentile(&self.stats.samples_ms, 0.95);
         let frame_max = self.stats.samples_ms.iter().copied().fold(0.0f32, f32::max);
-        let nav_p95 = percentile(&self.loupe.nav_swap_ms, 0.95);
+        let nav_p95 = percentile(&self.canvas.nav_swap_ms, 0.95);
         egui::Window::new("frame stats")
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 32.0))
             .resizable(false)
@@ -466,7 +490,7 @@ impl LightboxApp {
                 ));
                 ui.monospace(format!(
                     "nav swap   p95 {nav_p95:6.2} ms (n={})",
-                    self.loupe.nav_swap_ms.len()
+                    self.canvas.nav_swap_ms.len()
                 ));
                 ui.monospace(format!(
                     "images     {} (epoch {})",
@@ -565,13 +589,47 @@ impl eframe::App for LightboxApp {
                 ui.weak("Panels land in E08 Phase E.");
             });
 
-        // B4: repeatable ←/→ nav. The loupe owns the arrow keys while a
-        // Ready image is mounted (its T26 handler, kept as-is, feeds
-        // `LoupeAction::Navigate` below) — this app-level route covers the
-        // remaining states (active entry still Loading / Failed / none) so
+        // C5: project the active working-set entry's `ItemState` into a
+        // `CanvasContent` the canvas owns rendering for (placard/shimmer/
+        // normal render — `canvas::states`). Owned (not borrowed) so this
+        // doesn't hold a live borrow of `self.working_set` across the rest
+        // of the frame (mirrors the pre-Phase-C `ready` tuple's same
+        // clone-out-of-the-view-model discipline).
+        enum ActiveProjection {
+            Loading,
+            SourceFailed(String),
+            Duplicate(usize),
+            Ready {
+                image: ImageId,
+                filename: String,
+                width: u32,
+                height: u32,
+            },
+        }
+        let projection = self.working_set.active().map(|item| match item.state {
+            ItemState::Planned => ActiveProjection::Loading,
+            ItemState::Ready { image, .. } => ActiveProjection::Ready {
+                image,
+                filename: item.filename.clone(),
+                width: item.width,
+                height: item.height,
+            },
+            ItemState::Failed => ActiveProjection::SourceFailed(
+                item.decode_error
+                    .clone()
+                    .unwrap_or_else(|| "open failed".to_owned()),
+            ),
+            ItemState::DuplicateOf { index } => ActiveProjection::Duplicate(index),
+        });
+
+        // B4: repeatable ←/→ nav. The canvas owns the arrow keys (and the
+        // Fit/100% toggle) whenever it's actually mounted — i.e. whenever
+        // SOMETHING is active, any `ActiveProjection` arm (its T26 handler,
+        // kept as-is, feeds `CanvasAction::Navigate` below). This app-level
+        // route covers only the remaining case (nothing active at all) so
         // exactly one component acts per press.
         // TODO(E08 Phase D): both routes collapse into keymap `nav.*`.
-        if self.working_set.active_image().is_none() {
+        if projection.is_none() {
             let delta = filmstrip::nav_delta(&ctx);
             if delta != 0 {
                 self.working_set.nav(delta);
@@ -627,45 +685,61 @@ impl eframe::App for LightboxApp {
             }
         }
 
-        // Central canvas / empty state. `active_image()` is `Some` only for
-        // an active entry that reached `Ready` — a still-`Planned`/`Failed`
-        // active entry falls through to the placeholder arm below. Cloned
-        // out of the view model up front (a small string + two ints) so the
-        // borrow releases before the closure below needs `&mut self`.
-        let ready = self
-            .working_set
-            .active_image()
-            .zip(self.working_set.active())
-            .map(|(image, entry)| (image, entry.filename.clone(), entry.width, entry.height));
-        // A changed (or newly-absent) active image resets the canvas
-        // exactly once per transition (mirrors the retired `enter_loupe`'s
-        // reset-on-entry behavior, plus a matching release on the way out).
-        let new_shown = ready.as_ref().map(|(image, ..)| *image);
+        // A changed (or newly-absent) active `Ready` image resets the
+        // canvas exactly once per transition (mirrors the retired
+        // `enter_loupe`'s reset-on-entry behavior, plus a matching release
+        // on the way out). Only `Ready` entries carry a stable `ImageId` to
+        // track — the other projections have no image at all.
+        let new_shown = match &projection {
+            Some(ActiveProjection::Ready { image, .. }) => Some(*image),
+            _ => None,
+        };
         if new_shown != self.last_shown_image {
             match new_shown {
-                Some(_) => self.loupe.enter(),
-                None => self.loupe.exit(),
+                Some(image) => self.canvas.enter(image),
+                None => self.canvas.exit(),
             }
             self.last_shown_image = new_shown;
         }
 
-        egui::CentralPanel::default().show(root, |ui| match &ready {
-            Some((image, filename, width, height)) => {
+        egui::CentralPanel::default().show(root, |ui| match &projection {
+            Some(proj) => {
+                let content = match proj {
+                    ActiveProjection::Loading => CanvasContent::Loading,
+                    ActiveProjection::SourceFailed(reason) => {
+                        CanvasContent::SourceFailed { reason }
+                    }
+                    ActiveProjection::Duplicate(of) => CanvasContent::Duplicate { of: *of },
+                    ActiveProjection::Ready {
+                        image,
+                        filename,
+                        width,
+                        height,
+                    } => CanvasContent::Ready(ActiveEntry {
+                        image: *image,
+                        filename,
+                        width: *width,
+                        height: *height,
+                    }),
+                };
                 let scheduler = self.session.render_scheduler();
                 let max_tex_dim = self.gpu.limits.max_texture_dimension_2d;
                 let idx = self.working_set.active_index().unwrap_or(0);
                 let total = self.working_set.entries().len();
-                let active_entry = ActiveEntry {
-                    image: *image,
-                    filename,
-                    width: *width,
-                    height: *height,
-                };
-                if let Some(LoupeAction::Navigate(next)) =
-                    self.loupe
-                        .ui(ui, &scheduler, max_tex_dim, active_entry, idx, total)
-                {
-                    // §6.2 `nav`: clamped relative navigation — the loupe
+                let canvas = &mut self.canvas;
+                let recipe_source = &mut self.recipe_source;
+                let device_degraded = self.device_degraded.as_deref();
+                if let Some(CanvasAction::Navigate(next)) = canvas.ui(
+                    ui,
+                    &scheduler,
+                    max_tex_dim,
+                    content,
+                    recipe_source,
+                    idx,
+                    total,
+                    device_degraded,
+                ) {
+                    // §6.2 `nav`: clamped relative navigation — the canvas
                     // only ever proposes an adjacent index (±1).
                     self.working_set.nav(next as isize - idx as isize);
                 }
@@ -674,10 +748,11 @@ impl eframe::App for LightboxApp {
                 empty_state_ui(ui, intake_frame.hover);
             }
             None => {
-                // Set is non-empty but nothing has reached Ready yet
-                // (still Planning/Loading) or every entry failed —
-                // never blank, never a false "drop here" (§6.4 canvas
-                // states; the full placard/shimmer treatment is Phase C).
+                // Set is non-empty but nothing is active: auto-activation
+                // only ever picks a `Ready` entry (§2.4) and none exists
+                // yet, and the user hasn't manually clicked a Failed/
+                // Loading/Duplicate cell either — never blank, never a
+                // false "drop here" (§6.4 canvas states).
                 ui.centered_and_justified(|ui| {
                     ui.weak(match self.working_set.phase() {
                         lightbox_core::SetPhase::Planning | lightbox_core::SetPhase::Loading => {
@@ -709,7 +784,7 @@ impl eframe::App for LightboxApp {
             self.working_set.phase(),
             lightbox_core::SetPhase::Planning | lightbox_core::SetPhase::Loading
         ) || self.thumbs.stats().inflight > 0
-            || self.loupe.busy()
+            || self.canvas.busy()
             || self.explorer.is_open()
             || self.smoke.is_some();
         if busy {
