@@ -33,7 +33,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use lightbox_jobs::CancelToken;
-use lightbox_types::{ContentHash, Orientation};
+use lightbox_types::{ContentHash, Orientation, SourceKind};
 
 mod probe;
 
@@ -91,6 +91,23 @@ impl ProbedFormat {
             ProbedFormat::Tiff => "TIFF",
             ProbedFormat::Png => "PNG",
             ProbedFormat::Unsupported(_) => "UNSUPPORTED",
+        }
+    }
+
+    /// E04 spec §4.2/§2.4 source-kind mapping: which develop surface this
+    /// format exposes. `None` for `Unsupported` (no develop surface at
+    /// all — the item is badged, never opened in the editor). Derived, not
+    /// a struct field: `AssetProbe` itself stays untouched (a plain all-pub
+    /// struct constructed in walker code and tests; adding a field there
+    /// would be a breaking literal-construction change for no benefit over
+    /// this derivation).
+    pub fn source_kind(&self) -> Option<SourceKind> {
+        match self {
+            ProbedFormat::Raw(_) => Some(SourceKind::Raw),
+            ProbedFormat::Jpeg | ProbedFormat::Tiff | ProbedFormat::Png => {
+                Some(SourceKind::Rendered)
+            }
+            ProbedFormat::Unsupported(_) => None,
         }
     }
 }
@@ -393,5 +410,17 @@ mod tests {
             ProbedFormat::Unsupported("x".into()).catalog_tag(),
             "UNSUPPORTED"
         );
+    }
+
+    /// E04 T1 AC: every `ProbedFormat` variant maps to the right
+    /// `SourceKind` (or `None` for `Unsupported`).
+    #[test]
+    fn source_kind_mapping() {
+        assert_eq!(ProbedFormat::Raw("CR3").source_kind(), Some(SourceKind::Raw));
+        assert_eq!(ProbedFormat::Raw("NEF").source_kind(), Some(SourceKind::Raw));
+        assert_eq!(ProbedFormat::Jpeg.source_kind(), Some(SourceKind::Rendered));
+        assert_eq!(ProbedFormat::Tiff.source_kind(), Some(SourceKind::Rendered));
+        assert_eq!(ProbedFormat::Png.source_kind(), Some(SourceKind::Rendered));
+        assert_eq!(ProbedFormat::Unsupported("x".into()).source_kind(), None);
     }
 }

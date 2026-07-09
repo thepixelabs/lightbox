@@ -191,6 +191,50 @@ fn probe_matches_committed_expectations() {
     }
 }
 
+/// E04 T1 AC: every fixture's `SourceKind` matches its `ProbedFormat` (the
+/// pinned raw mounts map `Raw`; the JPEG/TIFF/PNG fixtures map `Rendered`;
+/// the malformed corpus never reaches `source_kind` — probing itself fails).
+#[test]
+fn source_kind_matches_probed_format() {
+    use lightbox_types::SourceKind;
+
+    let dir = fixtures_dir();
+    let mut raw_seen = 0;
+    let mut rendered_seen = 0;
+    for exp in load_expectations().fixture {
+        if exp.error.is_some() {
+            continue;
+        }
+        let path = dir.join(&exp.name);
+        let got = probe(&path).expect("probe");
+        match &got.format {
+            ProbedFormat::Raw(_) => {
+                assert_eq!(
+                    got.format.source_kind(),
+                    Some(SourceKind::Raw),
+                    "{}",
+                    exp.name
+                );
+                raw_seen += 1;
+            }
+            ProbedFormat::Jpeg | ProbedFormat::Tiff | ProbedFormat::Png => {
+                assert_eq!(
+                    got.format.source_kind(),
+                    Some(SourceKind::Rendered),
+                    "{}",
+                    exp.name
+                );
+                rendered_seen += 1;
+            }
+            ProbedFormat::Unsupported(_) => {
+                assert_eq!(got.format.source_kind(), None, "{}", exp.name);
+            }
+        }
+    }
+    assert!(raw_seen >= 7, "expected at least the pinned raw mounts, got {raw_seen}");
+    assert!(rendered_seen >= 2, "expected at least the JPEG+TIFF/PNG fixtures");
+}
+
 /// T19 AC: metadata-only — a 45 MB raw probes in < 20 ms on a dev laptop.
 /// Timing asserts are flaky under CI load, so the hard budget lives in the
 /// T28 perf harness; here we log warm timings and only fail on a blowup

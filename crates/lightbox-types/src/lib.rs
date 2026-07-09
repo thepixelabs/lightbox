@@ -178,6 +178,21 @@ pub struct ProcessVersion(pub u16);
 /// The M0 process version — the only one that exists during E01.
 pub const PV_M0: ProcessVersion = ProcessVersion(1);
 
+/// Which develop surface a source can expose (architecture §2.4): raw
+/// sources get the full toolset; rendered sources get the same pipeline
+/// minus the raw-only stages (hidden, not disabled). Derived from the
+/// probe (`lightbox_decode::ProbedFormat::source_kind`); carried on every
+/// working-set item (E04 spec §4.1); consumed by E08's panel gating and
+/// E02/E05's pipeline assembly.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive] // headroom: a video-frame source is a v1.x possibility
+pub enum SourceKind {
+    /// Mosaic camera raw (CR2/CR3/NEF/ARW/RAF/ORF/DNG/…).
+    Raw,
+    /// Already-rendered pixels (JPEG/TIFF/PNG/HEIC/…).
+    Rendered,
+}
+
 /// Which pipeline tier produced a set of pixels (spec §3.5/§3.6).
 ///
 /// Shared vocabulary between the pixels-in seam (`lightbox-render`'s
@@ -364,6 +379,15 @@ mod tests {
         }
         assert_eq!(Flag::from_db(2), None);
         assert_eq!(Flag::default(), Flag::None);
+    }
+
+    #[test]
+    fn source_kind_serde_round_trips() {
+        for kind in [SourceKind::Raw, SourceKind::Rendered] {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(serde_json::from_str::<SourceKind>(&json).unwrap(), kind);
+        }
+        assert_ne!(SourceKind::Raw, SourceKind::Rendered);
     }
 
     #[test]
