@@ -15,7 +15,9 @@
   "machine": "Apple M5 Max, macOS aarch64, Metal (E01 T29 drill machine)",
   "budgets": {
     "page-query-100k.p95_ms": 100.0,
-    "nav-swap.p95_ms": 50.0
+    "nav-swap.p95_ms": 50.0,
+    "open-1k.single_raw_open_ms": 50.0,
+    "open-1k.plan_ms": 1500.0
   },
   "scenarios": {
     "import-1k": {
@@ -25,6 +27,16 @@
       "files": 1000.0,
       "imported": 1000.0,
       "errors": 0.0
+    },
+    "open-1k": {
+      "_comment": "E04 T11 — recorded on a dev sandbox (not the pinned E01 drill machine above); re-bless on the drill machine when convenient.",
+      "single_raw_open_ms": 4.67,
+      "plan_ms": 20.05,
+      "wall_ms": 196.38,
+      "files": 1000.0,
+      "ready": 1000.0,
+      "failed": 0.0,
+      "collapsed": 0.0
     },
     "page-query-100k": {
       "rows": 100000.0,

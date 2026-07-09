@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use lightbox_catalog::{Catalog, ImageQuery, NewAsset, PageCursor, SortOrder};
-use lightbox_core::{CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, Session};
+use lightbox_core::{
+    CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, OpenOrigin, OpenRequest, Session,
+};
 use lightbox_edit::Recipe;
 use lightbox_jobs::CancelToken;
 use lightbox_render::ng::{
@@ -111,6 +113,114 @@ pub fn import_1k(fixtures: &Path, files: usize) -> anyhow::Result<Metrics> {
     m.insert("files".into(), files as f64);
     m.insert("imported".into(), report.imported as f64);
     m.insert("errors".into(), report.errors.len() as f64);
+
+    session.close(CloseOpts::with_backup(ClosePolicy::Skip))?;
+    Ok(m)
+}
+
+// ---------------------------------------------------------------------------
+// open-1k (E04 spec §7/T11)
+// ---------------------------------------------------------------------------
+
+/// Drains `session`'s events for one `Command::OpenWorkingSet` submission
+/// (`t0` already running), returning `(plan_ms, wall_ms, report)`: the time
+/// to `Event::WorkingSetReplaced` (phase 1 — "the ordered filmstrip can
+/// render") and to `Event::WorkingSetLoadFinished` (phase 2 complete).
+fn drain_open(
+    rx: &mut tokio::sync::broadcast::Receiver<Event>,
+    t0: Instant,
+) -> anyhow::Result<(f64, f64, lightbox_core::OpenReport)> {
+    let mut plan_ms: Option<f64> = None;
+    loop {
+        if t0.elapsed() > EVENT_TIMEOUT {
+            bail!("open: the working-set load never finished");
+        }
+        match rx.try_recv() {
+            Ok(Event::WorkingSetReplaced { .. }) => {
+                plan_ms.get_or_insert_with(|| ms(t0.elapsed()));
+            }
+            Ok(Event::WorkingSetLoadFinished { report, .. }) => {
+                let wall_ms = ms(t0.elapsed());
+                return Ok((plan_ms.unwrap_or(wall_ms), wall_ms, report));
+            }
+            Ok(Event::CommandFailed { error, .. }) => bail!("open failed: {error}"),
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            Err(e) => bail!("open event stream broke: {e}"),
+        }
+    }
+}
+
+/// E04 spec §7 budgets, measured directly against `Command::OpenWorkingSet`
+/// (not the retired-dormant `ImportAddInPlace`):
+///
+/// - **single-raw-open**: one raw fixture, alone, into a fresh store — the
+///   direct proxy for "single raw dropped -> item 0 `Ready` < 50 ms p95"
+///   (with exactly one item, item-0-ready and load-finished are the same
+///   event, so this is measured precisely rather than sampled off the
+///   throttled `WorkingSetChanged` heartbeat).
+/// - **plan_ms**/**wall_ms**: a `files`-file folder drop — "ordered
+///   filmstrip (phase 1) < 1.5 s" and "all items `Ready`" respectively.
+pub fn open_1k(fixtures: &Path, files: usize) -> anyhow::Result<Metrics> {
+    let tmp = tempfile::TempDir::with_prefix("lbx-perf-open-")?;
+
+    // --- single-raw-open: the §7 "item 0 Ready" budget, measured directly ---
+    let single_ms = {
+        let raw = fixtures.join("canon-eos-r6.cr3");
+        let solo_dir = tmp.path().join("solo");
+        std::fs::create_dir_all(&solo_dir)?;
+        let path = if raw.is_file() {
+            let dest = solo_dir.join("canon-eos-r6.cr3");
+            std::fs::copy(&raw, &dest)?;
+            dest
+        } else {
+            // Bare checkout: fall back to a synthetic JPEG so the scenario
+            // still proves the lifecycle (numbers are then trivially fast).
+            corpus::stage_synthetic_jpegs(&solo_dir, 1, "solo-")?;
+            solo_dir.join("solo-000000.jpg")
+        };
+        let core = Core::start(CoreConfig::default())?;
+        let session = core.create_catalog(&tmp.path().join("solo.lbdata"), None)?;
+        let mut rx = session.events();
+        let t0 = Instant::now();
+        session.submit(Command::OpenWorkingSet {
+            request: OpenRequest::new(vec![path], false, OpenOrigin::Cli),
+        });
+        let (_plan, wall, report) = drain_open(&mut rx, t0)?;
+        anyhow::ensure!(
+            report.ready == 1,
+            "solo open: expected 1 ready, got {report:?}"
+        );
+        session.close(CloseOpts::with_backup(ClosePolicy::Skip))?;
+        wall
+    };
+
+    // --- folder drop: phase-1 (plan) and phase-2 (all ready) timing ---
+    let photos = tmp.path().join("photos");
+    std::fs::create_dir_all(&photos)?;
+    let from_fixtures = corpus::copy_fixture_mix(fixtures, &photos)?;
+    let synthetic = files.saturating_sub(from_fixtures);
+    corpus::stage_synthetic_jpegs(&photos, synthetic, "openperf-")?;
+
+    let core = Core::start(CoreConfig::default())?;
+    let session = core.create_catalog(&tmp.path().join("open.lbdata"), None)?;
+    let mut rx = session.events();
+    let t0 = Instant::now();
+    session.submit(Command::OpenWorkingSet {
+        request: OpenRequest::new(vec![photos], false, OpenOrigin::Cli),
+    });
+    let (plan_ms, wall_ms, report) = drain_open(&mut rx, t0)?;
+
+    let mut m = Metrics::new();
+    m.insert("single_raw_open_ms".into(), single_ms);
+    m.insert("plan_ms".into(), plan_ms);
+    m.insert("wall_ms".into(), wall_ms);
+    m.insert("files".into(), files as f64);
+    m.insert("ready".into(), report.ready as f64);
+    m.insert("failed".into(), report.failed as f64);
+    m.insert("collapsed".into(), report.collapsed as f64);
 
     session.close(CloseOpts::with_backup(ClosePolicy::Skip))?;
     Ok(m)

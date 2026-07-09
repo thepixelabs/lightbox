@@ -31,11 +31,11 @@ use report::Results;
 
 const USAGE: &str = "\
 usage: lbx-perf [options]
-  --scenario NAME   import-1k | page-query | nav-swap | all (default: all)
+  --scenario NAME   import-1k | open-1k | page-query | nav-swap | all (default: all)
   --out FILE        write results JSON
   --baseline FILE   compare against committed baselines JSON
   --fixtures DIR    fixture corpus location (default: ./fixtures)
-  --files N         import-1k file count (default: 1000)
+  --files N         import-1k/open-1k file count (default: 1000)
   --rows N          page-query synthetic row count (default: 100000)
   --cpu             force the CPU engine path for nav-swap
   --strict          exit 1 on regressions (default: report-only)
@@ -94,7 +94,7 @@ fn parse_args() -> Result<Opts, String> {
         }
     }
     match opts.scenario.as_str() {
-        "all" | "import-1k" | "page-query" | "nav-swap" => Ok(opts),
+        "all" | "import-1k" | "open-1k" | "page-query" | "nav-swap" => Ok(opts),
         other => Err(format!("unknown scenario {other:?}\n\n{USAGE}")),
     }
 }
@@ -130,6 +130,17 @@ fn main() -> ExitCode {
         match scenarios::run_named("import-1k", || scenarios::import_1k(&fixtures, opts.files)) {
             Ok(m) => {
                 results.scenarios.insert("import-1k".into(), m);
+            }
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if run("open-1k") {
+        match scenarios::run_named("open-1k", || scenarios::open_1k(&fixtures, opts.files)) {
+            Ok(m) => {
+                results.scenarios.insert("open-1k".into(), m);
             }
             Err(err) => {
                 eprintln!("error: {err:#}");
