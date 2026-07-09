@@ -27,18 +27,19 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::Poll;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwap;
 use tokio::sync::Notify;
 use tracing::Instrument;
 
 use crate::config::JobsConfig;
+use crate::cpu::{CpuOutcome, CpuPools};
 use crate::model::{
     transition, Class, FineState, Input, JobId, JobKey, JobSpec, JobState, Outcome, Priority,
 };
 use crate::system::JobError;
-use crate::token::{Interrupted, PauseGate};
+use crate::token::{Interrupted, PauseGate, BIT_SHOULD_YIELD};
 
 /// Poison-tolerant lock (house convention: a poisoned scheduler lock means a
 /// panic already happened elsewhere; the state itself is a plain value).
@@ -448,6 +449,82 @@ impl JobContext {
         Ok(())
     }
 
+    /// Runs a CPU-heavy closure on the class-matched rayon pool (spec §4.4,
+    /// T6): Background jobs → `bg-cpu`, everything else → `fg-cpu`. Never
+    /// executes on a tokio worker.
+    ///
+    /// Cancel-aware **at entry** (both before submission and before the
+    /// closure actually starts on the pool); the closure itself should poll
+    /// the token it is handed for long kernels. A panicking closure fails
+    /// only this job (the panic is re-thrown here and contained by the
+    /// job wrapper as [`JobError::Panicked`]); the pool worker survives.
+    pub async fn cpu<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&crate::CancelToken) -> R + Send + 'static,
+    ) -> Result<R, Interrupted> {
+        self.note_checkpoint();
+        if self.record.cancel.is_cancelled() {
+            return Err(Interrupted);
+        }
+        let Some(s) = self.sched.upgrade() else {
+            return Err(Interrupted);
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel::<CpuOutcome<R>>();
+        let token = self.record.cancel.clone();
+        s.cpu.pool(self.record.class).spawn(move || {
+            if token.is_cancelled() {
+                let _ = tx.send(CpuOutcome::Interrupted);
+                return;
+            }
+            match std::panic::catch_unwind(AssertUnwindSafe(|| f(&token))) {
+                Ok(value) => {
+                    let _ = tx.send(CpuOutcome::Ok(value));
+                }
+                Err(panic) => {
+                    let _ = tx.send(CpuOutcome::Panicked(panic));
+                }
+            }
+        });
+        drop(s);
+        let out = match rx.await {
+            Ok(out) => out,
+            // Sender dropped without sending: pool torn down mid-flight.
+            Err(_) => CpuOutcome::Interrupted,
+        };
+        self.note_checkpoint();
+        match out {
+            CpuOutcome::Ok(value) => Ok(value),
+            CpuOutcome::Interrupted => Err(Interrupted),
+            // Re-throw on the job task: the wrapper's catch_unwind turns it
+            // into JobError::Panicked for THIS job only.
+            CpuOutcome::Panicked(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Runs blocking I/O (file copy, checksum read) on tokio's blocking
+    /// pool (spec §4.3, T6). Cancel-aware at entry; panics are re-thrown
+    /// here and contained by the job wrapper.
+    pub async fn io<R: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> R + Send + 'static,
+    ) -> Result<R, Interrupted> {
+        self.note_checkpoint();
+        if self.record.cancel.is_cancelled() {
+            return Err(Interrupted);
+        }
+        let Some(s) = self.sched.upgrade() else {
+            return Err(Interrupted);
+        };
+        let joined = s.rt.spawn_blocking(f).await;
+        drop(s);
+        self.note_checkpoint();
+        match joined {
+            Ok(value) => Ok(value),
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+            Err(_) => Err(Interrupted), // runtime shutting down
+        }
+    }
+
     fn note_checkpoint(&self) {
         if let Some(s) = self.sched.upgrade() {
             self.record
@@ -482,6 +559,17 @@ pub struct Scheduler {
     cfg: ArcSwap<JobsConfig>,
     lanes: [Arc<Lane>; 3],
     jobs: Mutex<HashMap<JobId, Arc<JobRecord>>>,
+    /// In-flight dedupe index (spec §4.3 `spawn_keyed`): key → newest
+    /// non-terminal job. Entries evict on terminal transition.
+    keyed: Mutex<HashMap<JobKey, JobId>>,
+    /// The class-matched rayon pools (`fg-cpu`/`bg-cpu`, T6).
+    cpu: CpuPools,
+    /// Millis-since-epoch of the last `note_interactive_activity` call,
+    /// **plus one** (0 = never). The load-shed input (spec §4.4, T5).
+    interactive_last_ms: AtomicU64,
+    /// Whether the Background lane is currently shrunk (drives the
+    /// `should_yield` gate bits on running Background jobs; edge-triggered).
+    bg_shrunk: AtomicBool,
     next_job: AtomicU64,
     next_seq: AtomicU64,
     /// Jobs not yet `Done(_)` — `is_idle` and shutdown drain on it.
@@ -518,11 +606,16 @@ impl Scheduler {
             Lane::new(Class::Foreground),
             Lane::new(Class::Background),
         ];
+        let cpu = CpuPools::new(&cfg);
         let sched = Arc::new(Scheduler {
             rt: rt.clone(),
             cfg: ArcSwap::from_pointee(cfg),
             lanes,
             jobs: Mutex::new(HashMap::new()),
+            keyed: Mutex::new(HashMap::new()),
+            cpu,
+            interactive_last_ms: AtomicU64::new(0),
+            bg_shrunk: AtomicBool::new(false),
             next_job: AtomicU64::new(1),
             next_seq: AtomicU64::new(1),
             non_terminal: AtomicUsize::new(0),
@@ -642,6 +735,12 @@ impl Scheduler {
 
         *lock(&record.work) = Some(work);
         lock(&self.jobs).insert(id, Arc::clone(&record));
+        if let Some(key) = &record.key {
+            // Newest wins for by-key lookups; `spawn_keyed` (T8) checks the
+            // map BEFORE spawning, so an overwrite here only happens for
+            // plain `spawn` calls that carry a key.
+            lock(&self.keyed).insert(key.clone(), id);
+        }
         self.non_terminal.fetch_add(1, Ordering::AcqRel);
         self.counters.spawned.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(
@@ -731,11 +830,141 @@ impl Scheduler {
         }
     }
 
-    /// Lane budget for `class` after load-shed (budget, recovery deadline).
-    /// v1: the configured budget; the interactive-recency and
-    /// Foreground-backlog shrink land with T5.
+    /// Lane budget for `class` after load-shed (spec §4.4, T5), plus the
+    /// recovery deadline when the shrink is time-windowed (the Background
+    /// dispatcher parks until then).
+    ///
+    /// Background shrinks to `background_min_during_interactive` while:
+    /// - the most recent [`Scheduler::note_interactive_activity`] is within
+    ///   `interactive_recent_window`, **or**
+    /// - Foreground has queued work beyond
+    ///   `foreground_queue_shrink_threshold`.
+    ///
+    /// Shrinking stops issuing slots — it **never aborts a running job**;
+    /// running Background jobs additionally see the `should_yield` hint.
     pub(crate) fn effective_budget(&self, class: Class) -> (usize, Option<tokio::time::Instant>) {
-        (self.cfg.load().workers(class), None)
+        let cfg = self.cfg.load();
+        if class != Class::Background {
+            return (cfg.workers(class), None);
+        }
+        let base = cfg.background_workers;
+        let min = cfg.background_min_during_interactive.min(base);
+        let mut budget = base;
+        let mut deadline = None;
+        let stamp = self.interactive_last_ms.load(Ordering::Acquire);
+        if stamp != 0 {
+            let last = stamp - 1;
+            let window = u64::try_from(cfg.interactive_recent_window.as_millis())
+                .unwrap_or(u64::MAX);
+            if self.elapsed_ms().saturating_sub(last) < window {
+                budget = min;
+                deadline = Some(self.epoch + Duration::from_millis(last.saturating_add(window)));
+            }
+        }
+        if self.lane(Class::Foreground).queued_len() > cfg.foreground_queue_shrink_threshold {
+            budget = budget.min(min);
+            // Recovery here is event-driven (Foreground dispatch/finish
+            // notifies the Background lane), not time-driven.
+        }
+        // Edge-triggered `should_yield` maintenance: flip the hint on
+        // running Background jobs exactly when the shrink state changes.
+        let shrunk = budget < base;
+        if shrunk != self.bg_shrunk.swap(shrunk, Ordering::AcqRel) {
+            self.set_bg_yield_bits(shrunk);
+        }
+        (budget, deadline)
+    }
+
+    /// The load-shed input (spec §4.3, seam to E05/E08): call on each
+    /// interactive submission (slider drag, grid scroll). While the most
+    /// recent call is within `interactive_recent_window`, the Background
+    /// budget shrinks to `background_min_during_interactive`.
+    pub fn note_interactive_activity(&self) {
+        self.interactive_last_ms
+            .store(self.elapsed_ms() + 1, Ordering::Release);
+        if !self.bg_shrunk.swap(true, Ordering::AcqRel) {
+            self.set_bg_yield_bits(true);
+        }
+        // Wake the Background dispatcher so it re-evaluates (and arms its
+        // recovery timer).
+        self.lane(Class::Background).notify.notify_waiters();
+    }
+
+    /// Sets/clears the `should_yield` hint on every dispatched Background
+    /// job (edge-triggered from `effective_budget`).
+    fn set_bg_yield_bits(&self, on: bool) {
+        for record in lock(&self.jobs).values() {
+            if record.class != Class::Background {
+                continue;
+            }
+            if matches!(
+                *lock(&record.state),
+                FineState::Running | FineState::PausedRunning | FineState::Cancelling
+            ) {
+                record.gate.set_bit(BIT_SHOULD_YIELD, on);
+            }
+        }
+    }
+
+    /// Re-keys a queued job's priority (spec §4.3, T4): O(log n) — pushes a
+    /// fresh generation-stamped heap entry; the stale entry is skipped at
+    /// pop. On running/paused-running jobs only the stored priority changes
+    /// (nothing is queued to reorder); on paused-queued jobs the new
+    /// priority takes effect when resumed.
+    pub fn set_priority(&self, id: JobId, prio: Priority) {
+        let record = lock(&self.jobs).get(&id).cloned();
+        if let Some(record) = record {
+            self.set_priority_record(&record, prio);
+        }
+    }
+
+    /// [`Scheduler::set_priority`] by dedupe key (visible-first scheduling:
+    /// the grid raises on-screen preview jobs without holding handles).
+    pub fn set_priority_by_key(&self, key: &JobKey, prio: Priority) {
+        let id = lock(&self.keyed).get(key).copied();
+        if let Some(id) = id {
+            self.set_priority(id, prio);
+        }
+    }
+
+    fn set_priority_record(&self, record: &Arc<JobRecord>, prio: Priority) {
+        record.priority.store(prio.0, Ordering::Release);
+        let requeue = { *lock(&record.state) == FineState::Queued };
+        if requeue {
+            // Invalidate the old entry, push a fresh one. A dispatch racing
+            // this sees a gen mismatch on whichever entry it pops and skips
+            // it — the job is dispatched exactly once either way.
+            let gen = record.gen.fetch_add(1, Ordering::AcqRel) + 1;
+            let lane = self.lane(record.class);
+            lock(&lane.queue).push(HeapEntry {
+                prio,
+                seq: record.seq,
+                gen,
+                id: record.id,
+            });
+            lane.notify.notify_waiters();
+        }
+    }
+
+    /// Applies a new configuration live (spec §4.3/T16): lane budgets take
+    /// effect immediately (growing) or as running jobs finish (shrinking —
+    /// never aborts); publisher rates apply from the next tick.
+    /// **`fg_cpu_threads`/`bg_cpu_threads` do NOT re-size live** (rayon
+    /// limitation, spec §9 R8) — they apply on the next session.
+    pub fn apply_config(&self, cfg: JobsConfig) {
+        let cfg = cfg.sanitized();
+        let old = self.cfg.load();
+        if cfg.fg_cpu_threads != old.fg_cpu_threads || cfg.bg_cpu_threads != old.bg_cpu_threads {
+            tracing::info!(
+                target: "lightbox_jobs",
+                "cpu-pool sizing changed; applies on next session (rayon pools are fixed — R8)"
+            );
+        }
+        drop(old);
+        self.cfg.store(Arc::new(cfg));
+        for lane in &self.lanes {
+            lane.notify.notify_waiters();
+        }
     }
 
     /// Pops the next runnable job of a lane and marks it `Running`
@@ -762,6 +991,11 @@ impl Scheduler {
                 }
             }
             lane.queued.fetch_sub(1, Ordering::AcqRel);
+            if lane.class == Class::Foreground {
+                // Foreground backlog is a Background shrink input (T5):
+                // draining it re-evaluates the Background budget.
+                self.lane(Class::Background).notify.notify_waiters();
+            }
             return Some(record);
         }
     }
@@ -773,6 +1007,10 @@ impl Scheduler {
         record
             .last_checkpoint_ms
             .store(self.elapsed_ms(), Ordering::Relaxed);
+        if record.class == Class::Background && self.bg_shrunk.load(Ordering::Acquire) {
+            // Dispatched into a shrunk lane: born with the yield hint on.
+            record.gate.set_bit(BIT_SHOULD_YIELD, true);
+        }
         let Some(work) = lock(&record.work).take() else {
             // Double dispatch would be a scheduler bug; fail safe.
             debug_assert!(false, "job {} dispatched twice", record.id);
@@ -826,6 +1064,18 @@ impl Scheduler {
     /// Terminal bookkeeping shared by every path that reaches `Done(_)`.
     pub(crate) fn on_terminal(&self, record: &Arc<JobRecord>, outcome: Outcome) {
         *lock(&record.terminal_at) = Some(tokio::time::Instant::now());
+        if let Some(key) = &record.key {
+            // Evict the dedupe entry iff it still points at this job
+            // (a re-spawn under the same key may have replaced it).
+            let mut keyed = lock(&self.keyed);
+            if keyed.get(key) == Some(&record.id) {
+                keyed.remove(key);
+            }
+        }
+        if record.class == Class::Foreground {
+            // Foreground backlog drain is a Background budget input (T5).
+            self.lane(Class::Background).notify.notify_waiters();
+        }
         match outcome {
             Outcome::Completed => self.counters.completed.fetch_add(1, Ordering::Relaxed),
             Outcome::Failed => self.counters.failed.fetch_add(1, Ordering::Relaxed),

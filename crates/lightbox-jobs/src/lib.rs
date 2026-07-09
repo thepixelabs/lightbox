@@ -48,6 +48,7 @@
 
 mod cancel;
 mod config;
+mod cpu;
 pub mod model;
 pub mod sched;
 pub mod system;
