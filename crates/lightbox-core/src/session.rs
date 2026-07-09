@@ -59,7 +59,7 @@ use crate::config::CoreConfig;
 use crate::edit_hub::EditHub;
 use crate::error::Result;
 use crate::event::{ChangeSet, Event};
-use crate::preview_runtime::TokioBuildRuntime;
+use crate::preview_runtime::JobsBuildRuntime;
 use crate::previews::CatalogAssetLocator;
 use crate::queries::Queries;
 use crate::render_source::{NullDeviceProvider, PreviewSourceProvider, SharedDeviceProvider};
@@ -180,6 +180,9 @@ struct SessionInner {
     next_ticket: AtomicU64,
     session_cancel: CancelToken,
     in_flight: Arc<InFlight>,
+    /// The job runtime handle (E06: `close` bridges the async scheduler
+    /// drain from this synchronous surface through it).
+    rt: tokio::runtime::Handle,
     cfg: CoreConfig,
     lbdata: PathBuf,
 }
@@ -282,17 +285,44 @@ impl Session {
 
         let (events, _) = broadcast::channel::<Event>(core.cfg.event_capacity.max(16));
 
+        // E06 (spec §4.7): the session job scheduler, dispatching onto the
+        // SAME tokio runtime the JobSystem owns (spec §4.4 — no nested
+        // runtimes). Constructed from `CoreConfig::jobs_scheduler` (the
+        // prefs-store seam, T16 — see that field's doc comment). Built
+        // before the preview service because the T15 `JobsBuildRuntime`
+        // below runs preview builds on it.
+        let jobs_sched = JobScheduler::new(
+            core.cfg.jobs_scheduler.clone(),
+            core.jobs.handle().clone(),
+        );
+        // Relay scheduler events onto the core bus as `Event::Jobs`
+        // (already coalesced at the source). Ends when the scheduler shuts
+        // down (channel closes) or the last session clone drops the sender.
+        let mut jobs_events = jobs_sched.subscribe();
+        let jobs_bus = events.clone();
+        core.jobs.handle().spawn(async move {
+            loop {
+                match jobs_events.recv().await {
+                    Ok(ev) => {
+                        let _ = jobs_bus.send(Event::Jobs(ev));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         // E03 Phase D (T14): the `PreviewService` facade — tickets, the T13
         // scheduler, `set_viewport` (T15), bulk build (T16). Additive
         // alongside `EmbeddedPreviewProvider` above (see
         // `lightbox_preview::service`'s module doc comment on the two
         // independent index mirrors this implies); registered under its own
         // `Session::preview_service()` accessor, not through
-        // `PreviewProvider`. The M0 `BuildRuntime` (spec §5.6) runs builds
-        // on the SAME tokio runtime `core.jobs` already owns, via
-        // `spawn_blocking` — no second runtime, no `Class` budget yet (see
-        // `preview_runtime.rs`'s doc comment for why "plain tokio" is read
-        // literally here).
+        // `PreviewProvider`. **E06 T15:** the `BuildRuntime` seam is now
+        // backed by the session job scheduler (`JobsBuildRuntime` —
+        // Background-class, activity-visible "Extracting previews" group,
+        // class-pausable), replacing the M0 plain-tokio `TokioBuildRuntime`
+        // (see `preview_runtime.rs`'s doc comment).
         let preview_cfg = PreviewStoreConfig::with_defaults(lbdata.clone());
         let preview_workers = preview_cfg.workers.unwrap_or_else(|| {
             std::thread::available_parallelism()
@@ -300,7 +330,7 @@ impl Session {
                 .unwrap_or(4)
                 .min(8)
         });
-        let preview_runtime = TokioBuildRuntime::new(core.jobs.handle().clone(), preview_workers);
+        let preview_runtime = JobsBuildRuntime::new(Arc::clone(&jobs_sched), preview_workers);
         let preview_bus = events.clone();
         let preview_events_sink: lightbox_preview::EventSink = Arc::new(move |ev: PvEvent| {
             let translated = match ev {
@@ -380,31 +410,6 @@ impl Session {
             }
         });
 
-        // E06 (spec §4.7): the session job scheduler, dispatching onto the
-        // SAME tokio runtime the JobSystem owns (spec §4.4 — no nested
-        // runtimes). Constructed from `CoreConfig::jobs_scheduler` (the
-        // prefs-store seam, T16 — see that field's doc comment).
-        let jobs_sched = JobScheduler::new(
-            core.cfg.jobs_scheduler.clone(),
-            core.jobs.handle().clone(),
-        );
-        // Relay scheduler events onto the core bus as `Event::Jobs`
-        // (already coalesced at the source). Ends when the scheduler shuts
-        // down (channel closes) or the last session clone drops the sender.
-        let mut jobs_events = jobs_sched.subscribe();
-        let jobs_bus = events.clone();
-        core.jobs.handle().spawn(async move {
-            loop {
-                match jobs_events.recv().await {
-                    Ok(ev) => {
-                        let _ = jobs_bus.send(Event::Jobs(ev));
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Queued>();
         let session_cancel = CancelToken::new();
         let in_flight = Arc::new(InFlight::default());
@@ -452,6 +457,7 @@ impl Session {
                 next_ticket: AtomicU64::new(1),
                 session_cancel,
                 in_flight,
+                rt: core.jobs.handle().clone(),
                 cfg: core.cfg.clone(),
                 lbdata,
             }),
@@ -584,6 +590,45 @@ impl Session {
         // gesture on this session's images once `close` has been called.
         inner.edit_hub.close_all();
         inner.session_cancel.cancel();
+        // E06 (spec §4.9, T17): drain the job scheduler FIRST — before the
+        // command-job drain and the exit-time backup — so no background
+        // work races catalog teardown. Bridged from this synchronous
+        // surface onto the job runtime; a wedged runtime cannot wedge
+        // close (grace + margin, then proceed — WAL discipline keeps the
+        // catalog `integrity_check`-clean regardless).
+        {
+            let sched = Arc::clone(&inner.jobs_sched);
+            let grace = inner.cfg.jobs_shutdown_grace;
+            let (tx, rx) = std::sync::mpsc::channel();
+            inner.rt.spawn(async move {
+                let _ = tx.send(sched.shutdown(grace).await);
+            });
+            match rx.recv_timeout(grace + Duration::from_secs(5)) {
+                Ok(report) => {
+                    if report.aborted.is_empty() {
+                        tracing::info!(
+                            target: "lightbox_core",
+                            completed = report.completed,
+                            cancelled = report.cancelled,
+                            failed = report.failed,
+                            "job scheduler drained"
+                        );
+                    } else {
+                        // Aborted-nonzero is a checkpoint-contract bug
+                        // signal (spec §4.9 step 5) — CI treats it as one.
+                        tracing::warn!(
+                            target: "lightbox_core",
+                            aborted = ?report.aborted,
+                            "job scheduler aborted stragglers at shutdown"
+                        );
+                    }
+                }
+                Err(_) => tracing::warn!(
+                    target: "lightbox_core",
+                    "job-scheduler drain did not report within grace + margin; closing anyway"
+                ),
+            }
+        }
         if !inner.in_flight.wait_zero(inner.cfg.close_wait) {
             tracing::warn!(
                 target: "lightbox_core",

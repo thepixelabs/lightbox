@@ -11,7 +11,6 @@
 use std::hash::{BuildHasher, Hasher, RandomState};
 use std::time::Duration;
 
-use crate::token::Interrupted;
 use crate::CancelToken;
 
 /// Backoff policy. Build via [`RetryPolicy::default`] and override fields,

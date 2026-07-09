@@ -39,6 +39,10 @@ pub struct CoreConfig {
     /// How long `Session::close` waits for in-flight command jobs
     /// (cancelled imports flushing their final stats) before backing up.
     pub close_wait: Duration,
+    /// E06 (spec §4.9): grace for the job-scheduler drain at close —
+    /// running jobs get this long to observe cancellation at a checkpoint
+    /// before stragglers are aborted (aborted-nonzero = a bug signal).
+    pub jobs_shutdown_grace: Duration,
     /// Root directory for the develop-preset store (spec §3.7 / D3:
     /// app-level files, not catalog rows). `None` resolves the platform
     /// default (`<config>/Lightbox/presets`) — but only lazily, on first
@@ -63,6 +67,7 @@ impl Default for CoreConfig {
             backup_max_age: Duration::from_secs(24 * 60 * 60),
             backup_retain: 10,
             close_wait: Duration::from_secs(10),
+            jobs_shutdown_grace: Duration::from_secs(5),
             preset_dir: None,
             working_set: OpenOptions::default(),
         }

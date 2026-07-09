@@ -57,6 +57,7 @@ pub mod retry;
 pub mod sched;
 pub mod stage;
 pub mod system;
+pub mod testing;
 mod token;
 
 pub use activity::{ActivityCounts, ActivityEntry, ActivitySnapshot, JobEvent};
@@ -69,7 +70,7 @@ pub use model::{
 };
 pub use progress::{ProgressSink, ProgressView};
 pub use retry::{retry, RetryError, RetryPolicy};
-pub use sched::{JobContext, JobHandle, Scheduler};
+pub use sched::{JobContext, JobHandle, Scheduler, SchedulerMetrics, ShutdownReport};
 pub use stage::{StageReceiver, StageSender};
 pub use token::{Interrupted, PauseGate};
 

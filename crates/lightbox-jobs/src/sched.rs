@@ -207,6 +207,8 @@ pub(crate) struct JobRecord {
     /// Millis since the scheduler epoch of the body's last checkpoint
     /// (watchdog input; updated on the checkpoint fast path).
     pub(crate) last_checkpoint_ms: AtomicU64,
+    /// When the watchdog last flagged this job (one warning per stall).
+    watchdog_warned_ms: AtomicU64,
 }
 
 impl JobRecord {
@@ -566,6 +568,46 @@ pub(crate) struct Counters {
     pub(crate) completed: AtomicU64,
     pub(crate) failed: AtomicU64,
     pub(crate) cancelled: AtomicU64,
+    pub(crate) watchdog_violations: AtomicU64,
+}
+
+/// A point-in-time metrics read (T18: queue depth / throughput counters
+/// for the nightly perf harness; diagnostics overlays).
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct SchedulerMetrics {
+    /// Jobs ever admitted.
+    pub spawned: u64,
+    /// Jobs finished `Completed`.
+    pub completed: u64,
+    /// Jobs finished `Failed` (incl. panics).
+    pub failed: u64,
+    /// Jobs finished `Cancelled`.
+    pub cancelled: u64,
+    /// Checkpoint-contract violations flagged by the watchdog (a running
+    /// job > 1 s without a checkpoint). Test-mode-fatal signal (T18).
+    pub watchdog_violations: u64,
+    /// Live queued jobs per lane (lane order: Interactive, Foreground,
+    /// Background).
+    pub queued: [usize; 3],
+    /// Claimed worker slots per lane (same order).
+    pub running: [usize; 3],
+}
+
+/// What [`Scheduler::shutdown`] did (spec §4.9). `aborted` non-empty means
+/// a job broke the checkpoint contract — a bug signal in CI.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ShutdownReport {
+    /// Jobs (live at shutdown start) that still finished `Completed`.
+    pub completed: usize,
+    /// Jobs that ended `Cancelled` cooperatively (or were never
+    /// dispatched).
+    pub cancelled: usize,
+    /// Jobs that ended `Failed` during the drain.
+    pub failed: usize,
+    /// Stragglers force-aborted after the grace period, with their kinds.
+    pub aborted: Vec<(JobId, &'static str)>,
 }
 
 /// The E06 scheduler (spec §4.3). Construct via [`Scheduler::new`]; share as
@@ -674,6 +716,12 @@ impl Scheduler {
                 Arc::downgrade(&sched),
                 dirty,
             ));
+            // Debug watchdog (spec §4.2/T18): polices the checkpoint
+            // contract. Always on in debug builds; opt-in via
+            // `watchdog_fatal` elsewhere (the deterministic harness).
+            if cfg!(debug_assertions) || sched.cfg.load().watchdog_fatal {
+                rt.spawn(watchdog_loop(Arc::downgrade(&sched)));
+            }
         }
         tracing::debug!(
             target: "lightbox_jobs",
@@ -833,6 +881,7 @@ impl Scheduler {
             terminal_at: Mutex::new(None),
             dismissed: AtomicBool::new(false),
             last_checkpoint_ms: AtomicU64::new(0),
+            watchdog_warned_ms: AtomicU64::new(0),
         });
         let handle = JobHandle {
             record: Arc::clone(&record),
@@ -1779,6 +1828,173 @@ impl Scheduler {
         *last_epochs = epochs;
     }
 
+    /// A point-in-time metrics read (T18).
+    pub fn metrics(&self) -> SchedulerMetrics {
+        SchedulerMetrics {
+            spawned: self.counters.spawned.load(Ordering::Relaxed),
+            completed: self.counters.completed.load(Ordering::Relaxed),
+            failed: self.counters.failed.load(Ordering::Relaxed),
+            cancelled: self.counters.cancelled.load(Ordering::Relaxed),
+            watchdog_violations: self.counters.watchdog_violations.load(Ordering::Relaxed),
+            queued: std::array::from_fn(|i| self.lanes[i].queued_len()),
+            running: std::array::from_fn(|i| self.lanes[i].running_len()),
+        }
+    }
+
+    /// Graceful shutdown (spec §4.9, T17), called by `lightbox-core`
+    /// session teardown **before** catalog close and the exit-time backup:
+    ///
+    /// 1. Stop admission (new spawns are born `Done(Cancelled)`).
+    /// 2. Retire the dispatch lanes (queued work will never start).
+    /// 3. Cancel every non-terminal job — queued ones terminate
+    ///    immediately (never dispatched); running ones observe the token
+    ///    at their next checkpoint (paused ones wake out of the gate).
+    /// 4. Await all-terminal up to `grace` (the ≤ 100 ms checkpoint
+    ///    contract makes the 5 s default realistic).
+    /// 5. Abort stragglers via their task handles and report them —
+    ///    `aborted` non-empty is a checkpoint-contract bug signal.
+    ///
+    /// Domain code guarantees on-disk atomicity via temp-then-rename
+    /// (§6 "disk full"), so aborting mid-write is crash-equivalent-safe;
+    /// catalog integrity is carried by E01's WAL discipline either way.
+    pub async fn shutdown(&self, grace: Duration) -> ShutdownReport {
+        self.closed.store(true, Ordering::Release);
+        for lane in &self.lanes {
+            lane.closed.store(true, Ordering::Release);
+            lane.notify.notify_waiters();
+        }
+        let live: Vec<Arc<JobRecord>> = lock(&self.jobs)
+            .values()
+            .filter(|r| !lock(&r.state).is_terminal())
+            .cloned()
+            .collect();
+        tracing::info!(
+            target: "lightbox_jobs",
+            live = live.len(),
+            grace_ms = grace.as_millis() as u64,
+            "scheduler shutdown: draining"
+        );
+        for record in &live {
+            self.cancel_record(record);
+        }
+        let drained = self.wait_idle(grace).await;
+
+        let mut aborted = Vec::new();
+        if !drained {
+            for record in &live {
+                // Force-terminate under the state lock; `finish_job` skips
+                // its own terminal bookkeeping when it finds the state
+                // already terminal (abort/completion race).
+                let force = {
+                    let mut st = lock(&record.state);
+                    if st.is_terminal() {
+                        false
+                    } else {
+                        // Post-cancel the state is `Cancelling`, for which
+                        // Finish(Cancelled) is the table's legal edge; any
+                        // other state here is a bug — force the sink so
+                        // joiners still resolve.
+                        *st = transition(*st, Input::Finish(Outcome::Cancelled))
+                            .unwrap_or(FineState::Done(Outcome::Cancelled));
+                        true
+                    }
+                };
+                if force {
+                    if let Some(abort) = lock(&record.abort).take() {
+                        abort.abort();
+                    }
+                    if record.holds_slot.swap(false, Ordering::AcqRel) {
+                        self.lane(record.class).release_slot();
+                    }
+                    self.on_terminal(record, Outcome::Cancelled);
+                    aborted.push((record.id, record.kind));
+                    tracing::warn!(
+                        target: "lightbox_jobs",
+                        id = record.id.get(),
+                        kind = record.kind,
+                        "job aborted at shutdown (checkpoint contract violated)"
+                    );
+                }
+            }
+        }
+
+        let mut completed = 0;
+        let mut cancelled = 0;
+        let mut failed = 0;
+        for record in &live {
+            match *lock(&record.state) {
+                FineState::Done(Outcome::Completed) => completed += 1,
+                FineState::Done(Outcome::Cancelled) => cancelled += 1,
+                FineState::Done(Outcome::Failed) => failed += 1,
+                // Unreachable after the force pass; count defensively.
+                _ => failed += 1,
+            }
+        }
+        // Cancelled-at-shutdown jobs that never dispatched are part of
+        // `cancelled` already (their state is Done(Cancelled)).
+        let report = ShutdownReport {
+            completed,
+            cancelled,
+            failed,
+            aborted,
+        };
+        tracing::info!(
+            target: "lightbox_jobs",
+            completed,
+            cancelled,
+            failed,
+            aborted = report.aborted.len(),
+            "scheduler shutdown complete"
+        );
+        report
+    }
+
+    /// One watchdog sweep (spec §4.2/T18): flags running jobs > 1 s past
+    /// their last checkpoint. Returns newly-flagged violations.
+    pub(crate) fn watchdog_sweep(&self) -> usize {
+        let now = self.elapsed_ms();
+        let fatal = self.cfg.load().watchdog_fatal;
+        let mut flagged = 0;
+        for record in lock(&self.jobs).values() {
+            if !matches!(*lock(&record.state), FineState::Running) {
+                continue;
+            }
+            let last = record.last_checkpoint_ms.load(Ordering::Relaxed);
+            if now.saturating_sub(last) <= 1_000 {
+                continue;
+            }
+            // One flag per stall: skip if already warned since that
+            // checkpoint.
+            let warned = record.watchdog_warned_ms.load(Ordering::Relaxed);
+            if warned >= last && warned != 0 {
+                continue;
+            }
+            record.watchdog_warned_ms.store(now.max(1), Ordering::Relaxed);
+            self.counters
+                .watchdog_violations
+                .fetch_add(1, Ordering::Relaxed);
+            flagged += 1;
+            if fatal {
+                tracing::error!(
+                    target: "lightbox_jobs",
+                    id = record.id.get(),
+                    kind = record.kind,
+                    stalled_ms = now.saturating_sub(last),
+                    "checkpoint-contract violation (test-mode fatal): running job went > 1 s without a checkpoint"
+                );
+            } else {
+                tracing::warn!(
+                    target: "lightbox_jobs",
+                    id = record.id.get(),
+                    kind = record.kind,
+                    stalled_ms = now.saturating_sub(last),
+                    "checkpoint-contract violation: running job went > 1 s without a checkpoint"
+                );
+            }
+        }
+        flagged
+    }
+
     /// Millis since this scheduler's construction (monotonic; virtual under
     /// paused tokio time).
     pub(crate) fn elapsed_ms(&self) -> u64 {
@@ -1886,6 +2102,19 @@ async fn dispatch_loop(sched: Weak<Scheduler>, lane: Arc<Lane>) {
     }
 }
 
+/// The watchdog task (spec §4.2/T18): a 500 ms sweep over running jobs;
+/// exits when the scheduler drops.
+async fn watchdog_loop(sched: Weak<Scheduler>) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let Some(s) = sched.upgrade() else { return };
+        if s.dirty.is_closed() {
+            return;
+        }
+        s.watchdog_sweep();
+    }
+}
+
 /// The wrapper's landing: outcome classification, result delivery, slot
 /// release, terminal bookkeeping. Runs on the job's own task — panics were
 /// already contained by the caller.
@@ -1923,6 +2152,11 @@ fn finish_job<T>(
 
     {
         let mut st = lock(&record.state);
+        if st.is_terminal() {
+            // Shutdown force-terminated this job (abort raced completion):
+            // the terminal bookkeeping already ran exactly once there.
+            return;
+        }
         match transition(*st, Input::Finish(outcome)) {
             Ok(next) => *st = next,
             Err(illegal) => {
