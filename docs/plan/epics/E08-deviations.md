@@ -627,18 +627,135 @@ exit-bar report) was 100% green. Recorded for honesty; owner E03 if it recurs.
   (it will use its own in-memory rev counter instead, per the C3 deviation above, so this doesn't
   block it).
 
-## Phase D — keymap (D1–D4) — 2026-07-09 (salvaged)
+---
 
-The Phase D Fable agent completed the work (106 shell tests passing) but STALLED on a
-watchdog timeout before committing or writing this section. Its output was recovered from
-the working tree and committed as-is after an independent full exit-bar pass (all six gates
-green). The CODE under `crates/lightbox-shell/src/keymap/` is the authoritative record.
+## Phase D — keymap (D1–D4; D5 cut)
 
-- **D1–D4 shipped:** `keymap/{chord,registry,dispatch,overrides,cheatsheet,mod}.rs` —
-  chords + registry + innermost-context-wins resolution, per-frame dispatcher (text-input
-  suppressed, key-repeat), `keymap.toml` delta-only tolerant persistence, ⌘/? cheat-sheet
-  overlay with live bindings. Wired the M1 action set into `lib.rs`/canvas/filmstrip.
-- **D5 (rebind editor) CUT** — named cut-line; also needs Phase G's prefs panel.
-- **Seam for Phase G:** `keymap.toml` persistence sits beside where Phase G will place prefs;
-  Phase G owns the prefs-window keymap tab (D5) if it un-cuts.
-- Verify against the committed code, not this summary (agent transcript was truncated by the stall).
+New module: `crates/lightbox-shell/src/keymap/{mod,chord,registry,dispatch,overrides,cheatsheet}.rs`.
+`lib.rs` now dispatches keymap actions **before** any widget is built (spec §6.8's "dispatch
+before widget input"); the per-widget key handlers Phases B/C carried as an interim
+(`filmstrip::nav_delta`, the canvas's inline arrow/Z/Space block) are **removed** — both had a
+`TODO(E08 Phase D)` saying exactly this would happen. `canvas::CanvasAction` (the ←/→
+`Navigate(usize)` variant `EditorCanvas::ui` used to return) is deleted with it: nav now flows
+`keymap::dispatch` → `handle_action` → `WorkingSetView::nav`, never through the canvas.
+
+### D0-1 — `ActionDef.default` holds one `Chord`; the spec's "Z/Space" toggle needs two actions
+
+**What.** Spec §6.8 names the Fit/100% toggle's default as "Z/Space" — one action, two chords.
+The shipped `ActionDef` (matching the spec's own struct definition one paragraph above) has a
+single `default: Option<Chord>` field, not a set. Rather than change the type (which would ripple
+into `resolve`/`conflicts_with`'s one-chord-per-def assumption and the `keymap.toml` row shape),
+Phase D registers **two** rebindable actions — `view.zoom_toggle` (default `Z`) and
+`view.zoom_toggle_alt` (default `Space`) — both wired to the same handler
+(`EditorCanvas::toggle_zoom_button`).
+
+**Why / impact.** Cosmetic in behavior (both keys still toggle zoom, still independently
+rebindable — arguably a strict improvement, since a user who wants to reassign Space without
+losing Z now can). The cheat sheet shows two rows instead of one "Z/Space" combined row; acceptable
+given the spec's own type doesn't support a combined row without a shape change out of scope for
+this phase.
+
+### D0-2 — raw macOS Control (`⌃`) is a first-class, distinct modifier in `Chord`
+
+**What.** Spec §6.8's `Chord { mods: egui::Modifiers, key: egui::Key }` is used as-is, but egui's
+`Modifiers` is redundant by design (`command` mirrors `mac_cmd` on macOS and `ctrl` on
+Windows/Linux — the same physical ⌘/Ctrl key sets multiple fields depending on platform). A naive
+`Chord` would hash `Cmd+Z` differently depending on which OS produced the input, breaking the
+registry's reverse index and the D1 "parse/display round-trip" AC on the non-native platform.
+`chord.rs` canonicalizes on construction (`Chord::new`/`::from_input`/`::parse` — never build the
+struct literally): `mods.command` is the *logical* primary modifier (⌘ on macOS, Ctrl elsewhere);
+`mods.ctrl` survives only as the *literal* macOS Control key (spelled `MacCtrl`/`⌃`, never
+reachable from non-mac input); `mods.mac_cmd` is always folded to `false`. Documented at length in
+`chord.rs`'s module doc and exercised by
+`raw_input_canonicalizes_identically_across_platforms`/`raw_mac_control_stays_distinct_from_the_
+primary_modifier`.
+
+**Why / impact.** Not a spec contradiction — the spec's struct shape is unchanged — but an
+implementation decision the spec's one-line type declaration left open. Without it, D1's own AC
+("parse/display round-trip on both platforms' display strings") is unsatisfiable: a chord parsed
+from the macOS display string and one parsed from the Windows display string of the "same" binding
+would not compare equal.
+
+### D0-3 — `keymap.toml` location: E04's `default_store_dir`'s parent directory (Phase-G seam)
+
+**What.** Spec §5.1's table says `keymap.toml` lives "same dir" as the (then-hypothetical)
+`prefs.toml`, without naming the directory. Phase D's `keymap::overrides::default_keymap_path`
+resolves it to `lightbox_core::default_store_dir()`'s **parent** — i.e. next to `edits.lbdata`
+(macOS: `~/Library/Application Support/Lightbox/keymap.toml`), reusing E04's hand-rolled
+platform-dir resolution rather than introducing the `directories` crate (the workspace `Cargo.toml`
+already flags `directories` for "the preset config dir" as an *acceptable-if-needed* license
+surface, but Phase D doesn't need it — three env-var reads, same posture as E04's own deviation).
+
+**Why / impact.** This is the seam note the task brief asked for: Phase G's `prefs.toml` (§6.7,
+machine-scope) MUST resolve to the same parent directory this function computes — do not invent a
+second config-dir convention or add `directories` for it. `keymap_path_sits_next_to_the_e04_store_
+dir` pins the relationship as a test so a future Phase-G deviation would be caught by CI, not
+discovered at review time.
+
+### D0-4 — D5 (rebind editor) cut, per task brief; the registry API it needs ships now, unused
+
+**What.** Per this phase's task brief, **D5 (the prefs-panel rebind editor: capture-next-chord,
+conflict warning with steal/cancel, per-row and global reset) is not built** — it needs Phase G's
+prefs panel as a UI host, which doesn't exist yet (Phase E hasn't built the panel framework D5
+would mount into either). `KeymapRegistry::rebind`/`conflicts_with`/`reset`/`reset_all` and
+`Chord::to_config_string`/`save_overrides` are fully implemented and unit/property-tested (the D1
+registry tests exercise `rebind` directly; the D3 round-trip property test exercises
+`save_overrides`) but have **no runtime caller** in this phase — marked `#[allow(dead_code)]` at
+each site with a comment pointing back to this entry, rather than deleting tested, spec-shaped API
+that D5 will call verbatim.
+
+**Why / impact.** Exactly the cut the task brief named ("SKIP D5 rebind-editor — it's a named
+cut-line AND needs Phase G's prefs panel which isn't built"). D4's cheat sheet still reflects live
+bindings correctly (`overrides.rs`'s round-trip tests + `cheatsheet.rs`'s
+`a_rebind_shows_up_without_restart` rebind the registry directly, bypassing the not-yet-built UI —
+proving the *reflection* half of D5's AC without the *editor* half).
+
+### D0-5 — `gizmo.cancel`/`gizmo.commit` registered now; no handler fires (Phase F seam)
+
+**What.** Spec §6.8 lists `gizmo.cancel` (Esc) and `gizmo.commit` (Enter) in the M1 default set.
+Both are registered in `keymap::default_registry` (rebindable, appear in the cheat sheet's "Tools"
+category) with contexts `&[CTX_GIZMO]`. `lib.rs::keymap_stack` never pushes `CTX_GIZMO` (no gizmo
+exists yet — Phase F builds `GizmoLayer`), so `dispatch` never resolves these chords in the running
+app; `handle_action`'s match arm for them is an intentional no-op with a comment, not a
+`todo!()`/panic, so a stray dispatch (impossible today, but future-proof) doesn't crash.
+
+**Why / impact.** Registering ahead of the consumer is the pattern the spec's own "E10/E11/E12
+register theirs later" line describes; Phase F wires the real handlers (cancel → `GizmoLayer`
+abort + context pop, commit → gesture end) and pushes `CTX_GIZMO` when a gizmo captures input. No
+behavior regression — the actions are simply unreachable until Phase F, same as `app.prefs`
+(§6.8 explicitly allows a "stub target" for it).
+
+### Exit-bar result (Phase D, full workspace)
+
+`cargo build --workspace` / `cargo test --workspace` (87 test binaries, 0 failures) /
+`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all --check` /
+`cargo deny check` (`advisories ok, bans ok, licenses ok, sources ok`; the pre-existing
+`windows_x86_64_msvc`/`bitflags`/etc. duplicate-version *warnings* from `eframe`/`winit` are
+unrelated to this phase — no new dependency crossed a license-surface boundary; `toml` and
+`proptest` were already workspace deps used by other crates) / `cargo xtask lint-migrations`
+(`migration registry ok: 5 reserved numbers, 5 shipped migration files` — Phase D touches no
+schema) all green. `cargo run -p lightbox-shell --bin lightbox -- --smoke 60` re-verified on real
+Metal hardware: `seam-2 smoke: frames=61 texture_swaps=1 filmstrip_shown=true seam_proven=true`,
+exit 0. No pre-existing-flake sighting this run (the documented `lightbox-preview`
+`t19_t21_t22_facade_methods_compose_end_to_end` load-sensitivity did not trigger).
+
+### Not built in Phase D (named, not silently skipped)
+
+* **D5 rebind editor** — see D0-4. The registry API it needs is complete.
+* **Phase G's `prefs.toml`/machine-scope prefs store** — doesn't exist; `app.prefs` is a stub
+  status-line message per the task brief's explicit allowance.
+* **Phase F's `GizmoLayer`/`CTX_GIZMO` push** — see D0-5; `gizmo.cancel`/`gizmo.commit` are
+  registered but unreachable until then.
+* **Phase E's develop-panel rail content** — `panel.toggle_rail` (Tab) now shows/hides the
+  existing Phase-A/C placeholder rail; there is still nothing but placeholder text inside it.
+
+### Note on the mid-phase watchdog stall
+
+An earlier pass of this same agent session was interrupted by a watchdog timeout after landing
+D1–D4's code and tests but before writing this deviations section or the exit-bar report; an
+outer harness recovered the working tree and committed it (`5087545`, "salvaged from stalled
+agent") with a placeholder note in place of this section, explicitly flagging the code as the
+authoritative record over any summary. This section supersedes that placeholder: it was written
+after re-deriving the D0-1..D0-5 rationale from the actual shipped code and re-running the full
+exit bar (build/test/clippy/fmt/deny/lint-migrations) plus `--smoke 60` fresh, end to end, in this
+same follow-up pass — nothing here is copied from the interrupted run's lost transcript.
