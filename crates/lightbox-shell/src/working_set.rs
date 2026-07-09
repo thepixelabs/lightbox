@@ -149,14 +149,10 @@ impl WorkingSetView {
     }
 
     /// The active entry's `ImageId`, when it has reached `Ready` (the only
-    /// state the canvas/panels can address — spec §6.4/§6.5).
-    /// `#[allow(dead_code)]`: as of E08 Phase C, `lib.rs` projects
-    /// `active()`'s `ItemState` directly (it needs the non-`Ready` arms
-    /// too — the canvas now renders Loading/Failed/Duplicate placards
-    /// itself, spec C5); this narrower accessor is kept as a reasonable
-    /// public seam (Phase E's info panel, Phase D's keymap dispatch) and
-    /// is exercised by this module's own tests.
-    #[allow(dead_code)]
+    /// state the canvas/panels can address — spec §6.4/§6.5). Phase D's
+    /// `edit.undo`/`edit.redo` actions target this; Phase E's info panel
+    /// will too. `lib.rs`'s canvas projection still reads `active()`
+    /// directly (it needs the non-`Ready` arms for the C5 placards).
     pub fn active_image(&self) -> Option<ImageId> {
         match self.active()?.state {
             ItemState::Ready { image, .. } => Some(image),

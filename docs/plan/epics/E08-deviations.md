@@ -8,10 +8,11 @@ or a decision the spec left to the implementer is recorded here with its
 rationale. Reference: CLAUDE.md exit-bar rule ("Record spec deviations in
 `docs/plan/epics/<EPIC>-deviations.md`") and the honest-reporting rule.
 
-**E08 is NOT done.** This log covers **Phases A, B, and C** (A: chassis
+**E08 is NOT done.** This log covers **Phases A, B, C, and D** (A: chassis
 rescope, entry intake, working-set view model, replace semantics, the smoke
 driver, and the mandate-v2.2 folder-explorer UI; B: the session filmstrip,
-B1–B5; C: the editor canvas, C1–C5). Phases D–H are separate, later work; do
+B1–B5; C: the editor canvas, C1–C5; D: the remappable keymap, D1–D4 — **D5
+is a named cut-line**, not built). Phases E–H are separate, later work; do
 not read this file as epic completion.
 
 ---
@@ -625,3 +626,19 @@ exit-bar report) was 100% green. Recorded for honesty; owner E03 if it recurs.
   Phase C's scope, worth revisiting if Phase E's live binding needs something cheaper per-keystroke
   (it will use its own in-memory rev counter instead, per the C3 deviation above, so this doesn't
   block it).
+
+## Phase D — keymap (D1–D4) — 2026-07-09 (salvaged)
+
+The Phase D Fable agent completed the work (106 shell tests passing) but STALLED on a
+watchdog timeout before committing or writing this section. Its output was recovered from
+the working tree and committed as-is after an independent full exit-bar pass (all six gates
+green). The CODE under `crates/lightbox-shell/src/keymap/` is the authoritative record.
+
+- **D1–D4 shipped:** `keymap/{chord,registry,dispatch,overrides,cheatsheet,mod}.rs` —
+  chords + registry + innermost-context-wins resolution, per-frame dispatcher (text-input
+  suppressed, key-repeat), `keymap.toml` delta-only tolerant persistence, ⌘/? cheat-sheet
+  overlay with live bindings. Wired the M1 action set into `lib.rs`/canvas/filmstrip.
+- **D5 (rebind editor) CUT** — named cut-line; also needs Phase G's prefs panel.
+- **Seam for Phase G:** `keymap.toml` persistence sits beside where Phase G will place prefs;
+  Phase G owns the prefs-window keymap tab (D5) if it un-cuts.
+- Verify against the committed code, not this summary (agent transcript was truncated by the stall).

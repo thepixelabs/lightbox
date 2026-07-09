@@ -36,14 +36,24 @@
 //! prefs). **Phase C** generalizes the E01/F5 loupe into the `canvas`
 //! module (`ViewXform`, the zoom ladder, recipe-driven submit, progressive
 //! tier→engine display, and canvas states — see `canvas/mod.rs`'s module
-//! docs); the develop-panel rail is still a placeholder (Phase E); the
-//! keymap (Phase D) and prefs store (Phase G) do not exist yet.
+//! docs). **Phase D** adds the remappable keymap (`keymap/` — spec §6.8):
+//! every keyboard route now goes through one per-frame dispatcher that
+//! runs **before** any widget is built (matched chords are consumed;
+//! text-input focus suppresses non-modifier chords), with `keymap.toml`
+//! overrides and the ⌘/ cheat-sheet overlay. The per-widget key handlers
+//! Phases B/C carried (`filmstrip::nav_delta`, the canvas's arrow/Z/Space
+//! block) are gone — `nav.*`/`view.*` actions replaced them, exactly the
+//! collapse their TODOs promised. The develop-panel rail is still a
+//! placeholder (Phase E, toggled by `panel.toggle_rail`); the prefs store
+//! (Phase G) does not exist yet; the D5 rebind editor is the phase's
+//! named cut-line (the registry API it needs is complete and tested).
 
 mod canvas;
 mod empty_state;
 mod explorer;
 mod filmstrip;
 mod intake;
+mod keymap;
 mod smoke;
 mod thumbs;
 mod working_set;
@@ -61,10 +71,12 @@ use lightbox_core::{
 use lightbox_render::GpuContext;
 use lightbox_types::ImageId;
 
-use crate::canvas::{ActiveEntry, CanvasAction, CanvasContent, EditorCanvas, SessionRecipeSource};
+use crate::canvas::{ActiveEntry, CanvasContent, EditorCanvas, SessionRecipeSource};
 use crate::empty_state::empty_state_ui;
 use crate::explorer::{ExplorerAction, FolderExplorer};
 use crate::filmstrip::{EditedBadges, FilmstripAction, FilmstripState};
+use crate::keymap::cheatsheet::CheatSheet;
+use crate::keymap::{ActionId, ContextId, KeymapRegistry};
 use crate::smoke::SmokeDriver;
 use crate::thumbs::ThumbCache;
 use crate::working_set::WorkingSetView;
@@ -198,6 +210,14 @@ struct LightboxApp {
     filmstrip: FilmstripState,
     /// B3 edited-dot cache over `Queries::edit_badges` (event-driven).
     badges: EditedBadges,
+    /// D1/D2: the action registry (M1 defaults + `keymap.toml` overrides),
+    /// resolved by the per-frame dispatcher at the top of `ui()`.
+    registry: KeymapRegistry,
+    /// D4: the ⌘/ cheat-sheet overlay.
+    cheatsheet: CheatSheet,
+    /// D2 `panel.toggle_rail`: whether the right develop rail is shown
+    /// (in-session; Phase G persists workspace layout).
+    rail_visible: bool,
     explorer: FolderExplorer,
     /// The active image the canvas last rendered — compared each frame so a
     /// change (click/nav/auto-activation) resets zoom/pan exactly once
@@ -299,6 +319,28 @@ impl LightboxApp {
         );
         let recipe_source = SessionRecipeSource::new(session.clone());
         let working_set = WorkingSetView::new(&session);
+
+        // D1/D3: the M1 action set, plus the user's keymap.toml rebind
+        // delta. Smoke runs skip the user's file (deterministic CI, same
+        // posture as the throwaway catalog). A corrupt/partial file is
+        // NEVER fatal (§7) — defaults + a status notice.
+        let mut registry = keymap::default_registry();
+        let mut status = String::new();
+        if smoke.is_none() {
+            match registry.load_overrides(&keymap::overrides::default_keymap_path()) {
+                Ok(report) => {
+                    if let Some(notice) = report.notice() {
+                        tracing::warn!(target: "lightbox_shell", "{notice}");
+                        status = notice;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(target: "lightbox_shell", %err, "keymap overrides unreadable");
+                    status = err.to_string();
+                }
+            }
+        }
+
         Ok(LightboxApp {
             working_set,
             _core: core,
@@ -310,9 +352,12 @@ impl LightboxApp {
             device_degraded: None,
             filmstrip: FilmstripState::new(),
             badges: EditedBadges::new(),
+            registry,
+            cheatsheet: CheatSheet::new(),
+            rail_visible: true,
             explorer: FolderExplorer::closed(),
             last_shown_image: None,
-            status: String::new(),
+            status,
             stats: FrameStats::new(),
             show_overlay: cfg!(debug_assertions),
             outcome,
@@ -392,12 +437,75 @@ impl LightboxApp {
         self.session.submit(Command::OpenWorkingSet { request });
     }
 
+    /// `app.open` / the "Open Files…" button: the OS multi-select dialog
+    /// → one `OpenWorkingSet` (A3 path, now also keymap-reachable).
+    fn open_files_dialog(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new().set_title("Open Images").pick_files() {
+            self.open(OpenRequest::new(paths, false, OpenOrigin::OpenDialog));
+        }
+    }
+
+    /// D2: the frame's context stack (spec §6.8) — `app` → `editor`, plus
+    /// `editor.loupe` while the canvas shows an active entry. Phase E/F
+    /// push `editor.panels` / `editor.gizmo.*` when they exist.
+    fn keymap_stack(&self) -> Vec<ContextId> {
+        let mut stack = vec![keymap::CTX_APP, keymap::CTX_EDITOR];
+        if self.working_set.active().is_some() {
+            stack.push(keymap::CTX_LOUPE);
+        }
+        stack
+    }
+
+    /// D2: one dispatched action → its M1 target. Every arm goes through
+    /// the same seam a click would (filmstrip nav = `WorkingSetView::nav`,
+    /// zoom = the canvas's C2 entry points, undo/redo = E09's
+    /// `Command::Edit`, open = the A3 intake path).
+    fn handle_action(&mut self, action: ActionId) {
+        match action {
+            keymap::APP_OPEN => self.open_files_dialog(),
+            keymap::APP_PREFS => {
+                // Stub target: the performance-preferences panel is Phase
+                // G — the action exists (and is rebindable) now.
+                self.status = "Preferences land in E08 Phase G.".to_owned();
+            }
+            keymap::APP_CHEATSHEET => self.cheatsheet.toggle(),
+            keymap::EDIT_UNDO | keymap::EDIT_REDO => {
+                // Only a Ready entry has an image to address (§6.4/§6.5).
+                if let Some(image) = self.working_set.active_image() {
+                    let cmd = if action == keymap::EDIT_UNDO {
+                        lightbox_core::EditCommand::Undo { image }
+                    } else {
+                        lightbox_core::EditCommand::Redo { image }
+                    };
+                    self.session.submit(Command::Edit(cmd));
+                }
+            }
+            keymap::NAV_NEXT => self.working_set.nav(1),
+            keymap::NAV_PREV => self.working_set.nav(-1),
+            keymap::VIEW_ZOOM_TOGGLE | keymap::VIEW_ZOOM_TOGGLE_ALT => {
+                self.canvas.toggle_zoom_button();
+            }
+            keymap::VIEW_ZOOM_IN => self.canvas.zoom_step(1),
+            keymap::VIEW_ZOOM_OUT => self.canvas.zoom_step(-1),
+            keymap::PANEL_TOGGLE_RAIL => self.rail_visible = !self.rail_visible,
+            keymap::FILM_TOGGLE => {
+                let collapsed = self.filmstrip.collapsed();
+                self.filmstrip.set_collapsed(!collapsed);
+            }
+            // Registered per §6.8 so they're rebindable/visible in the
+            // cheat sheet, but their context (`editor.gizmo`) is never on
+            // the stack until Phase F's GizmoLayer pushes it.
+            keymap::GIZMO_CANCEL | keymap::GIZMO_COMMIT => {}
+            other => {
+                debug_assert!(false, "dispatched action {:?} has no handler", other.0);
+            }
+        }
+    }
+
     fn top_bar(&mut self, ui: &mut egui::Ui, intake_skipped: usize) {
         ui.horizontal(|ui| {
             if ui.button("Open Files…").clicked() {
-                if let Some(paths) = rfd::FileDialog::new().set_title("Open Images").pick_files() {
-                    self.open(OpenRequest::new(paths, false, OpenOrigin::OpenDialog));
-                }
+                self.open_files_dialog();
             }
             if ui.button("Open Folder…").clicked() {
                 if let Some(dir) = rfd::FileDialog::new()
@@ -548,6 +656,15 @@ impl eframe::App for LightboxApp {
             self.show_overlay = !self.show_overlay;
         }
 
+        // D2: keymap dispatch — BEFORE any widget is built, so matched
+        // chords are consumed and never double-handled (keymap/dispatch.rs
+        // module docs). The stack is rebuilt per frame; handlers run
+        // immediately (same frame as the input, §7).
+        let stack = self.keymap_stack();
+        for action in keymap::dispatch::dispatch(&ctx, &self.registry, &stack) {
+            self.handle_action(action);
+        }
+
         // A2: fold this frame's drop/hover input. The recursive default is
         // fixed at `false` in Phase A — the real prefs knob (§6.7
         // `drop_recursive_default`) lands with Phase G; Alt still overrides
@@ -580,14 +697,17 @@ impl eframe::App for LightboxApp {
         egui::Panel::bottom(egui::Id::new("lightbox-status")).show(root, |ui| self.status_bar(ui));
 
         // Right develop-panel rail placeholder (A1 chassis AC; real content
-        // is Phase E's `panels/` framework).
-        egui::Panel::right(egui::Id::new("lightbox-develop-rail"))
-            .resizable(false)
-            .default_size(220.0)
-            .show(root, |ui| {
-                ui.heading("Develop");
-                ui.weak("Panels land in E08 Phase E.");
-            });
+        // is Phase E's `panels/` framework). `panel.toggle_rail` (Tab)
+        // shows/hides it.
+        if self.rail_visible {
+            egui::Panel::right(egui::Id::new("lightbox-develop-rail"))
+                .resizable(false)
+                .default_size(220.0)
+                .show(root, |ui| {
+                    ui.heading("Develop");
+                    ui.weak("Panels land in E08 Phase E.");
+                });
+        }
 
         // C5: project the active working-set entry's `ItemState` into a
         // `CanvasContent` the canvas owns rendering for (placard/shimmer/
@@ -621,20 +741,6 @@ impl eframe::App for LightboxApp {
             ),
             ItemState::DuplicateOf { index } => ActiveProjection::Duplicate(index),
         });
-
-        // B4: repeatable ←/→ nav. The canvas owns the arrow keys (and the
-        // Fit/100% toggle) whenever it's actually mounted — i.e. whenever
-        // SOMETHING is active, any `ActiveProjection` arm (its T26 handler,
-        // kept as-is, feeds `CanvasAction::Navigate` below). This app-level
-        // route covers only the remaining case (nothing active at all) so
-        // exactly one component acts per press.
-        // TODO(E08 Phase D): both routes collapse into keymap `nav.*`.
-        if projection.is_none() {
-            let delta = filmstrip::nav_delta(&ctx);
-            if delta != 0 {
-                self.working_set.nav(delta);
-            }
-        }
 
         // Bottom filmstrip strut (Phase B: resizable / collapsible, badge
         // chrome from the event-driven edit-badge cache).
@@ -729,7 +835,7 @@ impl eframe::App for LightboxApp {
                 let canvas = &mut self.canvas;
                 let recipe_source = &mut self.recipe_source;
                 let device_degraded = self.device_degraded.as_deref();
-                if let Some(CanvasAction::Navigate(next)) = canvas.ui(
+                canvas.ui(
                     ui,
                     &scheduler,
                     max_tex_dim,
@@ -738,11 +844,7 @@ impl eframe::App for LightboxApp {
                     idx,
                     total,
                     device_degraded,
-                ) {
-                    // §6.2 `nav`: clamped relative navigation — the canvas
-                    // only ever proposes an adjacent index (±1).
-                    self.working_set.nav(next as isize - idx as isize);
-                }
+                );
             }
             None if self.working_set.is_empty() => {
                 empty_state_ui(ui, intake_frame.hover);
@@ -770,6 +872,10 @@ impl eframe::App for LightboxApp {
         // in-flight thumb tickets are cancelled here on the very next frame.
         let cap = (visible.len() * 3).max(64);
         self.thumbs.end_frame(&visible, cap);
+
+        // D4: the cheat-sheet overlay (⌘/ toggles via `app.cheatsheet`),
+        // rendered over everything with this frame's live context stack.
+        self.cheatsheet.ui(&ctx, &self.registry, &stack);
 
         if self.show_overlay {
             self.overlay(&ctx);

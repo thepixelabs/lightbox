@@ -23,4 +23,4 @@ pub mod xform;
 // `states::CanvasPlacard` stay reachable at their full paths for callers
 // that need to name them explicitly (Phase E's `EditBinding` adapter,
 // Phase F's gizmo hit-testing) without an unused top-level re-export today.
-pub use view::{ActiveEntry, CanvasAction, CanvasContent, EditorCanvas, SessionRecipeSource};
+pub use view::{ActiveEntry, CanvasContent, EditorCanvas, SessionRecipeSource};

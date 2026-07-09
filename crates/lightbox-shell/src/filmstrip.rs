@@ -18,12 +18,14 @@
 //!   `edit_index` projection via [`EditedBadges`]), error/duplicate badges
 //!   with hover reasons, clipped filename label. **No stars, no flags, no
 //!   labels** — the library rating UI is retired (spec §2.2).
-//! * **B4** — [`nav_delta`] (repeatable ←/→, one step per key-repeat
-//!   event), instant scroll-to-active, plain-wheel horizontal scrolling,
-//!   ⌘/⇧-click multi-select retained (dormant) for M2 batch ops. The
-//!   nav-swap latency probe stays where Phase A left it (`EditorCanvas::
-//!   nav_swap_ms` as of Phase C, surfaced in the F1 overlay); the formal
-//!   p95 gate is H2.
+//! * **B4** — keyboard nav (repeatable ←/→; since Phase D the keymap's
+//!   `nav.next`/`nav.prev` actions, dispatched in `lib.rs` and applied via
+//!   `WorkingSetView::nav` — the interim `nav_delta` helper collapsed into
+//!   the dispatcher exactly as planned), instant scroll-to-active,
+//!   plain-wheel horizontal scrolling, ⌘/⇧-click multi-select retained
+//!   (dormant) for M2 batch ops. The nav-swap latency probe stays where
+//!   Phase A left it (`EditorCanvas::nav_swap_ms` as of Phase C, surfaced
+//!   in the F1 overlay); the formal p95 gate is H2.
 //! * **B5** — drag-resize (48–160 pt via the host panel's `size_range`,
 //!   read back into [`FilmstripState`]), collapse toggle
 //!   ([`collapsed_bar_ui`]), and the overflow position indicator
@@ -354,38 +356,6 @@ impl FilmstripState {
             self.anchor = Some(idx);
         }
     }
-}
-
-/// B4 `nav.next`/`nav.prev`: net arrow-key steps this frame, counted per
-/// event so holding the key repeats (one step per OS key-repeat). Text
-/// focus suppresses it — the same `egui_wants_keyboard_input` guard the
-/// loupe's T26 keys use; the caller gates on the loupe *not* being mounted
-/// so exactly one component acts per press.
-///
-/// TODO(E08 Phase D): both this and the loupe's arrow handling collapse
-/// into the keymap registry's `nav.next`/`nav.prev` actions (repeatable).
-pub fn nav_delta(ctx: &egui::Context) -> isize {
-    if ctx.egui_wants_keyboard_input() {
-        return 0;
-    }
-    ctx.input(|i| {
-        i.events
-            .iter()
-            .map(|ev| match ev {
-                egui::Event::Key {
-                    key: egui::Key::ArrowRight,
-                    pressed: true,
-                    ..
-                } => 1,
-                egui::Event::Key {
-                    key: egui::Key::ArrowLeft,
-                    pressed: true,
-                    ..
-                } => -1,
-                _ => 0,
-            })
-            .sum()
-    })
 }
 
 // ─── B2/B3/B5: rendering ────────────────────────────────────────────────────
@@ -920,12 +890,16 @@ mod tests {
         }
     }
 
-    /// The test app: mirrors `lib.rs`'s frame loop (nav → strip/collapsed
-    /// bar → activation → `end_frame`) over synthetic cells.
+    /// The test app: mirrors `lib.rs`'s frame loop (keymap dispatch →
+    /// strip/collapsed bar → activation → `end_frame`) over synthetic
+    /// cells.
     struct StripApp {
         provider: Arc<StubProvider>,
         state: FilmstripState,
         thumbs: ThumbCache,
+        /// Phase D: nav arrives as `nav.next`/`nav.prev` through the real
+        /// dispatcher, exactly like `lib.rs`.
+        registry: crate::keymap::KeymapRegistry,
         cells: Vec<StripCell>,
         active: Option<usize>,
         /// `cell_of` invocations last frame (B2 virtualization assertion).
@@ -950,6 +924,7 @@ mod tests {
             thumbs: ThumbCache::new(Arc::clone(&provider) as Arc<dyn PreviewProvider>),
             provider,
             state: FilmstripState::new(),
+            registry: crate::keymap::default_registry(),
             cells,
             active,
             materialized_last_frame: Cell::new(0),
@@ -957,12 +932,23 @@ mod tests {
         };
         let mut harness = Harness::new_ui_state(
             |ui, app: &mut StripApp| {
-                // B4 nav — the same clamped stepping `WorkingSetView::nav`
-                // applies in the real app.
-                let d = nav_delta(ui.ctx());
-                if d != 0 && !app.cells.is_empty() {
-                    let cur = app.active.unwrap_or(0) as isize;
-                    app.active = Some((cur + d).clamp(0, app.cells.len() as isize - 1) as usize);
+                // B4 nav through the Phase-D dispatcher (as in `lib.rs`);
+                // the same clamped stepping `WorkingSetView::nav` applies
+                // in the real app.
+                let stack = [crate::keymap::CTX_APP, crate::keymap::CTX_EDITOR];
+                for action in crate::keymap::dispatch::dispatch(ui.ctx(), &app.registry, &stack) {
+                    let d: isize = if action == crate::keymap::NAV_NEXT {
+                        1
+                    } else if action == crate::keymap::NAV_PREV {
+                        -1
+                    } else {
+                        0
+                    };
+                    if d != 0 && !app.cells.is_empty() {
+                        let cur = app.active.unwrap_or(0) as isize;
+                        app.active =
+                            Some((cur + d).clamp(0, app.cells.len() as isize - 1) as usize);
+                    }
                 }
 
                 if app.state.collapsed() {

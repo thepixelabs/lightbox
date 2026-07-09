@@ -175,14 +175,6 @@ pub enum CanvasContent<'a> {
     },
 }
 
-/// What a canvas frame asks the app to do.
-#[derive(Debug, PartialEq)]
-pub enum CanvasAction {
-    /// Navigate to this working-set index (←/→); the app updates the
-    /// working-set view's active entry.
-    Navigate(usize),
-}
-
 // ─── C3: the recipe seam ────────────────────────────────────────────────────
 
 /// A recipe + a cheap, monotonic "did the effective recipe change" counter
@@ -543,6 +535,9 @@ pub struct EditorCanvas {
     last_quality: Option<OutputQuality>,
     zoom: ZoomMode,
     pan: egui::Vec2,
+    /// D2 `view.zoom_in`/`out`: ladder steps queued by [`Self::zoom_step`]
+    /// (keymap), applied in `ready_ui` where the Fit percent is known.
+    pending_zoom_steps: i32,
     /// Navigation → texture-swap latency probe (T26 AC, carried forward:
     /// < 50 ms p95).
     nav_started: Option<Instant>,
@@ -572,6 +567,7 @@ impl EditorCanvas {
             last_quality: None,
             zoom: ZoomMode::Fit,
             pan: egui::Vec2::ZERO,
+            pending_zoom_steps: 0,
             nav_started: None,
             nav_swap_ms: Vec::new(),
         }
@@ -583,6 +579,7 @@ impl EditorCanvas {
     pub fn enter(&mut self, image: ImageId) {
         self.zoom = ZoomMode::Fit;
         self.pan = egui::Vec2::ZERO;
+        self.pending_zoom_steps = 0;
         self.last_key = None; // force a submit for the (possibly new) image
         self.progressive = ProgressiveDisplay::default();
         self.tier.activate(image);
@@ -628,11 +625,27 @@ impl EditorCanvas {
         self.pan = egui::Vec2::ZERO;
     }
 
+    /// D2 `view.zoom_in`/`view.zoom_out` (keymap): queues ladder steps to
+    /// apply on the next rendered frame, where the Fit percent is known —
+    /// anchored at the view center (the wheel path anchors at the cursor).
+    pub fn zoom_step(&mut self, delta: i32) {
+        self.pending_zoom_steps += delta;
+    }
+
     /// Renders one canvas frame. `content` is the caller's per-frame
     /// projection of the active working-set entry (spec C5); `idx`/`total`
-    /// are for nav-clamping and the info overlay; `device_degraded` is
+    /// feed the info overlay's position readout; `device_degraded` is
     /// `Some(reason)` while the engine's device is degraded (spec C5 — a
     /// non-modal chip, never blocking).
+    ///
+    /// Keyboard input never arrives here: as of Phase D the keymap
+    /// dispatcher (`keymap/dispatch.rs`) runs before any widget and drives
+    /// nav/zoom through [`WorkingSetView::nav`]-in-`lib.rs` /
+    /// [`Self::toggle_zoom_button`] / [`Self::zoom_step`] — the pre-D
+    /// per-widget T26 key handler collapsed into `nav.*`/`view.*` actions
+    /// exactly as its TODO promised.
+    ///
+    /// [`WorkingSetView::nav`]: crate::working_set::WorkingSetView::nav
     #[allow(clippy::too_many_arguments)]
     pub fn ui(
         &mut self,
@@ -644,29 +657,8 @@ impl EditorCanvas {
         idx: usize,
         total: usize,
         device_degraded: Option<&str>,
-    ) -> Option<CanvasAction> {
-        let mut action = None;
+    ) {
         let view_rect = ui.available_rect_before_wrap();
-
-        // --- Keys: ←/→ nav, Fit/100% toggle — unless a text field owns the
-        // keyboard (T26, carried forward).
-        if !ui.ctx().egui_wants_keyboard_input() {
-            ui.ctx().input(|i| {
-                if i.key_pressed(egui::Key::ArrowRight) && idx + 1 < total {
-                    action = Some(CanvasAction::Navigate(idx + 1));
-                }
-                if i.key_pressed(egui::Key::ArrowLeft) && idx > 0 {
-                    action = Some(CanvasAction::Navigate(idx - 1));
-                }
-                if i.key_pressed(egui::Key::Z) || i.key_pressed(egui::Key::Space) {
-                    self.toggle_zoom();
-                }
-            });
-        }
-        if let Some(CanvasAction::Navigate(_)) = action {
-            self.pan = egui::Vec2::ZERO;
-            self.nav_started = Some(Instant::now());
-        }
 
         match content {
             CanvasContent::Ready(entry) => {
@@ -712,8 +704,6 @@ impl EditorCanvas {
                 false,
             );
         }
-
-        action
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -763,6 +753,28 @@ impl EditorCanvas {
         } else {
             1.0
         };
+
+        // D2: keyboard zoom (`view.zoom_in`/`out`), queued by the keymap
+        // dispatcher — same ladder as the wheel, anchored at the view
+        // center (no cursor to anchor to).
+        let steps = std::mem::take(&mut self.pending_zoom_steps);
+        if steps != 0 {
+            let old_percent = self.zoom.resolve(fit_percent);
+            let mut new_percent = old_percent;
+            for _ in 0..steps.unsigned_abs() {
+                new_percent = ladder_step(new_percent, steps.signum());
+            }
+            if (new_percent - old_percent).abs() > f32::EPSILON {
+                self.pan = pan_for_zoom_to_cursor(
+                    self.pan,
+                    old_percent / ppp,
+                    new_percent / ppp,
+                    view_rect.center(),
+                    view_rect.center(),
+                );
+                self.zoom = ZoomMode::Percent(new_percent);
+            }
+        }
 
         if response.hovered() {
             let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
