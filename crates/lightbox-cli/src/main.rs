@@ -52,6 +52,10 @@ mod e02;
 // `snapshot`/`preset`/`xmp` subcommands over the `Command::Edit`/`EditHub`
 // seam.
 mod edit;
+// E04 (spec §4.6, mandate v2.2 addendum): `open` — the headless
+// Command::OpenWorkingSet driver; `browse` — the headless folder-explorer
+// harness.
+mod open;
 // E03 Phase D (T14): `preview build/stat/verify/purge` over the
 // `Command::BuildPreviews`/`Queries::cache_stats`/`PreviewService` seam.
 mod preview;
@@ -69,12 +73,19 @@ lightbox-cli — headless Lightbox driver (E01 spec §3.10 + E02 spec §1.1)
 
 USAGE:
   lightbox-cli create --catalog <dir>.lbdata
-  lightbox-cli import --catalog <dir> --add <src-dir> [--recursive]
   lightbox-cli list   --catalog <dir> [--folder <id>] [--limit <n>] [--json]
   lightbox-cli render --catalog <dir> --image <id> --out <out.png> [--width <n>] [--cpu]
   lightbox-cli backup --catalog <dir>
   lightbox-cli check  --catalog <dir>
   lightbox-cli look-dev --look <file.lblook> --out <dir> [--amount <f>]
+
+  E04 working-set loader / folder explorer (headless — the v2.0 entry path):
+  lightbox-cli open   <PATH>... [--recursive] [--store <dir>.lbdata] [--json]
+  lightbox-cli browse <DIR> [--json]
+
+  E01 managed-import harness (legacy, testing only — retired-dormant as of
+  E04; the shell never reaches this path, `open` above is the v2.0 entry):
+  lightbox-cli import --catalog <dir> --add <src-dir> [--recursive]
 
   E02 decode → color → look reference path (headless):
   lightbox-cli probe      --file <path> [--json]
@@ -172,6 +183,11 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
     let rest = &args[1..];
     match cmd.as_str() {
         "create" => cmd_create(rest),
+        // E04 (spec §4.6): the v2.0 entry path.
+        "open" => open::cmd_open(rest),
+        "browse" => open::cmd_browse(rest),
+        // (legacy, testing only) — retired-dormant as of E04, see the
+        // module doc comment on `Command::ImportAddInPlace`.
         "import" => cmd_import(rest),
         "list" => cmd_list(rest),
         "render" => cmd_render(rest),

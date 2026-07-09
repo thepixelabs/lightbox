@@ -39,6 +39,8 @@ lightbox-jobs.workspace = true
 # PNG encoding for `render --out` (the workspace `png` codec, wrapped by the
 # golden harness's Rgba8Image — no new third-party dependency).
 lbx-image-compare.workspace = true
+# `open --json`'s per-item line type derives Serialize (Appended dep; E04).
+serde.workspace = true
 serde_json.workspace = true
 # `sync` only: Session::events() hands out a tokio broadcast Receiver (the
 # frozen §3.8 surface); draining it needs the broadcast error types.
@@ -46,6 +48,11 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only: E04's corrupt-store E2E forces a WAL checkpoint before
+# bit-flipping the main db file (a small test catalog may never cross
+# SQLite's automatic checkpoint threshold on its own). Not part of the
+# shipped binary's dependency tree (dev-dependency only).
+rusqlite.workspace = true
 
 [lints]
 workspace = true

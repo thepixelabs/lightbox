@@ -21,7 +21,7 @@ use lightbox_catalog::{
 use lightbox_edit::{EditState, HistoryStepMeta, PresetId, PresetMeta, Recipe, SnapshotMeta};
 use lightbox_meta::xmp::sync::DivergenceStatus;
 use lightbox_preview::{CacheStats, PreviewDesc, PreviewService};
-use lightbox_types::{AssetId, ImageId};
+use lightbox_types::{AssetId, ContentHash, ImageId};
 
 use crate::edit_hub::EditHub;
 use crate::error::Result;
@@ -67,6 +67,12 @@ impl Queries {
     /// Absolute path of an asset (`root.path ⊕ folder.rel_path ⊕ filename`).
     pub fn asset_abs_path(&self, id: AssetId) -> Result<PathBuf> {
         Ok(self.reader.asset_abs_path(id)?)
+    }
+
+    /// An asset's content hash (E04 spec §4.6: the CLI `open` harness prints
+    /// it per item). Additive read-only accessor, mirrors `asset_abs_path`.
+    pub fn asset_content_hash(&self, id: AssetId) -> Result<ContentHash> {
+        Ok(self.reader.asset_content_hash(id)?)
     }
 
     /// Row counts across the spine tables.

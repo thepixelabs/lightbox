@@ -1997,6 +1997,8 @@ dependencies = [
  "lightbox-jobs",
  "lightbox-render",
  "lightbox-types",
+ "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

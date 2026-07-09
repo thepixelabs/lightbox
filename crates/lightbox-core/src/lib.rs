@@ -35,6 +35,8 @@ mod preview_runtime;
 mod queries;
 mod render_source;
 mod session;
+// E04: the default edit-store location for a library-less app.
+mod store_dir;
 // E04: the working-set model (spec §4.5) — WorkingSetModel + the
 // WorkingSetSnapshot/SetPhase/ItemState vocabulary Session::working_set()
 // hands out.
@@ -48,6 +50,7 @@ pub use error::{CoreError, Result};
 pub use event::{ChangeSet, Event};
 pub use queries::Queries;
 pub use session::{CloseOpts, ClosePolicy, CloseReport, Core, Session};
+pub use store_dir::default_store_dir;
 pub use working_set::{ItemState, SetEpoch, SetPhase, WorkingSetItem, WorkingSetSnapshot};
 
 // The E09 edit-state vocabulary (spec §3.4) — re-exported so callers (the

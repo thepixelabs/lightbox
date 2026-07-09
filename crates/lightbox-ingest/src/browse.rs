@@ -26,7 +26,7 @@ use crate::pipeline::{has_known_extension, is_hidden};
 use crate::IngestError;
 
 /// One directly-contained supported image file (spec addendum v2.2).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ImageEntry {
     /// Absolute path, exactly as returned by `read_dir` (not canonicalized —
     /// this is a live listing, not an identity-bearing open).
@@ -39,7 +39,7 @@ pub struct ImageEntry {
 /// What one [`browse_dir`] call found: `dir`'s **immediate** children only
 /// (not recursive — nested navigation means calling this again on a
 /// clicked-into subdirectory).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct DirListing {
     /// Child subdirectories, sorted by name. Hidden (dot-name) directories
     /// are skipped, matching the working-set loader's walk convention.
