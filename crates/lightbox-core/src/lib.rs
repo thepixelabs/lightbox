@@ -35,6 +35,10 @@ mod preview_runtime;
 mod queries;
 mod render_source;
 mod session;
+// E04: the working-set model (spec §4.5) — WorkingSetModel + the
+// WorkingSetSnapshot/SetPhase/ItemState vocabulary Session::working_set()
+// hands out.
+mod working_set;
 
 pub use check::{check_catalog, CatalogCheck};
 pub use command::{Command, CommandTicket, EditCommand};
@@ -44,6 +48,7 @@ pub use error::{CoreError, Result};
 pub use event::{ChangeSet, Event};
 pub use queries::Queries;
 pub use session::{CloseOpts, ClosePolicy, CloseReport, Core, Session};
+pub use working_set::{ItemState, SetEpoch, SetPhase, WorkingSetItem, WorkingSetSnapshot};
 
 // The E09 edit-state vocabulary (spec §3.4) — re-exported so callers (the
 // CLI, tests, the eventual shell) get `EditState`/`HistoryStepMeta`/
@@ -81,3 +86,14 @@ pub use lightbox_catalog::{
     ImageSummary, IntegrityStatus, Page, PageCursor, SortOrder,
 };
 pub use lightbox_ingest::{ImportOptions, ImportReport};
+
+// E04 (spec §4.3/§4.6, mandate v2.2 addendum): the working-set loader
+// vocabulary + the headless folder-explorer primitive, re-exported so
+// callers (the CLI, tests, the eventual E08 shell) get them straight off
+// `lightbox-core` without a separate `lightbox-ingest` dependency of their
+// own — same convention as the `ImportOptions`/`ImportReport` re-export
+// above. `OpenOptions` is additionally the type of `CoreConfig::working_set`.
+pub use lightbox_ingest::{
+    browse_dir, DirListing, ImageEntry, OpenOptions, OpenOrigin, OpenReport, OpenRequest,
+    SkipReason, SkippedPath,
+};

@@ -32,7 +32,10 @@ use std::time::{Duration, Instant};
 
 use lightbox_catalog::{BackupOpts, BackupReport, Catalog, CatalogTxn};
 use lightbox_edit::EditStore;
-use lightbox_ingest::{import_add_in_place, ImportEvent, ImportOptions};
+use lightbox_ingest::{
+    import_add_in_place, load_working_set, plan_open, ImportEvent, ImportOptions, LoadEvent,
+    OpenError, OpenRequest,
+};
 use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
 use lightbox_preview::{
     AssetLocator, EmbeddedPreviewProvider, PreviewEvent as PvEvent, PreviewProvider,
@@ -58,6 +61,7 @@ use crate::preview_runtime::TokioBuildRuntime;
 use crate::previews::CatalogAssetLocator;
 use crate::queries::Queries;
 use crate::render_source::{NullDeviceProvider, PreviewSourceProvider, SharedDeviceProvider};
+use crate::working_set::{WorkingSetModel, WorkingSetSnapshot};
 
 /// The headless core (spec §3.8): owns the job system; opens sessions.
 pub struct Core {
@@ -162,6 +166,9 @@ struct SessionInner {
     /// `previews` above.
     preview_service: PreviewService,
     edit_hub: Arc<EditHub>,
+    /// E04 (spec §4.5): the session working-set model — `Session::
+    /// working_set()`'s backing store.
+    working_set: Arc<WorkingSetModel>,
     events: broadcast::Sender<Event>,
     cmd_tx: mpsc::UnboundedSender<Queued>,
     next_ticket: AtomicU64,
@@ -370,6 +377,10 @@ impl Session {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Queued>();
         let session_cancel = CancelToken::new();
         let in_flight = Arc::new(InFlight::default());
+        // E04 (spec §4.5): the working-set model — empty until the first
+        // `OpenWorkingSet` (or never, headless callers that only ever
+        // import/query).
+        let working_set = WorkingSetModel::new();
 
         let ctx = DispatchCtx {
             catalog: Arc::clone(&catalog),
@@ -380,6 +391,8 @@ impl Session {
             backup_retain: core.cfg.backup_retain,
             edit_hub: Arc::clone(&edit_hub),
             preview_service: preview_service.clone(),
+            working_set: Arc::clone(&working_set),
+            working_set_opts: core.cfg.working_set.clone(),
         };
         // Long-lived system task, not a class-budgeted job. It ends when the
         // last `Session` clone drops (the sole sender side of `cmd_rx`).
@@ -400,6 +413,7 @@ impl Session {
                 previews,
                 preview_service,
                 edit_hub,
+                working_set,
                 events,
                 cmd_tx,
                 next_ticket: AtomicU64::new(1),
@@ -442,6 +456,15 @@ impl Session {
     /// accessor pattern.
     pub fn edits(&self) -> Arc<EditHub> {
         Arc::clone(&self.inner.edit_hub)
+    }
+
+    /// The current session working-set snapshot (E04 spec §4.5): a cheap
+    /// `Arc` clone, lock-free plain data — no locks, no catalog handles.
+    /// `SetPhase::Empty` with no items until the first `Command::
+    /// OpenWorkingSet` (headless callers that only ever import/query never
+    /// touch this).
+    pub fn working_set(&self) -> Arc<WorkingSetSnapshot> {
+        self.inner.working_set.snapshot()
     }
 
     /// Subscribe to the event broadcast. The shell drains this once per
@@ -571,6 +594,9 @@ struct DispatchCtx {
     backup_retain: u32,
     edit_hub: Arc<EditHub>,
     preview_service: PreviewService,
+    /// E04 (spec §4.5): the working-set model + its loader knobs.
+    working_set: Arc<WorkingSetModel>,
+    working_set_opts: lightbox_ingest::OpenOptions,
 }
 
 async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>) {
@@ -609,6 +635,7 @@ async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>
                 })
                 .await;
             }
+            Command::OpenWorkingSet { request } => spawn_open_working_set(&ctx, ticket, request),
             Command::BackupNow => spawn_backup(&ctx, ticket),
             Command::ImportAddInPlace {
                 source_dir,
@@ -917,6 +944,112 @@ fn spawn_backup(ctx: &DispatchCtx, ticket: CommandTicket) {
                 }
                 Err(err) => {
                     let msg = err.to_string();
+                    let _ = events.send(Event::CommandFailed {
+                        ticket,
+                        error: msg.clone(),
+                    });
+                    Err(JobError::Failed(msg))
+                }
+            }
+        },
+    );
+    drop(handle); // detached; close() drains via the in-flight guard
+}
+
+/// `OpenWorkingSet` (E04 spec §4.5/§6.6): the epoch bump + previous-epoch
+/// cancellation happen **synchronously here**, in the dispatcher, before the
+/// job is even spawned — so "a new `OpenWorkingSet` cancels the in-flight
+/// one before bumping the epoch" holds even though `dispatch_loop` never
+/// blocks waiting for the old job to actually stop. A `Class::Foreground`
+/// job (mirrors `spawn_import`) named `"working_set.open"`, running phase 1
+/// ([`plan_open`]) then phase 2 ([`load_working_set`]) back to back on the
+/// blocking pool; every state change lands in the model via `WorkingSetModel
+/// ::apply_plan`/`apply_load_event`/`finish`, each epoch-gated so a
+/// straggling callback from an already-cancelled job can never mutate a
+/// newer epoch's snapshot (R6).
+fn spawn_open_working_set(ctx: &DispatchCtx, ticket: CommandTicket, request: OpenRequest) {
+    if request.paths.is_empty() {
+        // Reject before touching the model/epoch at all — an empty request
+        // is a caller bug, not a "nothing to load" open (spec: `plan_open`
+        // itself refuses this too; the dispatcher pre-checks to avoid
+        // leaving the model stuck mid-epoch for a request that was never
+        // going to plan).
+        let _ = ctx.events.send(Event::CommandFailed {
+            ticket,
+            error: "empty open request".to_owned(),
+        });
+        return;
+    }
+
+    let (epoch, cancel) = ctx.working_set.begin_epoch(&ctx.session_cancel);
+    let _ = ctx.events.send(Event::WorkingSetOpening { epoch, ticket });
+
+    let writer = ctx.catalog.writer();
+    let events = ctx.events.clone();
+    let model = Arc::clone(&ctx.working_set);
+    let opts = ctx.working_set_opts.clone();
+    let guard = ctx.in_flight.enter();
+    let handle = ctx.jobs.spawn_blocking(
+        Class::Foreground,
+        "working_set.open",
+        cancel,
+        move |cancel| {
+            let _guard = guard;
+            let plan = match plan_open(&request, &opts, cancel, &mut |_progress| {
+                // Plan-phase progress has no dedicated core event (spec
+                // §4.5 names only Opening/Replaced/Changed/LoadFinished);
+                // phase 1 is fast by design (§7) so a throttled heartbeat
+                // here would have nothing to say that WorkingSetReplaced
+                // doesn't already say a few ms later.
+            }) {
+                Ok(p) => p,
+                // A cancelled plan (superseded by a newer epoch) is a
+                // normal outcome, not a command failure — the newer
+                // epoch's own events are what the caller sees instead.
+                Err(OpenError::Cancelled) => return Err(JobError::Cancelled),
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = events.send(Event::CommandFailed {
+                        ticket,
+                        error: msg.clone(),
+                    });
+                    return Err(JobError::Failed(msg));
+                }
+            };
+            model.apply_plan(epoch, &plan);
+            let _ = events.send(Event::WorkingSetReplaced {
+                epoch,
+                planned: plan.items.len(),
+                truncated: plan.truncated,
+            });
+
+            let load_events = events.clone();
+            let load_model = Arc::clone(&model);
+            let mut on_event = move |ev: LoadEvent| {
+                load_model.apply_load_event(epoch, &ev);
+                // Coalesce Event::WorkingSetChanged onto the loader's own
+                // throttled Progress heartbeat (spec §4.5: "coalesced ≤ 1
+                // per progress_min_interval") rather than re-implementing
+                // throttling here.
+                if matches!(ev, LoadEvent::Progress { .. }) {
+                    let _ = load_events.send(Event::WorkingSetChanged { epoch });
+                }
+            };
+            match load_working_set(&writer, &plan, &opts, cancel, &mut on_event) {
+                Ok(report) => {
+                    model.finish(epoch);
+                    let _ = events.send(Event::WorkingSetLoadFinished { epoch, report });
+                    // Compat hint for the not-yet-reworked M0 grid (spec
+                    // §3.1 phase 3) — E08 removes its listener once it
+                    // drives the filmstrip from the working-set snapshot.
+                    let _ = events.send(Event::CatalogChanged {
+                        change: ChangeSet::bulk(false),
+                    });
+                    Ok(())
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    model.finish(epoch);
                     let _ = events.send(Event::CommandFailed {
                         ticket,
                         error: msg.clone(),

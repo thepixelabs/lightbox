@@ -12,12 +12,13 @@ use std::path::PathBuf;
 
 use lightbox_catalog::BackupReport;
 use lightbox_edit::StepLabel;
-use lightbox_ingest::ImportReport;
+use lightbox_ingest::{ImportReport, OpenReport};
 use lightbox_meta::xmp::sync::DivergenceStatus;
 use lightbox_preview::{CacheKind, PreviewDesc, PreviewError, PurgeReport, Tier};
 use lightbox_types::{AssetId, ImageId, ImportSessionId};
 
 use crate::command::CommandTicket;
+use crate::working_set::SetEpoch;
 
 /// Coarse invalidation hint (spec §3.8 M0: "folders/images invalidation
 /// hints"). E07 refines granularity.
@@ -56,6 +57,41 @@ impl ChangeSet {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Event {
+    /// A new `OpenWorkingSet` gesture was accepted (E04 spec §4.5); the
+    /// previous epoch is cancelled and the model shows `SetPhase::Planning`
+    /// for `epoch`.
+    WorkingSetOpening {
+        /// The new generation.
+        epoch: SetEpoch,
+        /// The command that started it.
+        ticket: CommandTicket,
+    },
+    /// Phase-1 complete: the ordered set is known; the filmstrip can render
+    /// (E04 spec §3.1/§4.5).
+    WorkingSetReplaced {
+        /// The generation this replaces.
+        epoch: SetEpoch,
+        /// Items in the plan.
+        planned: usize,
+        /// `true` when `OpenOptions::max_set_size` was hit.
+        truncated: bool,
+    },
+    /// Item states changed (coalesced ≤ 1 per `OpenOptions::
+    /// progress_min_interval`, piggy-backing the loader's own throttled
+    /// progress heartbeat); poll `Session::working_set()` for the new
+    /// snapshot.
+    WorkingSetChanged {
+        /// The generation that changed.
+        epoch: SetEpoch,
+    },
+    /// Phase-2 complete (also emitted when a load is cancelled by
+    /// replacement — the report covers what actually landed).
+    WorkingSetLoadFinished {
+        /// The generation this concludes.
+        epoch: SetEpoch,
+        /// What happened.
+        report: OpenReport,
+    },
     /// An import session opened (discovery complete, rows incoming).
     ImportStarted {
         /// The bracketing `import_session` row.

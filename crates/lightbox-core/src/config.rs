@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use lightbox_ingest::OpenOptions;
 use lightbox_jobs::JobConfig;
 
 /// Configuration for a [`crate::Core`]. `#[non_exhaustive]`: build via
@@ -37,6 +38,11 @@ pub struct CoreConfig {
     /// never creates the directory. Tests override this to a tempdir to
     /// stay hermetic.
     pub preset_dir: Option<PathBuf>,
+    /// Working-set loader knobs (E04 spec §4.5: `max_set_size`,
+    /// `progress_min_interval`) — passed straight to
+    /// `lightbox_ingest::plan_open`/`load_working_set` on every
+    /// `Command::OpenWorkingSet`.
+    pub working_set: OpenOptions,
 }
 
 impl Default for CoreConfig {
@@ -49,6 +55,7 @@ impl Default for CoreConfig {
             backup_retain: 10,
             close_wait: Duration::from_secs(10),
             preset_dir: None,
+            working_set: OpenOptions::default(),
         }
     }
 }

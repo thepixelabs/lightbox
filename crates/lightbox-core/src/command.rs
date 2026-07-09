@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use lightbox_edit::{ParamSubset, PresetId};
+use lightbox_ingest::OpenRequest;
 use lightbox_preview::{BuildPriority, CacheLimits, PurgeScope, Tier, TierSet};
 use lightbox_types::{Flag, ImageId, ImportSessionId, SnapshotId};
 
@@ -30,8 +31,21 @@ impl CommandTicket {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Command {
+    /// v2.0 entry point (E04 spec §2.4/§4.5): replace the session working
+    /// set with the files this request resolves to. Cancels any in-flight
+    /// open *before* bumping the epoch, so at most one load runs. Progress
+    /// and completion arrive as `Event::WorkingSet*` events tagged with the
+    /// new epoch; `Session::working_set()` is the snapshot query. There is
+    /// no append gesture (spec OQ-1) — a new request always replaces.
+    OpenWorkingSet {
+        /// The gesture to resolve (drop / dialog / launch / CLI).
+        request: OpenRequest,
+    },
     /// Add-in-place import of a directory (spec §1 item 4). Progress and
-    /// completion arrive as `Import*` events.
+    /// completion arrive as `Import*` events. **Retired-dormant** as of E04
+    /// (mandate v2.0/architecture §10.0): the managed-import path stays
+    /// compiled and tested (E01's fault/E2E harness) but the shell never
+    /// reaches it — `OpenWorkingSet` above is the v2.0 entry point.
     ImportAddInPlace {
         /// Directory to import.
         source_dir: PathBuf,

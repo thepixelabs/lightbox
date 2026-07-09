@@ -58,6 +58,19 @@ pub struct OpenRequest {
     pub origin: OpenOrigin,
 }
 
+impl OpenRequest {
+    /// Constructor (required since the struct is `#[non_exhaustive]`, so a
+    /// struct literal from outside this crate — E08, `lightbox-core`, the
+    /// CLI, tests — cannot name every field directly).
+    pub fn new(paths: Vec<PathBuf>, recursive: bool, origin: OpenOrigin) -> OpenRequest {
+        OpenRequest {
+            paths,
+            recursive,
+            origin,
+        }
+    }
+}
+
 /// Where an [`OpenRequest`] came from (spec §2.4 entry table).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
