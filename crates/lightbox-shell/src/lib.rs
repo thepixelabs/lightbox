@@ -29,11 +29,13 @@
 //! **Phase A scope** (`docs/plan/epics/E08-editor-shell.md` §8 Phase A):
 //! chassis rescope, entry intake (drop/dialog/launch), the working-set view
 //! model, replace-set semantics, the smoke driver, and the mandate-v2.2
-//! folder-explorer UI. The session filmstrip ships here only in minimal
-//! form (see `filmstrip.rs`'s module docs) — full polish is Phase B. The
-//! canvas keeps rendering exactly as the E01 loupe did (Phase C generalizes
-//! it); the develop-panel rail is a placeholder (Phase E); the keymap
-//! (Phase D) and prefs store (Phase G) do not exist yet.
+//! folder-explorer UI. **Phase B** completed the session filmstrip (B1–B5:
+//! geometry, virtualized chrome, §6.3 badges, nav/multi-select,
+//! resize/collapse/overflow polish — see `filmstrip.rs`'s module docs,
+//! including the Phase-G persistence seam for the strip height/collapse
+//! prefs). The canvas keeps rendering exactly as the E01 loupe did (Phase C
+//! generalizes it); the develop-panel rail is a placeholder (Phase E); the
+//! keymap (Phase D) and prefs store (Phase G) do not exist yet.
 
 mod empty_state;
 mod explorer;
@@ -58,7 +60,7 @@ use lightbox_render::GpuContext;
 
 use crate::empty_state::empty_state_ui;
 use crate::explorer::{ExplorerAction, FolderExplorer};
-use crate::filmstrip::FilmstripAction;
+use crate::filmstrip::{EditedBadges, FilmstripAction, FilmstripState};
 use crate::loupe::{ActiveEntry, LoupeAction, LoupeView};
 use crate::smoke::SmokeDriver;
 use crate::thumbs::ThumbCache;
@@ -177,6 +179,11 @@ struct LightboxApp {
     working_set: WorkingSetView,
     thumbs: ThumbCache,
     loupe: LoupeView,
+    /// B4/B5 strip UI state (selection, height, collapse) — in-session;
+    /// Phase G persists height/collapsed (see `filmstrip.rs` module docs).
+    filmstrip: FilmstripState,
+    /// B3 edited-dot cache over `Queries::edit_badges` (event-driven).
+    badges: EditedBadges,
     explorer: FolderExplorer,
     /// The active image the canvas last rendered — compared each frame so a
     /// change (click/nav/auto-activation) resets zoom/pan exactly once
@@ -283,6 +290,8 @@ impl LightboxApp {
             gpu,
             thumbs,
             loupe,
+            filmstrip: FilmstripState::new(),
+            badges: EditedBadges::new(),
             explorer: FolderExplorer::closed(),
             last_shown_image: None,
             status: String::new(),
@@ -325,6 +334,12 @@ impl LightboxApp {
                         );
                     }
                     self.working_set.on_event(&ev, &self.session);
+                    // B3: new/changed entries need a fresh badge pull.
+                    self.badges.mark_dirty();
+                }
+                Ok(Event::EditCommitted { .. }) => {
+                    // B3: a durable edit may flip an `is_edited` badge.
+                    self.badges.mark_dirty();
                 }
                 Ok(Event::CommandFailed { error, .. }) => {
                     self.status = format!("command failed: {error}");
@@ -338,6 +353,7 @@ impl LightboxApp {
                 Ok(_) => {}
                 Err(TryRecvError::Lagged(_)) => {
                     self.working_set.on_lagged(&self.session);
+                    self.badges.mark_dirty();
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
             }
@@ -549,25 +565,66 @@ impl eframe::App for LightboxApp {
                 ui.weak("Panels land in E08 Phase E.");
             });
 
-        // Bottom filmstrip strut.
+        // B4: repeatable ←/→ nav. The loupe owns the arrow keys while a
+        // Ready image is mounted (its T26 handler, kept as-is, feeds
+        // `LoupeAction::Navigate` below) — this app-level route covers the
+        // remaining states (active entry still Loading / Failed / none) so
+        // exactly one component acts per press.
+        // TODO(E08 Phase D): both routes collapse into keymap `nav.*`.
+        if self.working_set.active_image().is_none() {
+            let delta = filmstrip::nav_delta(&ctx);
+            if delta != 0 {
+                self.working_set.nav(delta);
+            }
+        }
+
+        // Bottom filmstrip strut (Phase B: resizable / collapsible, badge
+        // chrome from the event-driven edit-badge cache).
         let mut visible: HashSet<lightbox_types::ImageId> = HashSet::new();
         if !self.working_set.is_empty() {
-            egui::Panel::bottom(egui::Id::new("lightbox-filmstrip"))
-                .exact_size(96.0)
-                .show(root, |ui| {
-                    let action = filmstrip::filmstrip_ui(
-                        ui,
-                        self.working_set.entries(),
-                        self.working_set.active_index(),
-                        &mut self.thumbs,
-                        72.0,
-                        &mut visible,
-                    );
-                    if let Some(FilmstripAction::Activate(idx)) = action {
-                        self.working_set.set_active(idx);
-                    }
-                });
-            self.outcome.filmstrip_shown.store(true, Ordering::Release);
+            let total = self.working_set.entries().len();
+            let active = self.working_set.active_index();
+            self.filmstrip.sync_set(self.working_set.epoch(), total);
+            self.badges
+                .refresh_if_dirty(&self.session, self.working_set.entries());
+
+            if self.filmstrip.collapsed() {
+                // Distinct panel id: the collapsed bar's exact size must
+                // not be remembered as the expanded strip's height.
+                egui::Panel::bottom(egui::Id::new("lightbox-filmstrip-collapsed"))
+                    .exact_size(filmstrip::COLLAPSED_BAR_PT)
+                    .show(root, |ui| {
+                        filmstrip::collapsed_bar_ui(ui, &mut self.filmstrip, active, total);
+                    });
+            } else {
+                let entries = self.working_set.entries();
+                let badges = &self.badges;
+                let strip = &mut self.filmstrip;
+                let thumbs = &mut self.thumbs;
+                let cell_of = |i: usize| filmstrip::cell_for(&entries[i], badges);
+                let shown = egui::Panel::bottom(egui::Id::new("lightbox-filmstrip"))
+                    .resizable(true)
+                    .default_size(strip.height_pt())
+                    .size_range(filmstrip::MIN_HEIGHT_PT..=filmstrip::MAX_HEIGHT_PT)
+                    .show(root, |ui| {
+                        filmstrip::filmstrip_ui(
+                            ui,
+                            strip,
+                            total,
+                            active,
+                            &cell_of,
+                            thumbs,
+                            &mut visible,
+                        )
+                    });
+                // B5/Phase-G seam: mirror the panel's drag-resized height
+                // into the state Phase G will persist (§6.7).
+                strip.set_height_pt(shown.response.rect.height());
+                if let Some(FilmstripAction::Activate(idx)) = shown.inner {
+                    self.working_set.set_active(idx);
+                }
+                self.outcome.filmstrip_shown.store(true, Ordering::Release);
+            }
         }
 
         // Central canvas / empty state. `active_image()` is `Some` only for

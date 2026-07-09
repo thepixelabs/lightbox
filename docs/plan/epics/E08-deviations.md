@@ -8,10 +8,11 @@ or a decision the spec left to the implementer is recorded here with its
 rationale. Reference: CLAUDE.md exit-bar rule ("Record spec deviations in
 `docs/plan/epics/<EPIC>-deviations.md`") and the honest-reporting rule.
 
-**E08 is NOT done.** This log covers **Phase A only** (chassis rescope,
+**E08 is NOT done.** This log covers **Phases A and B** (A: chassis rescope,
 entry intake, working-set view model, replace semantics, the smoke driver,
-and the mandate-v2.2 folder-explorer UI). Phases B–H are separate, later
-work; do not read this file as epic completion.
+and the mandate-v2.2 folder-explorer UI; B: the session filmstrip, B1–B5).
+Phases C–H are separate, later work; do not read this file as epic
+completion.
 
 ---
 
@@ -316,3 +317,120 @@ navigate/error).
 * `--perf-strip` — see A2/A3/A4 above (Phase H, H2).
 * Keymap, prefs store, develop panels, gizmo framework — not started; the right-rail placeholder
   and top-bar zoom toggle are the only "view controls" Phase A ships (Phases D/E/F/G).
+
+---
+
+## Phase B — session filmstrip (B1–B5)
+
+### B2/B3 — `filmstrip_ui` renders a shell-owned `StripCell` via a lazy accessor, not `&[WorkingSetItem]` / `&mut WorkingSetView` directly
+
+**What.** The spec's §6.3 draft signature takes `view: &mut WorkingSetView`. The shipped
+signature is `filmstrip_ui(ui, state, total, active, cell_of: &dyn Fn(usize) -> StripCell,
+thumbs, visible_out)` where `StripCell` is a small shell-side projection (filename, raw flag,
+edited flag, load status) built by `cell_for(&WorkingSetItem, &EditedBadges)`.
+
+**Why.** Three forcing functions. (1) `WorkingSetItem` is `#[non_exhaustive]` (A0-6): kittest
+cannot construct synthetic 200-entry sets from it, and B2/B4's ACs demand exactly that. (2)
+`is_edited` is **not** on the working-set snapshot — E04 never shipped the spec draft's
+`ReadyEntry.is_edited`; the real source is E09's `edit_index` projection via
+`Queries::edit_badges` — so a join point is needed anyway, and `cell_for` is that one place.
+(3) The lazy accessor makes the B2 virtualization AC directly assertable: the tests count
+`cell_of` invocations per frame and prove only the visible window materializes.
+
+### B3 — edited dot sourced from an event-driven `EditedBadges` cache over `Queries::edit_badges`
+
+**What.** A `HashMap<ImageId, bool>` refreshed by one batch `Queries::edit_badges` call, but
+**only** when marked dirty — on `Event::EditCommitted`, on `Event::WorkingSet*`, and on
+broadcast `Lagged`. Steady-state frames never touch the reader (§7 "no SQL in the frame loop";
+`edit_badges` is the query E09 built and documented for exactly this consumer). Failures log
+and keep the previous lookup — never fatal. Proven against a real headless session: a real E09
+gesture commit (`EditHub` begin/update + `Command::Edit(CommitGesture)`) flips exactly the
+edited image's badge after a dirty-refresh, and a clean-cache refresh is proven a no-op.
+
+### B3 — "kittest snapshot" implemented as structural widget-tree assertions, not image goldens
+
+**What.** The B3 AC says "kittest snapshot with a mixed set". Shipped as structural
+AccessKit-tree assertions: each cell's accessible name carries the §6.3 chrome
+("IMG_0001.CR3 · RAW", "beach.jpg · edited", "broken.jpg · failed: unsupported codec",
+"slow.jpg · loading"), asserted with `get_by_label_contains`, plus a
+`query_all_by_label_contains` sweep proving no star/flag/rating chrome exists.
+
+**Why.** The spec's own test plan (§9) defines E08's visual tests as "structural snapshots
+(widget trees), immune to render-backend drift" — image goldens would couple CI to font/GPU
+rasterization across the 3-OS matrix. Side benefit: the accessible labels are a head start on
+H1 (AccessKit names for filmstrip cells with filename+state). The **painted** chrome (RAW tag
+rect, edited dot, shimmer, placards) is covered by the same code path but its pixels are not
+golden-tested, consistent with §9. The `egui_kittest` `snapshot` feature stays enabled and
+unused pending an owner decision on committing goldens.
+
+### B4 — multi-select state lives on `FilmstripState`, not `WorkingSetView`
+
+**What.** §6.2 sketches `selected: HashSet<usize>` on the view model (and Phase A landed a
+private, unused field there). Phase B's working brief froze the working-set view model, so the
+⌘/⇧-click selection shipped on `FilmstripState` (`BTreeSet<usize>` + anchor, cleared on epoch
+change via `sync_set`, exposed read-only via `selected()`). The Phase-A field on
+`WorkingSetView` remains dormant/private. **Follow-up owner:** Phase E (or the first M2
+batch-op consumer) should collapse the two into one home — recommendation: lift
+`FilmstripState`'s into the view model then, since batch ops act on the set, not the strip.
+
+### B4 — arrow-key nav is split between the loupe (unchanged) and an app-level route; keymap comes in Phase D
+
+**What.** `nav.next`/`nav.prev` as spec'd are keymap actions — Phase D. Phase B ships
+`filmstrip::nav_delta` (counts `Event::Key` presses so key-repeat steps once per repeat, with
+the same `egui_wants_keyboard_input` text-focus guard the loupe uses). The loupe's existing T26
+arrow handling is untouched (Phase B must not modify the canvas/loupe); `lib.rs` gates the
+app-level route on `active_image().is_none()` so exactly one component acts per press — the
+loupe while a Ready image is mounted, the app-level route for Loading/Failed/none states.
+Both routes carry a `TODO(E08 Phase D)` to collapse into the keymap registry.
+
+### B4 — nav latency AC scoped to a virtualization + generous wall-clock tripwire; the formal p95 gate is H2 (per the spec's own note)
+
+**What.** The B4 AC's "frame p95 < 16 ms and nav-swap p95 < 50 ms ... asserted by the perf
+harness in H2" is explicitly H2's job (release profile, dev-baseline machine, `--perf-strip`).
+The Phase B test (`arrow_nav_through_200_entries_stays_virtualized`) drives 199 real arrow-key
+frames through kittest and asserts (a) per-frame cell materialization stays O(visible) (≤ 60,
+actual ~10), (b) one working-set step per press, (c) the viewport followed to the far end, and
+(d) a debug-build per-frame p95 tripwire of 200 ms (headroom over the ~1–5 ms observed; catches
+order-of-magnitude regressions without CI flakiness). The nav-swap latency probe itself
+(`LoupeView::nav_swap_ms`, F1 overlay) is untouched and still feeds the future H2 harness.
+
+### B5 — drag-resize rides the egui panel's native `resizable`/`size_range`; the drag gesture itself is not kittest-driven
+
+**What.** The strip mounts as `egui::Panel::bottom(...).resizable(true).size_range(48.0..=160.0)`
+with the post-frame height read back into `FilmstripState::set_height_pt` (clamped to the same
+48–160 pt band, unit-tested). The panel's resize-drag gesture is egui-native behavior with no
+AccessKit node, so no kittest test drags the handle; the tested surface is the clamp + the
+read-back seam + the collapse round-trip (kittest: strip → collapsed bar with correct "34/212"
+indicator and zero materialized cells → re-expand snaps back to the active cell).
+
+### B5 — persistence deferred to Phase G by design (in-session state + named seam, no prefs file invented)
+
+**What.** The spec's B5 AC ("resize persists across app restart (prefs round-trip)") depends on
+§6.7's machine-scope prefs store — Phase G, not built. Per the phase brief, `height_pt`/
+`collapsed` are **in-session only**; the seam for Phase G is documented in `filmstrip.rs`'s
+module docs (construct `FilmstripState` from `MachinePrefs::filmstrip_height_pt` + a collapsed
+flag at boot; write the accessors back on change; the panel's `default_size(strip.height_pt())`
+already seeds from whatever Phase G restores). No competing prefs file was created.
+
+### B-misc — collapsed strip uses a distinct panel id; expanded/collapsed are two panels
+
+**What.** `lightbox-filmstrip` (expanded, resizable) vs `lightbox-filmstrip-collapsed` (exact
+24 pt bar). egui remembers panel sizes by id — a shared id would replay the 24 pt collapsed
+size onto the expanded strip. Two ids keep both memories correct.
+
+### B-misc — pre-existing flake observed once in `lightbox-preview` unit tests during the exit-bar runs
+
+**What.** One full-workspace test run during Phase B's exit-bar sequence had 1 failure in the
+`lightbox-preview` lib suite (108 tests) — the same load-sensitive suite HEAD commit `76f8a97`
+("E03 test-flake fix: bump preview-service async-build poll deadlines... load-tolerant") had
+just patched. Phase B touches nothing in `lightbox-preview`. Two immediately subsequent full
+workspace runs (and the final gate run) were 100% green. Recorded here for honesty; owner E03
+if it recurs.
+
+### Not built in Phase B (named, not silently skipped)
+
+* **`film.toggle` (⇧Tab) keybinding** — the collapse toggle is click-only until Phase D's
+  keymap registers `film.toggle` against `FilmstripState::set_collapsed`.
+* **Prefs round-trip for height/collapsed** — Phase G (see the B5 deviation above).
+* **Formal p95 perf gates + `--perf-strip`** — Phase H (H2), per the spec's B4 note.
+* **Batch operations over the multi-selection** — M2; the selection state ships dormant.
