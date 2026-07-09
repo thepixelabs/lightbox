@@ -187,8 +187,17 @@ jobs:
   # on hosted runners — observational (continue-on-error) like the CI shell
   # smoke until seen green across the fleet; the dev-machine numbers live
   # in tools/lbx-perf/baselines.json.
+  #
+  # RETIRED by E08 Phase A (docs/plan/epics/E08-deviations.md, "A1
+  # (consequence)"): the library grid this scripted `--perf-scroll` drove
+  # is gone (E08 rescopes the shell into the editor — there is no grid
+  # view). `lightbox-shell` no longer accepts `--perf-scroll` at all.
+  # `if: false` keeps this job definition in place (its structure is a
+  # reasonable starting point) until E08 Phase H (H2) ships the named
+  # replacement, `--perf-strip` (a horizontal filmstrip-scroll capture).
   grid-scroll:
     name: grid-scroll capture (${{ matrix.os }})
+    if: false
     strategy:
       fail-fast: false
       matrix:

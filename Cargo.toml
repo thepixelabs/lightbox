@@ -156,6 +156,16 @@ fastrand = "2"
 criterion = { version = "0.8", default-features = false, features = [
   "cargo_bench_support",
 ] }
+# E08 Phase A (T A3): the native OS open dialog behind the shell's "Open
+# Files…"/"Open Folder…" affordances. MIT. Default features already select
+# the GTK-free XDG-portal backend on Linux (no `gtk3` feature enabled) per
+# the spec's license-surface note; on macOS/Windows it wraps the native
+# panels directly (no extra native toolkit pulled in).
+rfd = "0.17"
+# E08 Phase A: headless-UI test harness for the shell (kittest + AccessKit
+# under the hood), dev-dependency only — never ships in the app binary.
+# Pinned in lockstep with the `egui`/`eframe` version above (0.35.x).
+egui_kittest = "0.35"
 
 # Shared lints: `cargo clippy --workspace --all-targets -- -D warnings` is the CI gate.
 # `unsafe_code` is denied workspace-wide; only lightbox-render (GPU interop) and future

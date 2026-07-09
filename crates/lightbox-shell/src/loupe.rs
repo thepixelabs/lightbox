@@ -20,19 +20,45 @@
 //! loupe this crate ships; a future multi-pane compare view would need
 //! either per-pane engines or an `image` tag on `CanvasFrame` (noted in
 //! `docs/plan/epics/E05-deviations.md`).
+//!
+//! **E08 Phase A rescope:** the E01 grid/loupe view toggle is gone (the
+//! editor chassis is single-mode — spec §2.1 item 1); [`LoupeView::ui`] now
+//! renders whichever entry the working-set view model marks active
+//! ([`ActiveEntry`]) instead of a catalog-page row from the retired
+//! library-grid's row model. The render path itself —
+//! `RenderScheduler::set_view`/`set_recipe`, the push-model canvas watch,
+//! the zero-copy texture swap — is **unchanged**; the full canvas rework
+//! (progressive tiers, gizmos, `ViewXform`, the `loupe.rs` → `canvas/`
+//! module split) is Phase C's job.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
 use eframe::egui;
-use lightbox_core::ImageSummary;
 use lightbox_edit::Recipe;
 use lightbox_render::ng::{Extent, OutputQuality, RenderScheduler, Roi, ViewState};
 use lightbox_types::{ImageId, PV_M0};
 
-use crate::grid::fit_rect;
+use crate::filmstrip::fit_rect;
 use crate::ShellOutcome;
+
+/// The working-set entry the canvas should render this frame (E08 Phase A:
+/// replaces the catalog-page row the retired library-grid's row model
+/// supplied — the working-set view model is now the sole source of "what's
+/// active").
+#[derive(Copy, Clone, Debug)]
+pub struct ActiveEntry<'a> {
+    /// The registered image to render.
+    pub image: ImageId,
+    /// Display filename (info overlay).
+    pub filename: &'a str,
+    /// Full-size width, `0` if unknown (still-`Planned`/`Failed` entries
+    /// never reach the canvas — the caller only activates `Ready` ones).
+    pub width: u32,
+    /// Full-size height.
+    pub height: u32,
+}
 
 /// Zoom modes (T26: fit / 100 % toggle).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -46,9 +72,8 @@ pub enum LoupeZoom {
 /// What a loupe frame asks the app to do.
 #[derive(Debug, PartialEq)]
 pub enum LoupeAction {
-    /// Back to the grid (G / Escape).
-    ExitToGrid,
-    /// Navigate to this row index (←/→); the app updates the selection.
+    /// Navigate to this working-set index (←/→); the app updates the
+    /// working-set view's active entry.
     Navigate(usize),
 }
 
@@ -145,26 +170,35 @@ impl LoupeView {
         self.awaiting_frame
     }
 
-    /// Renders one loupe frame for `rows[idx]`.
+    /// The current zoom mode (top-bar view control, A1 chassis AC).
+    pub fn zoom_mode(&self) -> LoupeZoom {
+        self.zoom
+    }
+
+    /// Toggles fit ↔ 100 % (top-bar view control button).
+    pub fn toggle_zoom_button(&mut self) {
+        self.toggle_zoom();
+    }
+
+    /// Renders one loupe frame for the working set's active `entry` (index
+    /// `idx` of `total`, for nav clamping + the info overlay's "N/total").
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         scheduler: &RenderScheduler,
         max_tex_dim: u32,
-        rows: &[ImageSummary],
+        entry: ActiveEntry<'_>,
         idx: usize,
+        total: usize,
     ) -> Option<LoupeAction> {
-        let summary = rows.get(idx)?;
         let mut action = None;
 
-        // --- Keys (T26: ←/→ nav, fit/100 % toggle, G/E view toggle) ---
-        // unless some text field owns the keyboard.
+        // --- Keys (T26: ←/→ nav, fit/100 % toggle) — unless some text
+        // field owns the keyboard. The G/Escape grid-exit binding is gone
+        // with the retired grid view (E08 Phase A: single-mode chassis).
         if !ui.ctx().egui_wants_keyboard_input() {
             ui.ctx().input(|i| {
-                if i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::G) {
-                    action = Some(LoupeAction::ExitToGrid);
-                }
-                if i.key_pressed(egui::Key::ArrowRight) && idx + 1 < rows.len() {
+                if i.key_pressed(egui::Key::ArrowRight) && idx + 1 < total {
                     action = Some(LoupeAction::Navigate(idx + 1));
                 }
                 if i.key_pressed(egui::Key::ArrowLeft) && idx > 0 {
@@ -190,7 +224,7 @@ impl LoupeView {
         // --- Submit on any relevant change; latest-wins coalescing on the
         // scheduler side supersedes whatever was in flight (T26/§3.7). ---
         let key = SubmitKey {
-            image: summary.id,
+            image: entry.image,
             zoom: self.zoom,
             out: view_px,
         };
@@ -211,18 +245,19 @@ impl LoupeView {
                     h: view_px[1],
                 },
             };
-            scheduler.set_view(summary.id, view);
-            // The M1 recipe carries no develop params yet (E09) — identity
-            // under PV1, resubmitted on every relevant view change so a fresh
-            // image always gets a render dispatched even without a param
-            // change (set_view alone only re-renders when a recipe already
-            // exists for that image — see `RenderScheduler::set_view`).
-            scheduler.set_recipe(summary.id, Recipe::identity(PV_M0), PV_M0);
+            scheduler.set_view(entry.image, view);
+            // The M1 recipe carries no develop params yet (E09 binding is
+            // Phase E) — identity under PV1, resubmitted on every relevant
+            // view change so a fresh image always gets a render dispatched
+            // even without a param change (set_view alone only re-renders
+            // when a recipe already exists for that image — see
+            // `RenderScheduler::set_view`).
+            scheduler.set_recipe(entry.image, Recipe::identity(PV_M0), PV_M0);
             self.last_key = Some(key);
             self.awaiting_frame = true;
         }
 
-        self.poll(scheduler, summary.id);
+        self.poll(scheduler, entry.image);
 
         // --- Composite ---
         let response = ui.allocate_rect(view_rect, egui::Sense::click_and_drag());
@@ -263,7 +298,7 @@ impl LoupeView {
             );
         }
 
-        self.info_overlay(ui, view_rect, summary, idx, rows.len());
+        self.info_overlay(ui, view_rect, &entry, idx, total);
         action
     }
 
@@ -340,7 +375,7 @@ impl LoupeView {
         &self,
         ui: &egui::Ui,
         view_rect: egui::Rect,
-        summary: &ImageSummary,
+        entry: &ActiveEntry<'_>,
         idx: usize,
         total: usize,
     ) {
@@ -352,9 +387,9 @@ impl LoupeView {
         };
         let text = format!(
             "{}  ·  {}×{}  ·  {}  ·  {}  ·  {}/{}",
-            summary.filename,
-            summary.width,
-            summary.height,
+            entry.filename,
+            entry.width,
+            entry.height,
             quality,
             match self.zoom {
                 LoupeZoom::Fit => "fit",

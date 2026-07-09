@@ -3,33 +3,46 @@
 
 //! `lightbox-shell` — the thin, replaceable egui/eframe UI shell.
 //!
-//! E01 Phase 7 (T25/T26): the walking-skeleton Library — an eframe app that
-//! opens a real catalog through the headless [`lightbox_core::Session`]
-//! (seam 1), imports a folder via the command bus, shows a **virtualized
-//! grid** of demand-driven, cancel-on-scroll-out thumbnails, and a **loupe
-//! whose every pixel is produced by `Engine::submit`** and composited
-//! zero-copy on the ONE `wgpu::Device` the shell shares with the engine
-//! (architecture §2.3 seam 2; spec §9 M0 verbatim requirement).
+//! **E08 Phase A rescope**: this crate is the **editor shell** of the v2.0
+//! product (`docs/plan/epics/E08-editor-shell.md`) — there is no library, no
+//! grid view, no culling. The window *is* the editor: a top bar (open
+//! affordances + view controls), a central canvas, a bottom session
+//! filmstrip, a right develop-panel rail (placeholder until Phase E), and a
+//! status bar. Files enter by drag-and-drop, the OS open dialog, the
+//! transient live-filesystem folder explorer (mandate v2.2), or launch-time
+//! argv paths — every entry point normalizes to exactly one
+//! `Command::OpenWorkingSet` (E04's command, consumed via
+//! `Session::working_set()`/`Event::WorkingSet*`). Opening a working set
+//! auto-activates its first `Ready` entry into the canvas; every displayed
+//! pixel is still produced by `Engine::submit` and composited **zero-copy**
+//! on the ONE `wgpu::Device` the shell shares with the engine (architecture
+//! §2.3 seam 2).
 //!
-//! **Zero-copy invariants (code-review checklist, spec T7/T26):**
+//! **Zero-copy invariants (code-review checklist):**
 //! * NO `map_async`/CPU readback anywhere in the frame path — this crate
 //!   never maps GPU memory (grep it). Thumbnails are CPU-decoded pixels
-//!   (spec §3.6) uploaded once as egui textures; the loupe is the engine's
-//!   texture registered via `register_native_texture`.
-//! * The engine receives the *shell's* device: asserted by `Arc` identity in
-//!   a debug assertion, and enforced at runtime by wgpu itself (registering
-//!   a texture created on another device fails validation).
+//!   uploaded once as egui textures; the canvas is the engine's texture
+//!   registered via `register_native_texture`.
+//! * The engine receives the *shell's* device: asserted by a debug
+//!   assertion, and enforced at runtime by wgpu itself.
 //!
-//! `PaintCallback` remains the documented E05/E08 upgrade path for
-//! tiling/gizmos inside the paint graph. **E08** owns the real Library UX
-//! (culling grammar, filmstrip, compare/survey, panels, keymap).
+//! **Phase A scope** (`docs/plan/epics/E08-editor-shell.md` §8 Phase A):
+//! chassis rescope, entry intake (drop/dialog/launch), the working-set view
+//! model, replace-set semantics, the smoke driver, and the mandate-v2.2
+//! folder-explorer UI. The session filmstrip ships here only in minimal
+//! form (see `filmstrip.rs`'s module docs) — full polish is Phase B. The
+//! canvas keeps rendering exactly as the E01 loupe did (Phase C generalizes
+//! it); the develop-panel rail is a placeholder (Phase E); the keymap
+//! (Phase D) and prefs store (Phase G) do not exist yet.
 
-mod grid;
+mod empty_state;
+mod explorer;
+mod filmstrip;
+mod intake;
 mod loupe;
-mod model;
-mod perf;
 mod smoke;
 mod thumbs;
+mod working_set;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -38,29 +51,33 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use lightbox_core::{ClosePolicy, Command, Core, CoreConfig, Event, Session};
+use lightbox_core::{
+    ClosePolicy, Command, Core, CoreConfig, Event, OpenOrigin, OpenRequest, Session,
+};
 use lightbox_render::GpuContext;
 
-use crate::grid::GridAction;
-use crate::loupe::{LoupeAction, LoupeView};
-use crate::model::{ImageListModel, Selection};
-use crate::perf::{ScrollDriver, ScrollPhase};
+use crate::empty_state::empty_state_ui;
+use crate::explorer::{ExplorerAction, FolderExplorer};
+use crate::filmstrip::FilmstripAction;
+use crate::loupe::{ActiveEntry, LoupeAction, LoupeView};
 use crate::smoke::SmokeDriver;
 use crate::thumbs::ThumbCache;
+use crate::working_set::WorkingSetView;
 
 /// Options for [`run`].
 #[derive(Debug, Clone, Default)]
 pub struct ShellOptions {
-    /// Smoke mode (CI): drive import→grid→loupe on a throwaway catalog,
+    /// Smoke mode (CI): drive open→filmstrip→canvas on a throwaway catalog,
     /// close after the seam is proven and this many frames painted.
     pub smoke_frames: Option<u64>,
-    /// Perf mode (nightly, T28): scripted grid-scroll frame-time capture
-    /// on a throwaway catalog for this many measured frames, then print a
-    /// JSON summary line and close. Mutually exclusive with smoke mode.
-    pub perf_scroll_frames: Option<u64>,
     /// The catalog to open (created when missing). Defaults to
-    /// `./lightbox.lbdata`. Ignored in smoke/perf modes.
+    /// `./lightbox.lbdata`. Ignored in smoke mode.
     pub catalog: Option<PathBuf>,
+    /// Files/folders to open at launch (A4: argv paths / the future
+    /// file-association handler) — intake runs before the first frame.
+    pub initial_paths: Vec<PathBuf>,
+    /// Folder-expansion mode for `initial_paths`.
+    pub initial_recursive: bool,
 }
 
 /// What the app observed, for smoke-mode verdicts (shared with [`run`]'s
@@ -69,14 +86,14 @@ pub struct ShellOptions {
 pub struct ShellOutcome {
     /// Frames painted.
     pub frames: AtomicU64,
-    /// Engine textures registered with egui (loupe texture swaps).
+    /// Engine textures registered with egui (canvas texture swaps).
     pub texture_swaps: AtomicU64,
     /// True once an `Engine::submit`-produced texture was composited on the
     /// shared device (the seam-2 proof held at least once).
     pub seam_proven: AtomicBool,
-    /// True once a `--perf-scroll` capture completed and printed its
-    /// summary (false = wedged/expired ⇒ nonzero exit).
-    pub perf_ok: AtomicBool,
+    /// True once the filmstrip rendered at least one entry row (A7: the
+    /// "filmstrip row → canvas seam" smoke proof).
+    pub filmstrip_shown: AtomicBool,
 }
 
 /// Boots the eframe shell and blocks until the window closes.
@@ -114,24 +131,7 @@ pub fn run(options: ShellOptions) -> Result<Arc<ShellOutcome>, eframe::Error> {
     Ok(outcome)
 }
 
-/// Which top-level view is showing (G/E toggle — spec T26).
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum View {
-    Grid,
-    Loupe,
-}
-
-/// Import-bar state (M0: a path field, no native file dialog).
-#[derive(Default)]
-struct ImportUi {
-    path: String,
-    recursive: bool,
-    /// `(done, discovered, current file)` while an import runs.
-    active: Option<(u64, u64, String)>,
-}
-
-/// Rolling frame-time probe backing the debug overlay (T25 AC: p95 < 16 ms
-/// measured here on a dev laptop).
+/// Rolling frame-time probe backing the debug overlay.
 struct FrameStats {
     last: Option<Instant>,
     samples_ms: Vec<f32>,
@@ -174,13 +174,14 @@ struct LightboxApp {
     events: tokio::sync::broadcast::Receiver<Event>,
     gpu: GpuContext,
 
-    view: View,
-    model: ImageListModel,
-    selection: Selection,
+    working_set: WorkingSetView,
     thumbs: ThumbCache,
     loupe: LoupeView,
-    import_ui: ImportUi,
-    cell_size: f32,
+    explorer: FolderExplorer,
+    /// The active image the canvas last rendered — compared each frame so a
+    /// change (click/nav/auto-activation) resets zoom/pan exactly once
+    /// (mirrors the retired `enter_loupe`'s reset-on-entry behavior).
+    last_shown_image: Option<lightbox_types::ImageId>,
     status: String,
 
     stats: FrameStats,
@@ -188,7 +189,6 @@ struct LightboxApp {
 
     outcome: Arc<ShellOutcome>,
     smoke: Option<SmokeDriver>,
-    perf: Option<ScrollDriver>,
 }
 
 impl LightboxApp {
@@ -215,16 +215,11 @@ impl LightboxApp {
             Some(frames) => Some(SmokeDriver::new(frames.max(1))?),
             None => None,
         };
-        let perf = match options.perf_scroll_frames {
-            Some(frames) if smoke.is_none() => Some(ScrollDriver::new(frames)?),
-            _ => None,
-        };
 
         let core = Core::start(CoreConfig::default())?;
-        let lbdata = match (&smoke, &perf) {
-            (Some(smoke), _) => smoke.lbdata.clone(),
-            (None, Some(perf)) => perf.lbdata.clone(),
-            (None, None) => options
+        let lbdata = match &smoke {
+            Some(smoke) => smoke.lbdata.clone(),
+            None => options
                 .catalog
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("lightbox.lbdata")),
@@ -236,7 +231,7 @@ impl LightboxApp {
         };
         let events = session.events();
 
-        // T7/T26 seam-2 invariant: the engine renders on the shell's device.
+        // T7 seam-2 invariant: the engine renders on the shell's device.
         // **F5 deviation:** `ng::Engine` does not expose the raw device handle
         // for an `Arc::ptr_eq` proof (the old E01 seed did via `Engine::gpu()`);
         // the guarantee is now structural instead of runtime-asserted —
@@ -261,30 +256,41 @@ impl LightboxApp {
             gpu.adapter_report()
         );
 
+        // A4: argv paths (or any other pre-launch caller of `run`) open
+        // before the first frame is painted. Smoke mode stages/opens its
+        // own fixture instead (see `pump_smoke`).
+        if smoke.is_none() && !options.initial_paths.is_empty() {
+            session.submit(Command::OpenWorkingSet {
+                request: OpenRequest::new(
+                    options.initial_paths.clone(),
+                    options.initial_recursive,
+                    OpenOrigin::Cli,
+                ),
+            });
+        }
+
         let thumbs = ThumbCache::new(session.previews());
         let loupe = LoupeView::new(
             render_state,
             Arc::clone(&outcome),
             &session.render_scheduler(),
         );
+        let working_set = WorkingSetView::new(&session);
         Ok(LightboxApp {
-            session,
+            working_set,
             _core: core,
             events,
             gpu,
-            view: View::Grid,
-            model: ImageListModel::new(),
-            selection: Selection::default(),
             thumbs,
             loupe,
-            import_ui: ImportUi::default(),
-            cell_size: 144.0,
+            explorer: FolderExplorer::closed(),
+            last_shown_image: None,
             status: String::new(),
             stats: FrameStats::new(),
             show_overlay: cfg!(debug_assertions),
             outcome,
             smoke,
-            perf,
+            session,
         })
     }
 
@@ -294,46 +300,34 @@ impl LightboxApp {
         use tokio::sync::broadcast::error::TryRecvError;
         loop {
             match self.events.try_recv() {
-                Ok(Event::CatalogChanged { .. }) => {
-                    self.model.mark_dirty();
-                    self.thumbs.clear_failures();
-                }
-                Ok(Event::ImportStarted { .. }) => {
-                    self.import_ui.active = Some((0, 0, String::new()));
-                }
-                Ok(Event::ImportProgress {
-                    done,
-                    discovered,
-                    current,
-                    ..
-                }) => {
-                    self.import_ui.active = Some((
-                        done,
-                        discovered,
-                        current
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                    ));
-                    // Keep the grid growing during the import (M0 exit:
-                    // browsable during import) without re-querying at event
-                    // rate.
-                    self.model.mark_dirty_throttled(Duration::from_millis(500));
-                }
-                Ok(Event::ImportFinished { report, .. }) => {
-                    self.import_ui.active = None;
-                    self.status = format!(
-                        "imported {} (skipped {} duplicates, {} errors) in {:.1}s",
-                        report.imported,
-                        report.skipped_duplicates,
-                        report.errors.len(),
-                        report.took.as_secs_f64(),
-                    );
-                    self.model.mark_dirty();
+                Ok(
+                    ev @ (Event::WorkingSetOpening { .. }
+                    | Event::WorkingSetReplaced { .. }
+                    | Event::WorkingSetChanged { .. }
+                    | Event::WorkingSetLoadFinished { .. }),
+                ) => {
+                    if matches!(ev, Event::WorkingSetOpening { .. }) {
+                        // A6: a replace never prompts, but a previously
+                        // -failed thumbnail is worth retrying — the new
+                        // epoch may reopen the very same content hash (same
+                        // `ImageId`) at a fixed/relocated path.
+                        self.thumbs.clear_failures();
+                    }
+                    if let Event::WorkingSetLoadFinished { report, .. } = &ev {
+                        self.status = format!(
+                            "opened {} (reused {}, relocated {}, {} failed, {} duplicates) in {:.1}s",
+                            report.ready,
+                            report.reused,
+                            report.relocated,
+                            report.failed,
+                            report.collapsed,
+                            report.took.as_secs_f64(),
+                        );
+                    }
+                    self.working_set.on_event(&ev, &self.session);
                 }
                 Ok(Event::CommandFailed { error, .. }) => {
                     self.status = format!("command failed: {error}");
-                    self.import_ui.active = None;
                 }
                 Ok(Event::BackupFinished { report }) => {
                     self.status = format!("backup written: {}", report.path.display());
@@ -343,69 +337,83 @@ impl LightboxApp {
                 }
                 Ok(_) => {}
                 Err(TryRecvError::Lagged(_)) => {
-                    // Missed events: any of them could have been a
-                    // CatalogChanged.
-                    self.model.mark_dirty();
+                    self.working_set.on_lagged(&self.session);
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
             }
         }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    /// Submits exactly one `Command::OpenWorkingSet` (A2/A6: a new drop or
+    /// dialog pick always *replaces* the working set — no prompt, ever).
+    fn open(&mut self, request: OpenRequest) {
+        self.status = format!("opening {} item(s)…", request.paths.len());
+        self.session.submit(Command::OpenWorkingSet { request });
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, intake_skipped: usize) {
         ui.horizontal(|ui| {
-            match self.view {
-                View::Grid => {
-                    ui.label("Import folder:");
-                    let width = (ui.available_width() - 420.0).clamp(120.0, 420.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.import_ui.path)
-                            .hint_text("/path/to/photos")
-                            .desired_width(width),
-                    );
-                    ui.checkbox(&mut self.import_ui.recursive, "recursive");
-                    let importing = self.import_ui.active.is_some();
-                    let import_clicked = ui
-                        .add_enabled(
-                            !importing && !self.import_ui.path.trim().is_empty(),
-                            egui::Button::new("Import"),
-                        )
-                        .clicked();
-                    if import_clicked {
-                        self.session.submit(Command::ImportAddInPlace {
-                            source_dir: PathBuf::from(self.import_ui.path.trim()),
-                            recursive: self.import_ui.recursive,
-                        });
-                        self.status = format!("importing {}…", self.import_ui.path.trim());
-                    }
-                    ui.separator();
-                    ui.label("Size:");
-                    ui.add(egui::Slider::new(&mut self.cell_size, 64.0..=320.0).show_value(false));
-                }
-                View::Loupe => {
-                    if ui.button("◀ Grid (G)").clicked() {
-                        self.exit_loupe();
-                    }
-                    ui.label("←/→ navigate · Z/Space/double-click zoom · fit ↔ 100%");
+            if ui.button("Open Files…").clicked() {
+                if let Some(paths) = rfd::FileDialog::new().set_title("Open Images").pick_files() {
+                    self.open(OpenRequest::new(paths, false, OpenOrigin::OpenDialog));
                 }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some((done, discovered, current)) = &self.import_ui.active {
-                    ui.label(format!("importing {done}/{discovered} — {current}"));
-                    ui.spinner();
+            if ui.button("Open Folder…").clicked() {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Open Folder")
+                    .pick_folder()
+                {
+                    self.open(OpenRequest::new(vec![dir], false, OpenOrigin::OpenDialog));
                 }
-            });
+            }
+            if ui.button("Browse Folders…").clicked() {
+                self.explorer.open_at(explorer::default_start_dir());
+            }
+            ui.separator();
+            let zoom_label = match self.loupe.zoom_mode() {
+                loupe::LoupeZoom::Fit => "Fit",
+                loupe::LoupeZoom::OneToOne => "100%",
+            };
+            if ui.button(format!("Zoom: {zoom_label}")).clicked() {
+                self.loupe.toggle_zoom_button();
+            }
+
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match self.working_set.phase() {
+                    lightbox_core::SetPhase::Planning | lightbox_core::SetPhase::Loading => {
+                        ui.spinner();
+                        ui.label(format!(
+                            "opening… {} found",
+                            self.working_set.entries().len()
+                        ));
+                    }
+                    _ => {
+                        if intake_skipped > 0 {
+                            ui.label(format!(
+                                "{intake_skipped} dropped item(s) had no path — skipped"
+                            ));
+                        }
+                    }
+                },
+            );
         });
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let selected = if self.selection.is_empty() {
-                String::new()
+            let n = self.working_set.entries().len();
+            let active = self
+                .working_set
+                .active_index()
+                .map(|i| format!(" · {}/{}", i + 1, n))
+                .unwrap_or_default();
+            let truncated = if self.working_set.truncated() {
+                " · truncated (max set size reached)"
             } else {
-                format!(" · {} selected", self.selection.len())
+                ""
             };
-            ui.label(format!("{} images{selected}", self.model.rows().len()));
+            ui.label(format!("{n} images{active}{truncated}"));
             ui.separator();
             ui.label(&self.status);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -444,7 +452,11 @@ impl LightboxApp {
                     "nav swap   p95 {nav_p95:6.2} ms (n={})",
                     self.loupe.nav_swap_ms.len()
                 ));
-                ui.monospace(format!("images     {}", self.model.rows().len()));
+                ui.monospace(format!(
+                    "images     {} (epoch {})",
+                    self.working_set.entries().len(),
+                    self.working_set.epoch()
+                ));
                 ui.monospace(format!(
                     "swaps      {}",
                     self.outcome.texture_swaps.load(Ordering::Acquire)
@@ -452,59 +464,8 @@ impl LightboxApp {
             });
     }
 
-    fn enter_loupe(&mut self, idx: usize) {
-        if let Some(summary) = self.model.rows().get(idx) {
-            self.selection.set_focus(summary.id);
-            self.loupe.enter();
-            self.view = View::Loupe;
-        }
-    }
-
-    fn exit_loupe(&mut self) {
-        self.loupe.exit();
-        self.view = View::Grid;
-    }
-
-    /// Perf scripting (T28 grid-scroll capture): submit the import once,
-    /// then drive a forced sawtooth scroll through the REAL grid path.
-    /// Returns the scroll fraction to force this frame, if any.
-    fn pump_perf(&mut self, ctx: &egui::Context) -> Option<f32> {
-        let perf = self.perf.as_mut()?;
-        if !perf.submitted {
-            perf.submitted = true;
-            let photos = perf.photos.clone();
-            self.session.submit(Command::ImportAddInPlace {
-                source_dir: photos,
-                recursive: false,
-            });
-        }
-        let stats = self.thumbs.stats();
-        match perf.pump(
-            self.model.rows().len(),
-            (stats.requested_total, stats.cancelled_total),
-        ) {
-            ScrollPhase::Warmup => None,
-            ScrollPhase::Scroll(frac) => Some(frac),
-            ScrollPhase::Done(json) => {
-                // The nightly workflow scrapes this line into the summary.
-                println!("{json}");
-                self.outcome.perf_ok.store(true, Ordering::Release);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                None
-            }
-            ScrollPhase::Expired => {
-                tracing::error!(
-                    target: "lightbox_shell",
-                    "perf-scroll run expired before the capture completed"
-                );
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                None
-            }
-        }
-    }
-
-    /// Smoke scripting: submit the import once, hop into the loupe once a
-    /// row exists, close when proven (or wedged — nonzero exit).
+    /// Perf/A7 smoke scripting: submit the open once, then wait for the
+    /// working set to auto-activate (§2.4) before requiring the seam proof.
     fn pump_smoke(&mut self, ctx: &egui::Context) {
         let Some(smoke) = &mut self.smoke else {
             return;
@@ -512,26 +473,22 @@ impl LightboxApp {
         if !smoke.submitted {
             let photos = smoke.photos.clone();
             smoke.submitted = true;
-            self.session.submit(Command::ImportAddInPlace {
-                source_dir: photos,
-                recursive: false,
+            self.session.submit(Command::OpenWorkingSet {
+                request: OpenRequest::new(vec![photos], false, OpenOrigin::Cli),
             });
         }
-        let want_loupe = !smoke.opened_loupe && !self.model.rows().is_empty();
-        if want_loupe {
-            self.smoke.as_mut().expect("smoke mode").opened_loupe = true;
-            self.enter_loupe(0);
-        }
 
-        let smoke = self.smoke.as_ref().expect("smoke mode");
+        let filmstrip_shown = self.outcome.filmstrip_shown.load(Ordering::Acquire);
         let frames = self.outcome.frames.load(Ordering::Acquire);
         let proven = self.outcome.seam_proven.load(Ordering::Acquire);
-        if smoke.done(frames, proven) {
+        let smoke = self.smoke.as_ref().expect("smoke mode");
+        if smoke.done(frames, filmstrip_shown, proven) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else if smoke.expired(frames) {
             tracing::error!(
                 target: "lightbox_shell",
                 frames,
+                filmstrip_shown,
                 proven,
                 "smoke run expired before the seam was proven"
             );
@@ -545,63 +502,140 @@ impl eframe::App for LightboxApp {
         let ctx = root.ctx().clone();
         self.stats.tick();
         self.drain_events();
-        self.model.pump(&self.session);
         self.thumbs.pump(&ctx);
 
         if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_overlay = !self.show_overlay;
         }
 
-        egui::Panel::top(egui::Id::new("lightbox-top")).show(root, |ui| self.top_bar(ui));
-        egui::Panel::bottom(egui::Id::new("lightbox-status")).show(root, |ui| self.status_bar(ui));
+        // A2: fold this frame's drop/hover input. The recursive default is
+        // fixed at `false` in Phase A — the real prefs knob (§6.7
+        // `drop_recursive_default`) lands with Phase G; Alt still overrides
+        // per-drop regardless.
+        let intake_frame = ctx.input(|i| intake::pump(i, false));
+        if intake_frame.skipped_pathless > 0 {
+            self.status = format!(
+                "{} dropped item(s) had no resolvable path — skipped",
+                intake_frame.skipped_pathless
+            );
+        }
+        if let Some(request) = intake_frame.open {
+            // A2 AC: exactly one `OpenWorkingSet` per drop.
+            self.open(request);
+        }
 
-        let forced_scroll = self.pump_perf(&ctx);
-        let mut visible: HashSet<lightbox_types::ImageId> = HashSet::new();
-        egui::CentralPanel::default().show(root, |ui| match self.view {
-            View::Grid => {
-                let action = grid::grid_ui(
-                    ui,
-                    self.model.rows(),
-                    &mut self.selection,
-                    &mut self.thumbs,
-                    self.cell_size,
-                    &mut visible,
-                    forced_scroll,
-                );
-                if let Some(GridAction::OpenLoupe(idx)) = action {
-                    self.enter_loupe(idx);
+        if let Some(action) = self.explorer.ui(&ctx) {
+            match action {
+                ExplorerAction::OpenImage(path) => {
+                    self.open(OpenRequest::new(vec![path], false, OpenOrigin::OpenDialog));
+                }
+                ExplorerAction::OpenFolder(dir) => {
+                    self.open(OpenRequest::new(vec![dir], false, OpenOrigin::OpenDialog));
                 }
             }
-            View::Loupe => {
+        }
+
+        egui::Panel::top(egui::Id::new("lightbox-top"))
+            .show(root, |ui| self.top_bar(ui, intake_frame.skipped_pathless));
+        egui::Panel::bottom(egui::Id::new("lightbox-status")).show(root, |ui| self.status_bar(ui));
+
+        // Right develop-panel rail placeholder (A1 chassis AC; real content
+        // is Phase E's `panels/` framework).
+        egui::Panel::right(egui::Id::new("lightbox-develop-rail"))
+            .resizable(false)
+            .default_size(220.0)
+            .show(root, |ui| {
+                ui.heading("Develop");
+                ui.weak("Panels land in E08 Phase E.");
+            });
+
+        // Bottom filmstrip strut.
+        let mut visible: HashSet<lightbox_types::ImageId> = HashSet::new();
+        if !self.working_set.is_empty() {
+            egui::Panel::bottom(egui::Id::new("lightbox-filmstrip"))
+                .exact_size(96.0)
+                .show(root, |ui| {
+                    let action = filmstrip::filmstrip_ui(
+                        ui,
+                        self.working_set.entries(),
+                        self.working_set.active_index(),
+                        &mut self.thumbs,
+                        72.0,
+                        &mut visible,
+                    );
+                    if let Some(FilmstripAction::Activate(idx)) = action {
+                        self.working_set.set_active(idx);
+                    }
+                });
+            self.outcome.filmstrip_shown.store(true, Ordering::Release);
+        }
+
+        // Central canvas / empty state. `active_image()` is `Some` only for
+        // an active entry that reached `Ready` — a still-`Planned`/`Failed`
+        // active entry falls through to the placeholder arm below. Cloned
+        // out of the view model up front (a small string + two ints) so the
+        // borrow releases before the closure below needs `&mut self`.
+        let ready = self
+            .working_set
+            .active_image()
+            .zip(self.working_set.active())
+            .map(|(image, entry)| (image, entry.filename.clone(), entry.width, entry.height));
+        // A changed (or newly-absent) active image resets the canvas
+        // exactly once per transition (mirrors the retired `enter_loupe`'s
+        // reset-on-entry behavior, plus a matching release on the way out).
+        let new_shown = ready.as_ref().map(|(image, ..)| *image);
+        if new_shown != self.last_shown_image {
+            match new_shown {
+                Some(_) => self.loupe.enter(),
+                None => self.loupe.exit(),
+            }
+            self.last_shown_image = new_shown;
+        }
+
+        egui::CentralPanel::default().show(root, |ui| match &ready {
+            Some((image, filename, width, height)) => {
                 let scheduler = self.session.render_scheduler();
                 let max_tex_dim = self.gpu.limits.max_texture_dimension_2d;
-                let idx = self
-                    .selection
-                    .focus()
-                    .and_then(|id| self.model.index_of(id));
-                match idx {
-                    Some(idx) => {
-                        match self
-                            .loupe
-                            .ui(ui, &scheduler, max_tex_dim, self.model.rows(), idx)
-                        {
-                            Some(LoupeAction::ExitToGrid) => self.exit_loupe(),
-                            Some(LoupeAction::Navigate(next)) => {
-                                if let Some(s) = self.model.rows().get(next) {
-                                    self.selection.set_focus(s.id);
-                                }
-                            }
-                            None => {}
-                        }
-                    }
-                    // The focused image vanished (undo-import): back to grid.
-                    None => self.exit_loupe(),
+                let idx = self.working_set.active_index().unwrap_or(0);
+                let total = self.working_set.entries().len();
+                let active_entry = ActiveEntry {
+                    image: *image,
+                    filename,
+                    width: *width,
+                    height: *height,
+                };
+                if let Some(LoupeAction::Navigate(next)) =
+                    self.loupe
+                        .ui(ui, &scheduler, max_tex_dim, active_entry, idx, total)
+                {
+                    // §6.2 `nav`: clamped relative navigation — the loupe
+                    // only ever proposes an adjacent index (±1).
+                    self.working_set.nav(next as isize - idx as isize);
                 }
+            }
+            None if self.working_set.is_empty() => {
+                empty_state_ui(ui, intake_frame.hover);
+            }
+            None => {
+                // Set is non-empty but nothing has reached Ready yet
+                // (still Planning/Loading) or every entry failed —
+                // never blank, never a false "drop here" (§6.4 canvas
+                // states; the full placard/shimmer treatment is Phase C).
+                ui.centered_and_justified(|ui| {
+                    ui.weak(match self.working_set.phase() {
+                        lightbox_core::SetPhase::Planning | lightbox_core::SetPhase::Loading => {
+                            "opening…"
+                        }
+                        _ => "no previewable images in this set",
+                    });
+                });
             }
         });
 
-        // Cancel-on-scroll-out + O(visible) texture memory (T25). The cap
-        // keeps a small navigation cushion above the visible set.
+        // Cancel-on-scroll-out + O(visible) texture memory. A new epoch's
+        // filmstrip only ever iterates its own entries, so a replace (A6)
+        // naturally excludes the old epoch's images from `visible` — their
+        // in-flight thumb tickets are cancelled here on the very next frame.
         let cap = (visible.len() * 3).max(64);
         self.thumbs.end_frame(&visible, cap);
 
@@ -614,12 +648,13 @@ impl eframe::App for LightboxApp {
 
         // Repaint policy: run hot while anything is in flight; otherwise a
         // slow idle poll keeps the event pump alive without burning a core.
-        let busy = self.model.loading()
-            || self.thumbs.stats().inflight > 0
+        let busy = matches!(
+            self.working_set.phase(),
+            lightbox_core::SetPhase::Planning | lightbox_core::SetPhase::Loading
+        ) || self.thumbs.stats().inflight > 0
             || self.loupe.busy()
-            || self.import_ui.active.is_some()
-            || self.smoke.is_some()
-            || self.perf.is_some();
+            || self.explorer.is_open()
+            || self.smoke.is_some();
         if busy {
             ctx.request_repaint();
         } else {
@@ -628,9 +663,9 @@ impl eframe::App for LightboxApp {
     }
 
     fn on_exit(&mut self) {
-        // Exit-time verified backup per policy (spec T15/OQ-6); smoke and
-        // perf runs skip it (throwaway catalogs).
-        let policy = if self.smoke.is_some() || self.perf.is_some() {
+        // Exit-time verified backup per policy (spec T15/OQ-6); smoke runs
+        // skip it (throwaway catalog).
+        let policy = if self.smoke.is_some() {
             ClosePolicy::Skip
         } else {
             ClosePolicy::Auto

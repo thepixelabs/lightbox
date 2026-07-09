@@ -31,6 +31,13 @@ tempfile.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+# A3: the native OS open dialog behind "Open Files…"/"Open Folder…".
+rfd.workspace = true
+
+[dev-dependencies]
+# UI testing (spec §9): headless kittest harnesses for the intake/empty-state
+# widget tests. Never a runtime dependency of the shipped binary.
+egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
 
 [lints]
 workspace = true

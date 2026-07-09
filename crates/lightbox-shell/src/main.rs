@@ -1,25 +1,39 @@
 // SPDX-FileCopyrightText: 2026 Lightbox contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lightbox` — the desktop app binary (E01 Phase 7: grid + loupe shell).
+//! `lightbox` — the desktop app binary (E08 Phase A: the editor shell).
 //!
 //! ```text
-//! lightbox [--catalog <dir>.lbdata]   # open (or create) a catalog
+//! lightbox [--catalog <dir>.lbdata] [--recursive] [PATH...]
+//!                                     # open (or create) a catalog;
+//!                                     # trailing PATHs (files/folders) are
+//!                                     # opened at launch (A4) before the
+//!                                     # first frame paints
 //! lightbox --smoke [FRAMES]           # CI smoke: throwaway catalog →
-//!                                     # import → grid → loupe; verify the
-//!                                     # zero-copy seam held, exit 0/1
-//! lightbox --perf-scroll [FRAMES]     # T28 nightly: scripted grid-scroll
-//!                                     # frame-time capture; prints one
-//!                                     # JSON summary line, exit 0/1
+//!                                     # OpenWorkingSet → filmstrip →
+//!                                     # canvas; verify the zero-copy seam
+//!                                     # held, exit 0/1
 //! ```
+//!
+//! **A4 macOS "Open With" note:** the pinned winit (0.30.13) does not
+//! surface `application:openURLs:`/`application:openFile:` through its
+//! cross-platform event API at all (confirmed by reading
+//! `winit::platform::macos`'s own docs: the *only* path is registering a
+//! fully custom `NSApplicationDelegate` via raw `objc2`/`objc2-app-kit`
+//! bindings *before* the event loop starts, bypassing winit's delegate
+//! entirely — a non-trivial platform-specific shim eframe provides no hook
+//! for). Not wired in Phase A; the honest fallback is drop/dialog/CLI-argv,
+//! which cover three of the mandate's entry rows. See `E08-deviations.md`
+//! (A4) for the full investigation and the E16-packaging follow-up.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
 use lightbox_shell::ShellOptions;
 
 const USAGE: &str =
-    "usage: lightbox [--catalog <dir>.lbdata] [--smoke [FRAMES]] [--perf-scroll [FRAMES]]";
+    "usage: lightbox [--catalog <dir>.lbdata] [--recursive] [--smoke [FRAMES]] [PATH...]";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -44,17 +58,6 @@ fn main() -> ExitCode {
                 };
                 options.smoke_frames = Some(frames.max(1));
             }
-            "--perf-scroll" => {
-                // Optional FRAMES: consume the next arg only when numeric.
-                let frames = match args.peek().map(|v| v.parse::<u64>()) {
-                    Some(Ok(n)) => {
-                        args.next();
-                        n
-                    }
-                    _ => 600,
-                };
-                options.perf_scroll_frames = Some(frames.max(60));
-            }
             "--catalog" => {
                 let Some(path) = args.next() else {
                     eprintln!("--catalog requires a path\n{USAGE}");
@@ -62,49 +65,50 @@ fn main() -> ExitCode {
                 };
                 options.catalog = Some(path.into());
             }
+            "--recursive" => {
+                options.initial_recursive = true;
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
-            other => {
+            other if other.starts_with("--") => {
                 eprintln!("unknown argument: {other}\n{USAGE}");
                 return ExitCode::from(2);
             }
+            // A4: any non-flag argument is a path to open at launch (files
+            // and/or folders, mirrors `lightbox-cli open <PATH>...`).
+            other => options.initial_paths.push(PathBuf::from(other)),
         }
     }
 
-    if options.smoke_frames.is_some() && options.perf_scroll_frames.is_some() {
-        eprintln!("--smoke and --perf-scroll are mutually exclusive\n{USAGE}");
+    let smoke = options.smoke_frames.is_some();
+    if smoke && !options.initial_paths.is_empty() {
+        eprintln!("--smoke and launch PATHs are mutually exclusive\n{USAGE}");
         return ExitCode::from(2);
     }
 
-    let smoke = options.smoke_frames.is_some();
-    let perf = options.perf_scroll_frames.is_some();
     match lightbox_shell::run(options) {
         Ok(outcome) => {
             let frames = outcome.frames.load(Ordering::Acquire);
             let swaps = outcome.texture_swaps.load(Ordering::Acquire);
             let proven = outcome.seam_proven.load(Ordering::Acquire);
-            if perf {
-                if !outcome.perf_ok.load(Ordering::Acquire) {
-                    eprintln!("FAIL: grid-scroll perf capture did not complete");
-                    return ExitCode::FAILURE;
-                }
-                return ExitCode::SUCCESS;
-            }
+            let filmstrip_shown = outcome.filmstrip_shown.load(Ordering::Acquire);
             if smoke {
                 println!(
-                    "seam-2 smoke: frames={frames} texture_swaps={swaps} seam_proven={proven}"
+                    "seam-2 smoke: frames={frames} texture_swaps={swaps} \
+                     filmstrip_shown={filmstrip_shown} seam_proven={proven}"
                 );
-                if !proven || swaps == 0 {
+                if !filmstrip_shown || !proven || swaps == 0 {
                     eprintln!(
-                        "FAIL: no Engine::submit texture was composited on the shared device"
+                        "FAIL: the filmstrip never showed a row and/or no Engine::submit \
+                         texture was composited on the shared device"
                     );
                     return ExitCode::FAILURE;
                 }
                 println!(
-                    "OK: import → grid → loupe drove an engine texture zero-copy \
-                     on the shared wgpu device"
+                    "OK: OpenWorkingSet → filmstrip → canvas drove an engine texture \
+                     zero-copy on the shared wgpu device"
                 );
             }
             ExitCode::SUCCESS
