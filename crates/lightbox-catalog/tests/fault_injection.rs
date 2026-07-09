@@ -53,6 +53,25 @@
 //! evidence ("kill mid-batch loses only unflushed touches, catalog
 //! integrity clean") rather than a new mechanism.
 //!
+//! # E03 Phase F (T21/T23) — the raw-cache accounting write path
+//!
+//! A fifth randomized operation mirrors the T04 preview branch above but
+//! drives `rawcache_dao`'s write path instead: an initial
+//! `upsert_rawcache_entry`, then repeated 50/50 choices between a rebuild
+//! (new `upsert_rawcache_entry`, same `(content_hash, params_hash)` key —
+//! the "content changed" case) and a batched
+//! `touch_rawcache_last_used_by_key` flush (the "just bump LRU" case, spec
+//! §3.2/§5.4). This is the catalog-DAO-only half of E03 Phase F's fault
+//! coverage — deliberately narrower than `lightbox-preview`'s own
+//! `store_crash_loop.rs`/`relocate_crash_loop.rs` (Phase F), which exercise
+//! the REAL on-disk container/blob write paths (`RawCache::put`,
+//! `producer::ensure_t0`/`ensure_t1`, journaled `relocate`) and the real
+//! `verify_store`/`RawCache::reconcile` seams — this crate cannot depend on
+//! `lightbox-preview` (that would be the same dependency-cycle problem the
+//! T12 edit-commit branch's own comment already names for `lightbox-edit`),
+//! so, matching that established precedent, this branch stays at the DAO
+//! level: same single-WAL-transaction guarantee, opaque payload bytes.
+//!
 //! # The negative control we do NOT ship (documentation, not code)
 //!
 //! With `PRAGMA synchronous = OFF` + `journal_mode = DELETE` this harness's
@@ -73,7 +92,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use lightbox_catalog::{
-    BackupOpts, Catalog, IntegrityStatus, NewAsset, NewPreviewRow, PreviewSourceTag,
+    BackupOpts, Catalog, IntegrityStatus, NewAsset, NewPreviewRow, NewRawCacheEntryRow,
+    PreviewSourceTag,
 };
 use lightbox_types::{AssetId, ContentHash, FolderId, ImageId, Orientation, PreviewId, PV_M0};
 
@@ -129,11 +149,16 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // row id once built (so the touch-flush leg has something to touch).
     let mut preview_tag: HashMap<i64, u64> = HashMap::new();
     let mut preview_id: HashMap<i64, i64> = HashMap::new();
+    // E03 Phase F (T21/T23): per-image raw-cache entry tag (bumped on each
+    // rebuild) — the `(content_hash, params_hash)` key itself is a pure
+    // function of `image` (see `rawcache_key_for_image`), so unlike
+    // `preview_id` above there is no id/key to separately track here.
+    let mut rawcache_tag: HashMap<i64, u64> = HashMap::new();
 
     // Loop until killed.
     loop {
         let roll = rng.u8(..);
-        if roll < 200 || my_images.is_empty() {
+        if roll < 190 || my_images.is_empty() {
             // Insert a small batch of assets + default images.
             let n = rng.u64(1..=4);
             let batch: Vec<NewAsset> = (0..n)
@@ -158,7 +183,7 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 my_assets.insert(i.0, a.0);
             }
             my_images.extend(images.iter().map(|i| i.0));
-        } else if roll < 216 {
+        } else if roll < 206 {
             // Overwrite a rating on an image we created earlier: intent
             // before the txn, done after the commit.
             let image = my_images[rng.usize(..my_images.len())];
@@ -168,7 +193,7 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 .writer()
                 .with_txn(move |txn| txn.set_rating(ImageId(image), Some(rating)))?;
             log(format!("done {image}:{rating}\n"))?;
-        } else if roll < 236 {
+        } else if roll < 226 {
             // E03 Phase A T04: preview build / rebuild / touch-flush.
             let image = my_images[rng.usize(..my_images.len())];
             let asset = *my_assets
@@ -195,6 +220,29 @@ fn child_workload(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 log(format!("preview_done {image}:{tag}\n"))?;
                 preview_tag.insert(image, tag);
                 preview_id.insert(image, id.0);
+            }
+        } else if roll < 244 {
+            // E03 Phase F (T21/T23): raw-cache entry build / rebuild /
+            // touch-flush — same intent/done tolerance as the T04 branch
+            // above, driving `raw_cache_entry` instead of `preview`.
+            let image = my_images[rng.usize(..my_images.len())];
+            let (content_hash, params_hash) = rawcache_key_for_image(image);
+            let already_built = rawcache_tag.contains_key(&image);
+            if already_built && rng.bool() {
+                log(format!("rawcache_touch_intent {image}\n"))?;
+                catalog.writer().with_txn(move |txn| {
+                    txn.touch_rawcache_last_used_by_key(content_hash, params_hash)
+                })?;
+                log(format!("rawcache_touch_done {image}\n"))?;
+            } else {
+                let tag = rawcache_tag.get(&image).copied().unwrap_or(0) + 1;
+                log(format!("rawcache_intent {image}:{tag}\n"))?;
+                let row = rawcache_row(content_hash, params_hash, image, tag);
+                catalog
+                    .writer()
+                    .with_txn(move |txn| txn.upsert_rawcache_entry(row))?;
+                log(format!("rawcache_done {image}:{tag}\n"))?;
+                rawcache_tag.insert(image, tag);
             }
         } else {
             // E09 T12: an edit-commit — the exact §4.1-2 protocol
@@ -360,6 +408,19 @@ struct PreviewOpState {
     touched: bool,
 }
 
+/// E03 Phase F (T21/T23): the same intent/done tolerance as [`PreviewOpState`],
+/// keyed by the raw-cache entry `tag` that lands in `raw_cache_entry.bytes`.
+#[derive(Default)]
+struct RawCacheOpState {
+    /// `tag` of the last `rawcache_done` line (a proven commit).
+    last_done: Option<u64>,
+    /// `tag`s seen after the last `rawcache_done` — builds that may or may
+    /// not have landed before a kill.
+    trailing_intents: Vec<u64>,
+    /// Whether a `rawcache_touch_done` was journaled at all.
+    touched: bool,
+}
+
 /// Replays the journal and checks every committed txn is present. Returns
 /// the number of journal lines read.
 fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usize {
@@ -372,6 +433,7 @@ fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usi
     let mut ratings: HashMap<i64, RatingState> = HashMap::new();
     let mut edits: HashMap<i64, EditCommitState> = HashMap::new();
     let mut previews: HashMap<i64, PreviewOpState> = HashMap::new();
+    let mut rawcaches: HashMap<i64, RawCacheOpState> = HashMap::new();
     for (idx, line) in lines.iter().enumerate() {
         let last = idx + 1 == lines.len();
         // A kill can tear at most the final line; anything malformed earlier
@@ -382,6 +444,7 @@ fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usi
             &mut ratings,
             &mut edits,
             &mut previews,
+            &mut rawcaches,
         );
         if !ok {
             assert!(
@@ -550,6 +613,53 @@ fn verify_journal(catalog: &Catalog, journal_path: &Path, iteration: u32) -> usi
             }
         }
     }
+
+    // E03 Phase F (T21/T23): raw-cache entry build/rebuild/touch-flush —
+    // identical tolerance/monotonicity pattern as the preview loop above,
+    // against `raw_cache_entry` instead of `preview`.
+    for (image, state) in &rawcaches {
+        let (content_hash, params_hash) = rawcache_key_for_image(*image);
+        let row = reader
+            .rawcache_lookup(content_hash, params_hash)
+            .unwrap_or_else(|e| {
+                panic!("iteration {iteration}: reading raw_cache_entry for image {image}: {e}")
+            });
+        match row {
+            None => {
+                assert!(
+                    state.last_done.is_none(),
+                    "iteration {iteration}: image {image} has a journaled DONE raw-cache \
+                     build (tag {:?}) but no raw_cache_entry row exists — a committed \
+                     raw-cache write was lost",
+                    state.last_done
+                );
+            }
+            Some(r) => {
+                let allowed: Vec<u64> = match state.last_done {
+                    Some(done) => std::iter::once(done)
+                        .chain(state.trailing_intents.iter().copied())
+                        .collect(),
+                    None => state.trailing_intents.to_vec(),
+                };
+                assert!(
+                    allowed.contains(&r.bytes),
+                    "iteration {iteration}: image {image} raw_cache_entry.bytes={} not \
+                     explainable by the journal (allowed {allowed:?}) — a committed \
+                     raw-cache build was lost",
+                    r.bytes,
+                );
+                if state.touched {
+                    assert!(
+                        r.last_used_at >= r.built_at,
+                        "iteration {iteration}: image {image} raw_cache_entry last_used_at {} \
+                         < built_at {} after a journaled touch-flush — touch write was torn",
+                        r.last_used_at,
+                        r.built_at,
+                    );
+                }
+            }
+        }
+    }
     lines.len()
 }
 
@@ -560,6 +670,7 @@ fn parse_line(
     ratings: &mut HashMap<i64, RatingState>,
     edits: &mut HashMap<i64, EditCommitState>,
     previews: &mut HashMap<i64, PreviewOpState>,
+    rawcaches: &mut HashMap<i64, RawCacheOpState>,
 ) -> bool {
     fn pair(s: &str) -> Option<(i64, u8)> {
         let (a, b) = s.split_once(':')?;
@@ -658,6 +769,36 @@ fn parse_line(
         };
         previews.entry(image).or_default().touched = true;
         true
+    } else if let Some(rest) = line.strip_prefix("rawcache_intent ") {
+        let Some((image, tag)) = pair_u64(rest) else {
+            return false;
+        };
+        rawcaches
+            .entry(image)
+            .or_default()
+            .trailing_intents
+            .push(tag);
+        true
+    } else if let Some(rest) = line.strip_prefix("rawcache_done ") {
+        let Some((image, tag)) = pair_u64(rest) else {
+            return false;
+        };
+        let state = rawcaches.entry(image).or_default();
+        state.last_done = Some(tag);
+        state.trailing_intents.clear();
+        true
+    } else if let Some(rest) = line.strip_prefix("rawcache_touch_intent ") {
+        let Ok(image) = rest.parse::<i64>() else {
+            return false;
+        };
+        rawcaches.entry(image).or_default();
+        true
+    } else if let Some(rest) = line.strip_prefix("rawcache_touch_done ") {
+        let Ok(image) = rest.parse::<i64>() else {
+            return false;
+        };
+        rawcaches.entry(image).or_default().touched = true;
+        true
     } else {
         false
     }
@@ -706,6 +847,35 @@ fn preview_row(asset: AssetId, image: ImageId, tag: u64) -> NewPreviewRow {
         height: 2560,
         bytes: tag,
         checksum: [2; 8],
+    }
+}
+
+/// E03 Phase F (T21/T23): the `raw_cache_entry` accounting key for `image` —
+/// a pure function of `image` alone (mirrors `preview_row`'s
+/// `content_hash` derivation above), so both the child (building rows) and
+/// the verifier (looking rows up) can recompute it without journaling it.
+fn rawcache_key_for_image(image: i64) -> (ContentHash, [u8; 8]) {
+    let mut hash = [0u8; 16];
+    hash[..8].copy_from_slice(&image.to_le_bytes());
+    let mut params_hash = [0u8; 8];
+    params_hash.copy_from_slice(&image.to_le_bytes());
+    (ContentHash(hash), params_hash)
+}
+
+/// One `raw_cache_entry` row for the E03 Phase F (T21/T23) fault-injection
+/// branch. `tag` rides in `bytes`, same convention as `preview_row`.
+fn rawcache_row(
+    content_hash: ContentHash,
+    params_hash: [u8; 8],
+    image: i64,
+    tag: u64,
+) -> NewRawCacheEntryRow {
+    NewRawCacheEntryRow {
+        content_hash,
+        params_hash,
+        payload_schema: 1,
+        store_path: format!("rawcache/aa/{image:x}.{tag:x}.zst"),
+        bytes: tag,
     }
 }
 

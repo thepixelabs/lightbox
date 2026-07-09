@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Lightbox contributors
 # SPDX-License-Identifier: Apache-2.0
 #
-# Nightly gates (E01 spec §5 T13/T28, §6, DoD §8.3): the 1000-iteration
-# kill -9 fault-injection run at 0 corruptions / 0 lost commits, plus the
-# perf scenario harness — lbx-perf (import-1k, page-query @100k, nav-swap),
-# the scripted grid-scroll capture, and the criterion micro-benches.
-# Perf regressions are REPORTED (job summary + tracked issue), never
-# blocking (spec §8: "regression ⇒ tracked issue, non-blocking").
+# Nightly gates (E01 spec §5 T13/T28, §6, DoD §8.3; E03 spec §8/§11 DoD #4):
+# the 1000-iteration kill -9 fault-injection run at 0 corruptions / 0 lost
+# commits, its E03 Phase F nightly-full siblings (blob/T2/T0-T1-rawcache/
+# relocate crash loops), plus the perf scenario harness — lbx-perf
+# (import-1k, page-query @100k, nav-swap), the scripted grid-scroll capture,
+# and the criterion micro-benches (catalog/decode/color/preview §6-§7
+# budgets). Perf regressions are REPORTED (job summary + tracked issue),
+# never blocking (spec §8: "regression ⇒ tracked issue, non-blocking") — the
+# fault-injection legs ARE blocking (0 corruptions is a hard bar).
 
 name: Nightly
 
@@ -42,12 +45,62 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # E03's T0/T1/raw-cache crash loop (below) needs the real pinned raw
+      # fixture corpus (it decodes an actual CR2) — the other legs on this
+      # job (catalog/blob/T2/relocate) are all synthetic and need nothing.
+      - name: Cache fixture corpus
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
+
+      - name: Fetch + verify pinned fixtures
+        run: cargo run -p xtask -- fixtures
+
       - name: fault injection (1000 iterations, release)
         env:
           LIGHTBOX_FAULT_ITERS: "1000"
         run: >
           cargo test -p lightbox-catalog --test fault_injection --release --
           kill9_leaves_catalog_clean_and_committed_txns_present
+          --exact --nocapture
+
+      # E03 Phase F (T21/T23): the nightly-full leg of the crash-loop suite
+      # split (spec §8: "PR-blocking (fast subset) / nightly (full)" — the
+      # PR gate already runs every one of these at its fast default via the
+      # `cargo test --workspace` step in ci.yml; this job re-runs the same
+      # tests at a much higher iteration count for a stronger crash-safety
+      # signal, matching the catalog fault-injection step immediately above.
+      - name: E03 blob atomic-write crash loop (300 iterations, release)
+        env:
+          LIGHTBOX_BLOB_FAULT_ITERS: "300"
+        run: >
+          cargo test -p lightbox-preview --test blob_crash_loop --release --
+          kill9_during_blob_writes_leaves_zero_torn_visible_files
+          --exact --nocapture
+
+      - name: E03 T2 manifest crash loop (150 iterations, release)
+        env:
+          LIGHTBOX_T2_FAULT_ITERS: "150"
+        run: >
+          cargo test -p lightbox-preview --lib --release --
+          t2_crash_loop::kill9_during_t2_builds_leaves_every_present_tile_readable
+          --exact --nocapture
+
+      - name: E03 T0/T1/raw-cache write-path crash loop (300 iterations, release)
+        env:
+          LIGHTBOX_STORE_FAULT_ITERS: "300"
+        run: >
+          cargo test -p lightbox-preview --lib --release --
+          store_crash_loop::kill9_across_preview_and_rawcache_writes_leaves_the_store_verify_clean
+          --exact --nocapture
+
+      - name: E03 journaled-relocate crash loop (60 iterations, release)
+        env:
+          LIGHTBOX_RELOCATE_FAULT_ITERS: "60"
+        run: >
+          cargo test -p lightbox-preview --lib --release --
+          relocate_crash_loop::kill9_mid_relocate_then_reopen_resumes_and_completes_with_zero_lost_entries
           --exact --nocapture
 
   # E01 Phase 8 (T28): the perf scenario harness. Publishes a per-OS table
@@ -97,8 +150,11 @@ jobs:
 
       # E02 Phase H (H3): + the color/decode pipeline benches (resolve transform,
       # eval_cpu, display bake, probe, linearize) against the §7.5 budgets.
-      - name: Criterion micro-benches (catalog + E02 decode/color pipeline)
-        run: cargo bench -p lightbox-catalog -p lightbox-decode -p lightbox-color
+      # E03 Phase F (T23): + the §6 preview-pyramid/raw-cache budgets
+      # (best_available@100k, cold T0/T1, warm thumb, raw-cache get/put,
+      # eviction reclaim — `benches/preview_budgets.rs`).
+      - name: Criterion micro-benches (catalog + E02 decode/color + E03 preview pipeline)
+        run: cargo bench -p lightbox-catalog -p lightbox-decode -p lightbox-color -p lightbox-preview
 
       - name: Upload perf artifacts
         uses: actions/upload-artifact@v4

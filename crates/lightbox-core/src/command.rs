@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use lightbox_edit::{ParamSubset, PresetId};
-use lightbox_preview::{BuildPriority, Tier};
+use lightbox_preview::{BuildPriority, CacheLimits, PurgeScope, Tier, TierSet};
 use lightbox_types::{Flag, ImageId, ImportSessionId, SnapshotId};
 
 /// Correlates a submitted command with its outcome events. Allocated by
@@ -85,6 +85,37 @@ pub enum Command {
         /// Scheduling priority (spec §3.4: Visible > Neighbor > Bulk).
         priority: BuildPriority,
     },
+    /// E03 Phase F (T19, spec §5.6): removes preview rows + files for
+    /// `images` at `tiers`. T0 is asset-scope (spec §3.1) — discarding it
+    /// through one image discards the row shared by every virtual copy of
+    /// that asset (see [`lightbox_preview::PreviewService::discard`]'s doc
+    /// comment). No durable-txn ack; the effect is immediately visible
+    /// through `Query::PreviewState`/`CacheStats` (no dedicated event —
+    /// unlike `BuildPreviews`, discard is synchronous from the caller's
+    /// point of view since eviction is a local filesystem+catalog operation,
+    /// not a build).
+    DiscardPreviews {
+        /// Targets.
+        images: Vec<ImageId>,
+        /// Which tiers to discard.
+        tiers: TierSet,
+    },
+    /// E03 Phase F (T21, spec §5.6): updates both the preview-pyramid and
+    /// raw-cache byte caps at runtime.
+    SetCacheLimits(CacheLimits),
+    /// E03 Phase F (T21, spec §5.6): journaled relocation of the E03-owned
+    /// cache surfaces (see [`lightbox_preview::PreviewService::relocate`]'s
+    /// doc comment for exact scope) to `new_root`. Spawns as a
+    /// `Class::Background`-shaped job (mirrors `BackupNow`/
+    /// `ImportAddInPlace`) since a large store can take a while to copy;
+    /// completion arrives as `Event::CacheRelocated`/`Event::CommandFailed`.
+    RelocateCacheStore {
+        /// The new cache-store root.
+        new_root: PathBuf,
+    },
+    /// E03 Phase F (T21, spec §5.6): scoped purge of the preview and/or raw
+    /// caches. Completion arrives as `Event::CachePurged`.
+    PurgeCaches(PurgeScope),
 }
 
 /// E09 edit-state mutations (spec §3.4). Every variant is durable: it lands

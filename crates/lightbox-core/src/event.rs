@@ -14,7 +14,7 @@ use lightbox_catalog::BackupReport;
 use lightbox_edit::StepLabel;
 use lightbox_ingest::ImportReport;
 use lightbox_meta::xmp::sync::DivergenceStatus;
-use lightbox_preview::{PreviewDesc, PreviewError, Tier};
+use lightbox_preview::{CacheKind, PreviewDesc, PreviewError, PurgeReport, Tier};
 use lightbox_types::{AssetId, ImageId, ImportSessionId};
 
 use crate::command::CommandTicket;
@@ -164,5 +164,40 @@ pub enum Event {
         done: u64,
         /// Total builds in this run.
         total: u64,
+    },
+    /// E03 Phase F (T19, spec §5.2): a preview row (+ its file, if no other
+    /// row still referenced it) was reclaimed by cap-based eviction, the T2
+    /// retention sweep, or `DiscardPreviews`. Re-published from
+    /// [`lightbox_preview::PreviewEvent::Evicted`].
+    PreviewEvicted {
+        /// The image the reclaimed row belonged to.
+        image: ImageId,
+        /// Which pyramid tier.
+        tier: Tier,
+    },
+    /// E03 Phase F (T21, spec §5.2): a build (preview or raw-cache) hit disk
+    /// pressure. Re-published from
+    /// [`lightbox_preview::PreviewEvent::CachePressure`].
+    CachePressure {
+        /// Which cache.
+        kind: CacheKind,
+        /// Currently accounted bytes.
+        used_bytes: u64,
+        /// The configured cap.
+        cap_bytes: u64,
+    },
+    /// `Command::RelocateCacheStore` finished (spec §5.6, T21).
+    CacheRelocated {
+        /// The command's ticket.
+        ticket: CommandTicket,
+        /// The new cache-store root.
+        new_root: PathBuf,
+    },
+    /// `Command::PurgeCaches` finished (spec §5.6, T21).
+    CachePurged {
+        /// The command's ticket.
+        ticket: CommandTicket,
+        /// What was actually removed.
+        report: PurgeReport,
     },
 }

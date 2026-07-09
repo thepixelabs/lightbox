@@ -296,10 +296,22 @@ impl Session {
                     Event::PreviewFailed { image, tier, error }
                 }
                 PvEvent::BulkProgress { done, total } => Event::PreviewBulkProgress { done, total },
+                // E03 Phase F (T19/T21): eviction/retention/discard and
+                // ENOSPC pressure now have core meaning.
+                PvEvent::Evicted { image, tier } => Event::PreviewEvicted { image, tier },
+                PvEvent::CachePressure {
+                    kind,
+                    used_bytes,
+                    cap_bytes,
+                } => Event::CachePressure {
+                    kind,
+                    used_bytes,
+                    cap_bytes,
+                },
                 // `PreviewEvent` is `#[non_exhaustive]`; a future variant
-                // (Phase E/F: `Evicted`/`CachePressure`) gets a core
-                // translation when it gets core meaning, same convention as
-                // `ImportEvent`/`EngineEvent` elsewhere in this function.
+                // gets a core translation when it gets core meaning, same
+                // convention as `ImportEvent`/`EngineEvent` elsewhere in this
+                // function.
                 _ => return,
             };
             let _ = preview_bus.send(translated);
@@ -620,9 +632,123 @@ async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>
                 tier,
                 priority,
             } => dispatch_build_previews(&ctx, images, tier, priority),
+            // E03 Phase F (T19/T23): removes preview rows+files. No
+            // durable-txn ack (see the command's own doc comment) —
+            // `Event::PreviewEvicted` (already wired above) is the
+            // caller-visible signal.
+            Command::DiscardPreviews { images, tiers } => {
+                dispatch_discard_previews(&ctx, images, tiers).await;
+            }
+            // E03 Phase F (T21/T23): a cheap in-memory cap update (two mutex
+            // stores, no file IO) — no need for the blocking pool.
+            Command::SetCacheLimits(limits) => ctx.preview_service.set_limits(limits),
+            Command::RelocateCacheStore { new_root } => {
+                spawn_relocate_cache_store(&ctx, ticket, new_root);
+            }
+            Command::PurgeCaches(scope) => spawn_purge_caches(&ctx, ticket, scope),
         }
     }
     tracing::debug!(target: "lightbox_core", "command dispatcher stopped");
+}
+
+/// `Command::DiscardPreviews` (spec §5.6, T19/T23): unlinks preview files +
+/// deletes their catalog rows for `images` at `tiers`. Runs on the blocking
+/// pool (real file IO + a catalog write, same class of cost as
+/// `run_txn_command`'s work) and is **awaited** so dispatch stays in
+/// submission order; unlike `run_txn_command` it emits no ack event on
+/// success — `PreviewService::discard` cannot fail in a way this seam
+/// surfaces (it returns a report, not a `Result`: per-image/tier failures
+/// are absorbed and logged inside `evict::discard`, spec §3.2's "caches are
+/// disposable" posture), and `Event::PreviewEvicted` (already wired through
+/// `Session::open`'s event sink) is the caller-visible signal per row
+/// actually reclaimed.
+async fn dispatch_discard_previews(
+    ctx: &DispatchCtx,
+    images: Vec<lightbox_types::ImageId>,
+    tiers: lightbox_preview::TierSet,
+) {
+    if images.is_empty() {
+        return;
+    }
+    let service = ctx.preview_service.clone();
+    let _guard = ctx.in_flight.enter();
+    let _ = tokio::task::spawn_blocking(move || service.discard(images, tiers)).await;
+}
+
+/// `Command::RelocateCacheStore` (spec §5.6, T21/T23): a `Class::Background`
+/// job — mirrors `spawn_backup`/`spawn_import` (a large store can take a
+/// while to copy, so this must not stall the trivial-command queue).
+/// Completion arrives as `Event::CacheRelocated`/`Event::CommandFailed`. The
+/// progress sink is a no-op: this command surface has no dedicated
+/// progress event (spec §5.6 lists only the completion event); wiring one
+/// through is left to whichever phase's UI first needs a live progress bar
+/// for a relocation (E08, most likely).
+fn spawn_relocate_cache_store(ctx: &DispatchCtx, ticket: CommandTicket, new_root: PathBuf) {
+    let service = ctx.preview_service.clone();
+    let events = ctx.events.clone();
+    let guard = ctx.in_flight.enter();
+    let handle = ctx.jobs.spawn_blocking(
+        Class::Background,
+        "preview.relocate_cache_store",
+        ctx.session_cancel.child(),
+        move |_cancel| {
+            let _guard = guard;
+            let sink: lightbox_preview::ProgressSink = Arc::new(|_p| {});
+            match service.relocate(&new_root, sink) {
+                Ok(()) => {
+                    let _ = events.send(Event::CacheRelocated { ticket, new_root });
+                    Ok(())
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    let _ = events.send(Event::CommandFailed {
+                        ticket,
+                        error: msg.clone(),
+                    });
+                    Err(JobError::Failed(msg))
+                }
+            }
+        },
+    );
+    drop(handle); // detached; close() drains via the in-flight guard
+}
+
+/// `Command::PurgeCaches` (spec §5.6, T21/T23): a `Class::Background` job —
+/// `PurgeScope::All`/`RawCache` can mean clearing gigabytes of on-disk
+/// files, the same "don't stall the trivial-command queue" reasoning as
+/// `spawn_relocate_cache_store`. Completion arrives as
+/// `Event::CachePurged`/`Event::CommandFailed`.
+fn spawn_purge_caches(
+    ctx: &DispatchCtx,
+    ticket: CommandTicket,
+    scope: lightbox_preview::PurgeScope,
+) {
+    let service = ctx.preview_service.clone();
+    let events = ctx.events.clone();
+    let guard = ctx.in_flight.enter();
+    let handle = ctx.jobs.spawn_blocking(
+        Class::Background,
+        "preview.purge_caches",
+        ctx.session_cancel.child(),
+        move |_cancel| {
+            let _guard = guard;
+            match service.purge(scope) {
+                Ok(report) => {
+                    let _ = events.send(Event::CachePurged { ticket, report });
+                    Ok(())
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    let _ = events.send(Event::CommandFailed {
+                        ticket,
+                        error: msg.clone(),
+                    });
+                    Err(JobError::Failed(msg))
+                }
+            }
+        },
+    );
+    drop(handle); // detached; close() drains via the in-flight guard
 }
 
 /// `Command::BuildPreviews` (spec §5.6, T14/T16): a fast, non-blocking call

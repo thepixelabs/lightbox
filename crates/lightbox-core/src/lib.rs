@@ -66,8 +66,9 @@ pub use lightbox_meta::xmp::sync::DivergenceStatus;
 // way. `Tier`/`BuildPriority` are the vocabulary `Command::BuildPreviews`
 // itself is typed over.
 pub use lightbox_preview::{
-    BuildPriority, CacheStats, EnqueueError, PreviewDesc, PreviewError, PreviewRequest,
-    PreviewService, PurgeReport, QuickVerifyReport, Tier,
+    BuildPriority, CacheKind, CacheLimits, CacheStats, EnqueueError, PreviewDesc, PreviewError,
+    PreviewRequest, PreviewService, PurgeReport, PurgeScope, QuickVerifyReport, Tier, TierSet,
+    VerifyMode, VerifyReport,
 };
 
 // Reader DTOs (spec §3.8: "the reader types simply re-exported") and the

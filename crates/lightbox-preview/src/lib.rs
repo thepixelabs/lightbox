@@ -64,6 +64,15 @@ mod relocate;
 mod thumbs;
 // E03 Phase F (T21): verify_store(Quick|Full) + PurgeScope.
 mod verify;
+// E03 Phase F (T21/T23): real SIGKILL fault injection across T0/T1/raw-cache
+// writes, asserting the real `verify_store(Full)`/`RawCache::reconcile`
+// seams stay clean after every kill (same convention as `t2_crash_loop.rs`).
+#[cfg(test)]
+mod store_crash_loop;
+// E03 Phase F (T21/T23): real SIGKILL fault injection against journaled
+// relocation (`relocate`) — kill mid-copy, reopen/resume, zero lost entries.
+#[cfg(test)]
+mod relocate_crash_loop;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

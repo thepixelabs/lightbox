@@ -1,6 +1,6 @@
 # Lightbox — Session Handoff & Resume Guide
 
-_Last updated 2026-07-07. This document lets any fresh session (any model) resume the program without prior context. Read this first, then only what it points to._
+_Last updated 2026-07-09. This document lets any fresh session (any model) resume the program without prior context. Read this first, then only what it points to._
 
 ## 1. What this project is
 
@@ -8,7 +8,7 @@ _Last updated 2026-07-07. This document lets any fresh session (any model) resum
 
 **Stack (approved, do not re-litigate):** Rust workspace · egui/eframe shell sharing ONE wgpu device with the render engine (zero-copy) · wgpu compute node-graph DAG (vkdt pattern) · SQLite edit store (WAL, content-hash keyed) · out-of-process ONNX inference (`lightbox-inferd`) · ISO 16684 XMP Toolkit behind an own `crs:`/`lb:` mapping layer. License policy: MIT/BSD/Apache free; LGPL dynamic-link only; GPL never in-process; enforced by cargo-deny + REUSE in CI.
 
-## 2. Current state (2026-07-05)
+## 2. Current state (2026-07-09)
 
 | Artifact | State |
 |---|---|
@@ -18,9 +18,10 @@ _Last updated 2026-07-07. This document lets any fresh session (any model) resum
 | **v2.1 addendum** (AI Looks epic + complete-raw-surface contract) | ✅ **LANDED & CTO-approved** (2026-07-05). E17 in `01-architecture.md` + §2.4 raw-surface binding; `epics/E17-ai-looks.md` (28 tasks). Recorded in `02-approval.md` §7. **One follow-up gates E10/E11 planning** (not E02): extend §3.2 recipe schema to persist raw-only params — see `02-approval.md` §7 follow-up #1. |
 | **E01 Foundation** | ✅ **BUILT & independently verified** (~23k LOC, commits `4ff768f…57039a0`) |
 | **E02 Decode & color foundation** | ✅ **BUILT & independently verified** (2026-07-06, commits `a495224…35474a3`) — parallel-wave execution, all 5 gates green |
+| **E03 Preview pyramid & raw cache** | ✅ **BUILT** (2026-07-09) — Phases A–F (T01–T23) all landed & green. Tiered on-disk preview pyramid (T0 asset-scope verbatim embedded JPEG, T1 image-scope resize+recode, T2 tiled 1:1 loupe source), the raw decode cache (zstd container + LRU + ENOSPC handling), the hot thumbnail atlas (`thumbcache.sqlite`), eviction/retention (tier-ordered, refcount-before-unlink), journaled relocation, `verify_store(Quick\|Full)`/`PurgeScope`, and the full `lightbox-core` façade (`Command::{BuildPreviews,DiscardPreviews,SetCacheLimits,RelocateCacheStore,PurgeCaches}`, `Event::{PreviewReady,PreviewFailed,PreviewBulkProgress,PreviewEvicted,CachePressure,CacheRelocated,CachePurged}`). Hardening: real `SIGKILL` crash-loop suites for blob IO/T2 manifests/T0-T1-rawcache writes/journaled relocate (all green, PR-blocking-fast defaults + a `nightly.yml` full-strength leg), an extended `lightbox-catalog` fault-injection branch for `raw_cache_entry`, and `criterion` benches for every §6 budget (all passing with large margin — see `epics/E03-deviations.md` Phase F, entry F-5, for measured numbers). Crate README at `crates/lightbox-preview/README.md`. All exit-bar gates green. **Honestly deferred** (named, not faked — see `epics/E03-deviations.md` Phase F entries F-7/F-10): a dedicated `lbx-perf` M0-exit scenario (composed-budget arithmetic gives strong indirect confidence instead); Windows deferred-delete real-hardware verification; the `jxl` feature end-to-end (libjxl absent on every build machine touched so far, unchanged since Phase C). |
 | **E05 Render node-graph engine** | ✅ **BUILT & verified** (2026-07-07, commits `7f1f0b7…c49cb29`) — Phases A–F; all four §10.1 gates + CPU/GPU parity + per-PV immutability green on real Metal; app renders through `ng` engine (E01 seed retired from live path). Deferred (tracked, `E05-deviations.md`): Phase-C tiling not yet wired into live `Engine::submit` (GPU renders at native res), physical seed deletion, non-macOS GPU CI legs, reference-runner p95. Built under API instability — Wave-DF agents lost to connection errors; Phase D salvaged from a stranded worktree, Phase F rebuilt. |
 | E09 Edit state/history/presets/XMP | ✅ **BUILT** (2026-07-07) — A (recipe model), C (XMP/quick-xml), D (crs/lb mapping), E (presets), Phase B store layer (T5-DAOs, T6 `EditStore`, T7 `EditSession`, T9 history, T10 snapshots), and the T8/T11/T12 follow-up all done & green. **T8:** `EditHub` in `lightbox-core` (`crates/lightbox-core/src/edit_hub.rs`) — session registry, `Arc<Recipe>` working snapshots (practically lock-free reads via `RwLock<Arc<Recipe>>`, proven by a contention smoke test), `Session::edits()`, `Event::{EditWorkingChanged, EditCommitted, XmpDivergenceChanged}`, auto-commit on `EditHub::close`/`Session::close`. **T11:** `Command::Edit(EditCommand)` (24 variants) + dispatcher arm, additive `Queries` methods, `lightbox-cli` subcommands `edit set/get`, `history`, `step-to`, `undo`, `redo`, `clear-history`, `snapshot create/restore/list/delete/rename`, `preset create/list/apply/import/export/delete/rename`, `xmp write/read/status` (`crates/lightbox-cli/src/edit.rs`) — hand-tested end to end (import → edit set → history → step-to → snapshot create/restore → preset → xmp all exit 0; malformed `edit set` exits 2). **T12 (load-bearing):** the E01 kill-9 fault-injection harness extended with a real edit-commit loop (`crates/lightbox-catalog/tests/fault_injection.rs`) — genuine `SIGKILL`, 150 iterations run clean (0 corruptions, 0 lost committed edits, same-txn atomicity checked); `reopen_restores_recipe` (`crates/lightbox-core/tests/reopen_restores_recipe.rs`) proves the file-move and file-rename legs via `EditStore::image_for_content_hash` (E04's loader isn't built yet, so this drives the actual E09-owned content-hash restore mechanism directly rather than simulating a drag-and-drop — documented in the test), plus the working-set-replacement auto-commit leg. All five exit-bar gates green workspace-wide. Deviations (lock-free wording, `xmp_status` keyed by `ImageId` not `AssetId`, `sync::status` landing as `EditHub::compute_status`, `SyncSettings` job-spawn plus a sync fallback, the reopen test's E04 scope note) recorded in `epics/E09-deviations.md` §B-6. Not wired (named, out of scope): CLI surface for sync/paste/previous/reset (dispatcher supports them; no subcommand) and XMP auto-write scheduling (E06/E08). |
-| E03, E04, E06–E17 | 📋 Specced, not built (see §3) |
+| E04, E06–E17 (excl. E03/E09) | 📋 Specced, not built (see §3) |
 
 **E01 delivered:** 16-crate workspace; 3-OS CI + license gate (GPL-canary tested); crash-safe SQLite store (kill -9 fault-injection verified); jobs system; headless `lightbox-core` façade; decode probe (CR2/CR3/NEF/ARW/RAF/ORF/DNG, permissive in-crate walkers — rawler was dropped from probe for LGPL); embedded-preview pipeline; render Engine seed with one real GPU node + CIEDE2000 golden harness; virtualized grid + Engine-rendered loupe; CLI; perf harness; `cargo xtask exit-drill`. Deviations log: `epics/E01-deviations.md`. Handoff: `epics/E01-handoff.md`. Known pending: Win/Linux real-hardware exit-drill legs; shell-smoke CI legs are continue-on-error; `licensing.md` needs the egui-font/BSL scoped-exception entries documented.
 
@@ -32,7 +33,7 @@ Authoritative table lives in `01-architecture.md` §10. Summary — spec file pe
 |---|---|---|---|---|
 | E01 | Foundation (edit store, engine seed, shell skeleton) | M0 | **BUILT** | — |
 | E02 | Decode & color foundation | M1 | **BUILT** | E01 |
-| E03 | Preview pyramid & raw cache | M1 | spec ready (v1.x spec valid) | E01 |
+| E03 | Preview pyramid & raw cache | M1 | **BUILT** | E01 |
 | E04 | Working-set loader & drag-drop intake | M1 | **v2 spec** `E04-working-set-loader.md` | E01, E03 |
 | E05 | Render node-graph engine | M1 | **BUILT** | E01, E02 |
 | E06 | Jobs & background system | M1 | spec ready (mostly seeded in E01) | E01 |
@@ -50,7 +51,7 @@ Authoritative table lives in `01-architecture.md` §10. Summary — spec file pe
 
 **M1 exit criterion (next milestone):** a dropped raw file on screen with working WB/exposure/tone editing that auto-persists and survives kill -9.
 
-**Recommended execution order:** ~~E02~~ ✅ → ~~E05~~ ✅ → ~~E09~~ ✅ → **E04** (working-set loader — E09's `image_for_content_hash`/`EditStore::open_state`/`EditHub::open`/`close` seam is ready for it to consume) → **E08** (editor shell — first user-visible editing; consumes `Session::edits()`/`Command::Edit`/`Queries::{edit_history,snapshots,presets,xmp_status}` as built) → *M1 done* → E10 + E15 → E11 → E17 → E12 → E13 → E14 → E16.
+**Recommended execution order:** ~~E02~~ ✅ → ~~E03~~ ✅ → ~~E05~~ ✅ → ~~E09~~ ✅ → **E04** (working-set loader — E09's `image_for_content_hash`/`EditStore::open_state`/`EditHub::open`/`close` seam AND E03's `Session::preview_service()`/`Command::BuildPreviews`/bulk-build backpressure seam are both ready for it to consume) → **E08** (editor shell — first user-visible editing; consumes `Session::edits()`/`Command::Edit`/`Queries::{edit_history,snapshots,presets,xmp_status}` AND E03's `PreviewService`/`CacheStats`/grid-thumbnail seam as built) → *M1 done* → E10 + E15 → E11 → E17 → E12 → E13 → E14 → E16.
 
 ## 4. How to build & verify
 

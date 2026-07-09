@@ -2141,6 +2141,7 @@ version = "0.1.0"
 dependencies = [
  "bindgen",
  "ciborium",
+ "criterion",
  "fast_image_resize",
  "fastrand",
  "jpeg-encoder",

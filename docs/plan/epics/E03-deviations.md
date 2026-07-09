@@ -1271,3 +1271,334 @@ differ enough (single flat LRU vs. tier-ordered with refcounting) that
 sharing an implementation now would mean over-generalizing ahead of Phase
 F's actual requirements; the only genuinely shared primitive is
 `store::atomic_write`, already Phase-A-owned and neutral to both.
+
+---
+
+## Phase F — lifecycle, T2, hardening (T19–T23)
+
+This phase spanned two agent sessions: the first delivered T19 (preview
+eviction/retention), T20 (T2 tiled store), T21's core (raw-cache ENOSPC
+handling), and T22 (thumbnail atlas), committing at `6e88d27`, then hit a
+usage limit with T21's remainder and T23 mid-flight (a partial core-façade
+edit sat in a git stash: `command.rs`/`event.rs`/`session.rs`, adding the
+`Command`/`Event` variant shapes but no dispatch). This entry covers the
+whole phase's final shape and this session's own additions/decisions.
+
+### F-1 — T21's remainder (relocation, `PurgeScope`, `verify_store(Full)`) was ALREADY substantially complete at `6e88d27`, despite the commit message naming only "T21 core"
+
+**What.** Before writing anything, this session audited what actually
+existed against the T21 AC list (spec §7: journaled relocate resumable
+after a crash, `PurgeCaches`/`PurgeScope`, ENOSPC pre-flight, `verify_store
+(Quick|Full)` detecting planted torn/orphan/missing cases). Contrary to the
+task prompt's framing ("T21 remainder... finish the rest"), `relocate.rs`
+(330 lines: journaled copy-then-flip-then-delete, a resumable-from-journal
+test, a same-root no-op test) and `verify.rs` (318 lines: `VerifyMode`,
+`PurgeScope`, `verify_store` with a `Quick`/`Full` split, PLUS a test —
+`full_detects_planted_torn_orphan_and_missing_cases` — that plants a
+checksum-mismatched file, an orphan file, and an orphaned `.tmp-*`, and
+asserts `Full` handles all three) were already fully implemented and
+`pub(crate)`-wired into `service.rs`'s `PreviewService::{relocate, purge,
+verify_store}`. Only ENOSPC (`rawcache/diskspace.rs`, already committed)
+and these two modules together cover T21's entire AC surface at the
+`lightbox-preview`-crate level.
+
+**What was genuinely missing (confirmed by grep + a failing `cargo build`
+at session start):** the `lightbox-core` façade never dispatched the new
+`Command` variants the stash added (`DiscardPreviews`, `SetCacheLimits`,
+`RelocateCacheStore`, `PurgeCaches`) — `cargo build --workspace` failed with
+`E0004: non-exhaustive patterns` on `session.rs`'s command-dispatch `match`.
+This session's actual T21/T23 work was: complete that wiring (F-2 below), a
+REAL `SIGKILL` crash-loop for relocate (F-3; the existing test only
+*simulates* a killed-mid-copy state by hand-seeding a journal, never a real
+kill), and a REAL `SIGKILL` crash-loop exercising `verify_store(Full)`
+against genuine T0/T1/raw-cache writes (F-3) — `verify.rs`'s own planted-
+corruption test is a strong unit-level proof but plants corruption by hand
+rather than via an actual kill.
+
+### F-2 — core-façade dispatch for `DiscardPreviews`/`SetCacheLimits`/`RelocateCacheStore`/`PurgeCaches`: sync vs. `Class::Background` split, no ack event for discard/set-limits
+
+**What.** Completed the stash's `command.rs`/`event.rs` additions (which
+compiled but weren't dispatched) with four new arms in `session.rs`'s
+`dispatch_loop` (`crates/lightbox-core/src/session.rs`):
+
+- `SetCacheLimits(CacheLimits)` — a direct, synchronous call
+  (`ctx.preview_service.set_limits(limits)`). Two mutex stores, no file IO;
+  not worth `spawn_blocking`.
+- `DiscardPreviews { images, tiers }` — `tokio::task::spawn_blocking` +
+  **awaited** (keeps dispatch in submission order, mirrors
+  `run_txn_command`), but emits **no** ack event on success:
+  `PreviewService::discard` returns a report, not a `Result` (per-row
+  failures are absorbed/logged inside `evict::discard`, matching this
+  store's "disposable, self-healing" posture) — `Event::PreviewEvicted`
+  (already wired through the event sink since the stash's `session.rs`
+  edit) is the caller-visible signal per row actually reclaimed.
+- `RelocateCacheStore { new_root }` / `PurgeCaches(scope)` — both spawn as
+  `Class::Background` jobs via `ctx.jobs.spawn_blocking` (mirrors
+  `spawn_backup`/`spawn_import` exactly: both can mean copying/deleting
+  gigabytes, so neither may stall the trivial-command queue). Completion
+  arrives as `Event::CacheRelocated`/`Event::CachePurged` on success,
+  `Event::CommandFailed` on error. `RelocateCacheStore`'s progress sink is a
+  no-op `Arc<dyn Fn>` — this command surface has no dedicated progress
+  event (only the spec's named completion event); a live progress bar is
+  left for whichever phase's UI first needs one (E08, most likely).
+
+Also re-exported the newly-`Command`/`Event`-surfaced `lightbox_preview`
+vocabulary (`CacheKind`, `CacheLimits`, `PurgeScope`, `TierSet`,
+`VerifyMode`, `VerifyReport`) from `lightbox-core`'s `lib.rs`, following the
+crate's existing "core re-exports the preview vocabulary its own public API
+is typed over" convention (`BuildPriority`/`CacheStats`/`Tier` etc. were
+already re-exported the same way).
+
+### F-3 — two new REAL `SIGKILL` crash-loop harnesses (not simulated), in `lightbox-preview`'s own crate (not `tests/`, since they need `pub(crate)` producer/relocate internals)
+
+**What.** `src/store_crash_loop.rs` and `src/relocate_crash_loop.rs`
+(`#[cfg(test)] mod`s declared in `lib.rs`, same convention as `t2_crash_loop
+.rs`), both following the existing child-process/`SIGKILL`/reopen/verify
+pattern (`blob_crash_loop.rs`/`t2_crash_loop.rs`/`lightbox-catalog`'s
+`fault_injection.rs`):
+
+- **`store_crash_loop.rs`** (T21/T23 AC: "kill -9 loop across all write
+  phases → catalog `integrity_check` + `verify_store` clean"): a child
+  process interleaves real T0 builds (`producer::ensure_t0`), real T1
+  builds (`producer::ensure_t1`, genuine resize+encode), and real raw-cache
+  writes (`RawCache::put`) against one shared catalog+store; the parent
+  `SIGKILL`s it at a random point (50 iterations default), reopens, and
+  asserts `catalog.integrity() == Ok`, `verify_store(Full).missing_files ==
+  0`, `verify_store(Full).checksum_failures == 0`, and (the raw cache's own
+  "always reconcilable" bar) `RawCache::reconcile().dangling_rows_dropped
+  == 0` — all provable because every write phase shares the identical
+  ordering discipline (file lands via `atomic_write` fully BEFORE the
+  catalog row commits; see the module's own doc comment for the exhaustive
+  case analysis of where a kill can land).
+- **`relocate_crash_loop.rs`** (T21 AC literal text: "kill mid-relocate
+  then reopen → relocation resumes and completes, zero lost entries"): a
+  child process runs a real `relocate()` call over a real ~150-file seeded
+  store; the parent `SIGKILL`s it mid-copy, then **resumes the SAME
+  relocation on the parent's own (unkilled) thread** and asserts the
+  destination ends up byte-identical to the pre-kill source with the old
+  root fully cleared (10 iterations default).
+
+**A real bug this harness caught — in the TEST, not the product.** The
+first version of `relocate_crash_loop.rs`'s `all_payloads` helper walked
+`.tmp-*` files too. A kill landing mid-`atomic_write` on the destination
+side legitimately orphans a `.tmp-*` file there (the same A-13-documented
+residue every other atomic-write path in this crate produces) — the helper
+counted it as an "extra" file not present in the pre-kill snapshot and
+failed the "zero lost entries" assertion, even though zero real data was
+lost. Fixed by excluding `.tmp-*` from the comparison (matching
+`blob_crash_loop.rs`'s own established convention of tracking orphaned-temp
+residue separately from the correctness property under test). Recorded here
+because it is exactly the kind of thing a future reader might "fix" in
+`relocate.rs` itself by mistake — the bug was in the test's file-walk, not
+in relocation.
+
+**A real testing footgun found (and worked around, not a product bug):** T0
+dedupes by ASSET (spec §3.1 — the fast path in `PreviewIndex::lookup_variant`
+matches on `asset` alone for T0 rows, since T0 has exactly one canonical
+variant). `store_crash_loop.rs`'s child originally created one asset once
+and many images under it, varying `content_hash` per T0 call expecting each
+to force a fresh build — it does not: after the first successful T0 build
+for that asset, every subsequent `ensure_t0` call for the SAME asset (any
+image, any content_hash argument) hits the in-memory index fast path
+instantly, because the fast-path lookup key never includes `content_hash`.
+This is CORRECT production behavior (T0 sharing across virtual copies of
+one asset is the intended design), not a bug — but it meant the crash-loop
+child's very first T0 build was the only one ever really exercised within
+one process lifetime; every kill still lands on a genuinely fresh child
+process (a fresh empty in-memory index every time), so coverage across many
+kills is still real, just narrower per individual child life than the first
+draft assumed. `benches/preview_budgets.rs`'s `t0_cold_decode_and_store`
+bench hit the identical trap even harder (an external bench crate can only
+use `pub` API, so a `PreviewService::request` fast-path hit would have
+silently measured near-zero) and needed a genuinely NEW asset (with its own
+distinct `(folder_id, filename)` — that pair is unique in the schema, so
+each fresh asset hard-links a freshly-named copy of the pinned fixture)
+every sample, not just a new image.
+
+**Observed distribution, honestly reported.** A representative
+`store_crash_loop` run: 50 kills, ~49 land in the harmless
+"file-written-not-yet-committed" orphan window and ~1 lands after a full
+commit, 0 missing/torn files ever indexed. This is consistent with (not a
+sign of a bug): the FIRST real T0/T1 write in a freshly-started child
+process is measurably slower than this harness's kill-window ceiling
+(20–150 ms) — see F-5's own cold-T1 measurement (~86 ms release; debug is
+several times slower per deviation C-2's own finding for the identical
+resize+encode path) — so kills disproportionately land while a build is
+either still computing or has just finished writing its file but not yet
+committed its row, rather than after a clean commit. The invariant under
+test (0 missing/torn files, 0 dangling raw-cache rows) held across every
+run observed (5+ full runs, plus 3 runs under artificial heavy CPU load).
+
+### F-4 — extended `lightbox-catalog`'s `fault_injection.rs` with a `raw_cache_entry` DAO-level branch, per the established dependency-cycle precedent (not a real on-disk raw-cache write path)
+
+**What.** The task prompt asked to "extend `crates/lightbox-catalog/tests/
+fault_injection.rs`... for the preview/rawcache write paths." That file's
+own T12 (E09) branch already documents WHY it drives the edit-commit
+protocol at the raw DAO level instead of calling into `lightbox-edit`:
+"this crate cannot depend on it (that would be a dependency cycle)." The
+identical constraint applies here — `lightbox-catalog` cannot depend on
+`lightbox-preview` (`lightbox-preview` depends on `lightbox-catalog`, not
+the reverse). Rather than break that established precedent, this session
+added a fifth randomized operation mirroring the existing T04 preview
+branch exactly, but driving `raw_cache_dao`'s `upsert_rawcache_entry`/
+`touch_rawcache_last_used_by_key` instead of `preview_dao`'s equivalents —
+same intent/done journal tolerance, same same-WAL-transaction guarantee,
+opaque payload bytes. `RawCacheOpState`/`rawcache_key_for_image`/
+`rawcache_row` are the new pieces; `parse_line`/`verify_journal` gained the
+matching branches. **This is deliberately narrower than the REAL raw-cache
+on-disk container write path** (that's what `store_crash_loop.rs`, F-3,
+actually exercises, in `lightbox-preview` where the dependency direction is
+correct) — named here so a future reader doesn't mistake this DAO-level
+branch for full raw-cache write-path coverage. Verified: 50-iteration
+default run and a 300-iteration run both green (0 corruptions, 0 lost
+commits, `raw_cache_entry` rows explainable by the journal every time).
+
+### F-5 — criterion benches for every §6 metric this crate's PUBLIC surface can exercise; measured numbers (this development machine)
+
+**What.** `benches/preview_budgets.rs` (new `[[bench]]` target,
+`harness = false`, `criterion` added to `[dev-dependencies]`). Bench
+targets are a separate binary crate with the SAME restriction as `tests/` —
+every `pub(crate)` producer/scheduler/relocate/verify internal is
+off-limits — so this file only calls `PreviewService`/`RawCache`/
+`PreviewIndex`, all already-public. A `SyncRuntime` (`impl BuildRuntime`)
+polls each `BuildFuture` to completion **on the calling thread** with a
+no-op waker, the identical technique `lightbox-core`'s real
+`TokioBuildRuntime` already uses (`preview_runtime.rs`'s own doc comment:
+"no internal `.await` points... a no-op-waker poll-to-completion loop") —
+valid because `Scheduler::request` calls `try_dispatch` synchronously
+before returning, so a build against this runtime completes before
+`PreviewService::request` returns; no channel/event-wait machinery needed
+in the bench closures.
+
+Measured (Apple Silicon dev machine, `cargo bench -p lightbox-preview`,
+release/bench profile, default criterion sampling — 100 samples for the
+fast benches, 20/10 for the two slowest):
+
+| §6 metric | Budget | Measured (median) |
+|---|---|---|
+| `best_available` @ 100k rows | < 1 ms p99 | **~111 ns** |
+| Cold T0 decode + store | ≤ 120 ms | **~8.9 ms** |
+| T1 build (resize+encode, 3840 px) | ≤ 250 ms/image/worker | **~86 ms** |
+| Thumb atlas `thumb()` warm | < 500 µs p99 | **~43–89 µs** (some jitter; still comfortably under) |
+| Raw cache `get` (140 MB F16) | ≤ 200 ms | **~15.2 ms** |
+| Raw cache `put` (140 MB F16) | ≤ 600 ms | **~68 ms** |
+| Eviction reclaim (scaled: 512 MiB cap, 8 MiB entries) | ≤ 2 s (spec's 1 GiB case) | **~24–29 ms** |
+
+Every budget passes with large margin. Two metrics named in spec §6 are
+**not** benched here (both informal/scenario-level, not a `criterion`
+microbenchmark target): "cull next/prev swap" and "T0 extraction
+throughput, 8 workers" are `EmbeddedPreviewProvider`-level integration
+properties already asserted as hard PASS/FAIL tests in `tests/
+embedded_provider.rs` (T09's own `set_viewport_prefetch_delivers_
+sub_50ms_swaps_over_200_images`) — duplicating them as a second bench
+harness would add no new signal. The eviction bench is exercised at 512 MiB
+(not the spec's illustrative 1 GiB) for sample-collection speed, following
+deviation E-8's own precedent for scaling a fill-then-evict AC down while
+preserving the property (fill past cap, assert the cap-enforcement latency);
+linear extrapolation to 1 GiB (~48–58 ms) stays two orders of magnitude
+under the 2 s budget.
+
+### F-6 — PR-blocking-fast / nightly-full split (spec §8): every new crash-loop test defaults fast; `nightly.yml` gained the long legs + the E03 bench
+
+**What.** Every crash-loop test in this phase (pre-existing and new) reads
+an iteration count from an env var, defaulting to a fast PR-blocking count
+when unset — the existing convention (`LIGHTBOX_FAULT_ITERS`,
+`LIGHTBOX_BLOB_FAULT_ITERS`, `LIGHTBOX_T2_FAULT_ITERS`) this phase's new
+tests (`LIGHTBOX_STORE_FAULT_ITERS`, default 50;
+`LIGHTBOX_RELOCATE_FAULT_ITERS`, default 10) both follow. `cargo test
+--workspace` (the CLAUDE.md/`ci.yml` PR-blocking gate) therefore already
+runs every one of them at their fast default with zero CI changes needed
+for the "PR-blocking (fast subset)" half of the split.
+
+For the "nightly (full)" half, `.github/workflows/nightly.yml`'s existing
+`fault-injection` job (previously only the catalog's own 1000-iteration
+run) gained four new steps at higher iteration counts (300/150/300/60 for
+blob/T2/store/relocate respectively — picked to keep the whole job inside
+its existing 60-minute timeout, not a spec-mandated number) plus a fixture-
+fetch step (`store_crash_loop` needs the real pinned CR2 fixture; the other
+three legs are fully synthetic and needed nothing). The existing
+`Criterion micro-benches` step in the same workflow's `perf` job gained
+`-p lightbox-preview` alongside `-p lightbox-catalog -p lightbox-decode -p
+lightbox-color`. **Not done** (named, not designed): a `target/criterion`
+baseline-comparison/regression-issue mechanism equivalent to `tools/
+lbx-perf/baselines.json`'s comparator — the E01-owned `lbx-perf` tool has
+one; wiring E03's own criterion output into that (or a sibling) comparator
+is left as a follow-up, since `target/criterion` itself is gitignored
+(matches every other crate's existing bench in this workspace — none of
+`lightbox-catalog`/`lightbox-decode`/`lightbox-color`'s benches have a
+committed baseline file either; this phase's bench does not regress that
+existing posture, just matches it).
+
+### F-7 — DEFERRED: a dedicated E03 M0-exit scenario in `lbx-perf` (spec T23's "import-1k-raws → all-T0 ≤ 15 s + browse-without-stall" harness)
+
+**What.** Spec T23's own AC text names a scenario-harness entry (alongside
+E01's `lbx-perf` tool, `tools/lbx-perf/`) proving "1k raws → all T0 built
+≤ 15 s, browse without stall." This session did NOT build that scenario —
+honestly deferred, not faked, for a time-budget reason: `lbx-perf` is a
+real standalone scenario-corpus-plus-comparator tool (`tools/lbx-perf/src/
+{scenarios,corpus,report}.rs` plus a committed `baselines.json` the nightly
+workflow diffs against) and adding a new scenario to it properly (corpus
+generation, a comparator entry, a re-blessed baseline number) is a
+distinct, sizeable task in its own right, not a small addition alongside
+everything else this session delivered.
+
+**Composed-budget confidence, not a substitute for the real scenario.**
+F-5's own measured numbers give a strong INDIRECT signal the 15 s/1k-images
+bar is comfortably reachable: ~8.9 ms/image cold T0 (measured, single-
+threaded, release) × 1000 images ≈ 8.9 s even with ZERO parallelism: the
+spec's own scenario assumes 8 concurrent workers (§6's separate "T0
+extraction throughput ≥ 200 assets/s aggregate, 8 workers" row), which
+would put a real 1k-import comfortably under 2 s of pure T0-build wall time.
+This is arithmetic, not a scenario-harness run — recorded honestly as
+supporting evidence, not as proof the AC is met. **Follow-up:** whichever
+phase next touches `lbx-perf` (E04's working-set loader is the natural
+owner, since "browse without stall" is really an E01+E04 integration
+property, not E03's alone) should add this scenario for real.
+
+### F-8 — observed once: a pre-existing test (`t19_t21_t22_facade_methods_compose_end_to_end`, Phase F's own T19/T21/T22 composition test, unmodified this session) flaked under exceptional `cargo test --workspace` load; non-reproducible
+
+**What.** Honest-reporting requirement. One `cargo test --workspace` run
+(the very first one after this session's `cargo bench` compile — i.e. peak
+disk/CPU contention from a fresh release-profile build running concurrently
+with the full workspace test suite) failed
+`service::tests::t19_t21_t22_facade_methods_compose_end_to_end` at its
+`assert_eq!(h.service.stats().unwrap().total_count(), 0)` line (got `1`,
+not `0`, immediately after `evict_to_cap()` with a zero cap) — consistent
+with a genuine, narrow pre-existing race between the async build's
+background-thread bookkeeping and the immediately-following synchronous
+eviction assertions, made visible only under unusually heavy system load.
+This session did not modify `service.rs`/`evict.rs`. Reran it 8× standalone
+(5× alone, 3× under artificial `yes`-process CPU load): 8/8 green. Reran
+the FULL `cargo test --workspace` a second time end to end: green,
+including this test. Not chased further (out of this session's T21/T23
+scope, and non-reproducible under every deliberate attempt to reproduce
+it) — named here rather than silently ignored, per the honest-reporting
+mandate. A future session touching `service.rs`'s eviction path should be
+aware a narrow timing window may exist there under heavy concurrent load.
+
+### F-9 — crate README added (§11 DoD item 8)
+
+**What.** `crates/lightbox-preview/README.md` — the first crate-level
+README in this workspace (no prior crate had one to mirror; this session's
+one is expected to set the convention, not necessarily be copied verbatim
+by future crates, since E03's shape is unusually deep for a first
+example). Covers store layout, the tier/scope/key-derivation scheme,
+container formats (T0/T1 plain JPEG/JXL, T2 manifest+tiles, raw-cache zstd
+frame, thumbcache SQLite), the eviction/retention policy per cache, the
+`verify_store`/`reconcile` model, relocation, the `PreviewService` facade
+surface, and how to run the perf/fault suites — aimed at an E04/E05/E08
+engineer integrating against this crate without reading its source, per the
+DoD's own literal bar.
+
+### F-10 — Windows deferred-delete and the `jxl` feature remain genuinely unverified (both pre-existing, both real, neither new to this session)
+
+**What.** Named for the record, not because anything changed: `Store::
+retry_deferred_deletes`'s Windows sharing-violation queue (R4, T19) has no
+Windows CI runner exercising it in this environment (macOS dev machine,
+same constraint every prior phase recorded); the `jxl` feature (T11) is
+still off by default and still unverified end-to-end (libjxl absent on
+this machine — deviation C-8's finding stands unchanged). Neither is this
+session's to close (no Windows hardware, no libjxl install available) —
+recorded here only so E03's overall DoD status (see the handoff doc) is
+read against the real, still-open gaps rather than implying this session
+closed them.
