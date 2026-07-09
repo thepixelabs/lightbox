@@ -117,13 +117,18 @@ fn insert_assets_skips_duplicate_hashes_globally_and_within_batch() {
     assert_eq!(outcome.skipped_duplicates, 2);
     assert_eq!(catalog.reader().counts().unwrap().assets, 2);
 
-    // Same folder + filename with different content is a constraint error
-    // (UNIQUE(folder_id, filename)) — not silently skipped.
-    let err = catalog
+    // Same folder + filename with DIFFERENT content now inserts a distinct
+    // row: migration 0005 (E04 spec §5.1) intentionally drops the
+    // `UNIQUE(folder_id, filename)` guard — identity is `content_hash`, not
+    // the managed-tree path, and the open-in-place path's `folder_id` is
+    // NULL anyway (vacuous under UNIQUE's NULL-distinct semantics).
+    let outcome = catalog
         .writer()
         .with_txn(move |txn| txn.insert_assets(&[new_asset(folder, "a.jpg", 42)]))
-        .unwrap_err();
-    assert!(matches!(err, CatalogError::Constraint(_)), "{err:?}");
+        .unwrap();
+    assert_eq!(outcome.inserted.len(), 1);
+    assert_eq!(outcome.skipped_duplicates, 0);
+    assert_eq!(catalog.reader().counts().unwrap().assets, 3);
 }
 
 #[test]

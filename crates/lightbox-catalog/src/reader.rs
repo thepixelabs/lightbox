@@ -25,8 +25,12 @@ pub struct ImageDetail {
     pub id: ImageId,
     /// Its backing asset.
     pub asset: AssetId,
-    /// The asset's folder.
-    pub folder: FolderId,
+    /// The asset's folder. `None` for an open-in-place row (E04 spec §4.4:
+    /// `folder_id` is nullable as of migration `0005_open_in_place` — the
+    /// one frozen-DTO change E04 makes to this struct, per the E01
+    /// joint-review rule; grep-verified no consumer outside this crate reads
+    /// `.folder` as of E04).
+    pub folder: Option<FolderId>,
     /// Filename as on disk.
     pub filename: String,
     /// Probed format tag (`'CR3'`, …, `'UNSUPPORTED'`).
@@ -218,7 +222,7 @@ impl ReaderHandle {
             Ok(ImageDetail {
                 id: ImageId(r.get(0)?),
                 asset: AssetId(r.get(1)?),
-                folder: FolderId(r.get(2)?),
+                folder: r.get::<_, Option<i64>>(2)?.map(FolderId),
                 filename: r.get(3)?,
                 format: r.get(4)?,
                 camera_make: r.get(5)?,
@@ -267,17 +271,40 @@ impl ReaderHandle {
         Ok(out)
     }
 
-    /// Absolute path of an asset: `root.path ⊕ folder.rel_path ⊕ filename`
-    /// (spec §3.2).
+    /// Absolute path of an asset (E04 spec §4.4): prefers the `abs_path`
+    /// path-hint column (open-in-place rows, migration `0005`); falls back
+    /// to `root.path ⊕ folder.rel_path ⊕ filename` for legacy managed rows
+    /// with no hint (`LEFT JOIN`s so a NULL-`folder_id` row with an
+    /// `abs_path` still resolves without the join ever running). The E01
+    /// `AssetLocator`/preview/render paths pick this up with zero changes.
     pub fn asset_abs_path(&self, id: AssetId) -> Result<PathBuf> {
         let mut stmt = self.conn().prepare_cached(
-            "SELECT r.path, f.rel_path, a.filename FROM asset a \
-             JOIN folder f ON f.id = a.folder_id \
-             JOIN library_root r ON r.id = f.root_id WHERE a.id = ?1",
+            "SELECT a.abs_path, r.path, f.rel_path, a.filename FROM asset a \
+             LEFT JOIN folder f ON f.id = a.folder_id \
+             LEFT JOIN library_root r ON r.id = f.root_id WHERE a.id = ?1",
         )?;
-        let (root, rel, filename): (String, String, String) = stmt
-            .query_row(params![id.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        let (abs_path, root, rel, filename): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = stmt
+            .query_row(params![id.0], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
             .map_err(not_found_or("asset", id.0))?;
+        if let Some(abs) = abs_path {
+            return Ok(PathBuf::from(abs));
+        }
+        let (root, rel) = match (root, rel) {
+            (Some(root), Some(rel)) => (root, rel),
+            _ => {
+                return Err(CatalogError::Internal(format!(
+                    "asset {} has neither an abs_path hint nor a folder to compose a path from",
+                    id.0
+                )))
+            }
+        };
         let mut path = PathBuf::from(root);
         for seg in rel.split('/').filter(|s| !s.is_empty()) {
             path.push(seg);

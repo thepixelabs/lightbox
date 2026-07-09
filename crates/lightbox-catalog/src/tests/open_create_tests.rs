@@ -128,11 +128,13 @@ fn synthetic_0002_upgrade_writes_pre_upgrade_copy() {
             number: 1,
             name: "spine",
             sql: MIGRATIONS[0].sql,
+            rebuilds_tables: false,
         },
         Migration {
             number: 2,
             name: "synthetic-test-table",
             sql: "CREATE TABLE synthetic_two (id INTEGER PRIMARY KEY, note TEXT);",
+            rebuilds_tables: false,
         },
     ];
 

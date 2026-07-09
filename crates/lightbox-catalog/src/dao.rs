@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use lightbox_types::{AssetId, ContentHash, Flag, FolderId, ImageId, ImportSessionId, RootId};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::clock::now_rfc3339_utc;
 use crate::error::{CatalogError, Result};
@@ -67,6 +67,59 @@ pub struct RemovedCounts {
     pub assets: u64,
     /// `image` rows removed (via `ON DELETE CASCADE`).
     pub images: u64,
+}
+
+/// One opened-in-place file heading into [`CatalogTxn::ensure_open_asset`]
+/// (E04 spec §4.4). Mirrors [`NewAsset`] minus folder/import-session (the
+/// open path writes neither) plus the absolute-path hint.
+#[derive(Clone, Debug)]
+pub struct OpenedFile {
+    /// Canonical absolute path, UTF-8 (E04 spec §6.1: `std::fs::canonicalize`d
+    /// by the loader before this DAO ever sees it).
+    pub abs_path: String,
+    /// NFC-normalized filename.
+    pub filename: String,
+    /// xxh3-128 of the full file — identity (architecture §3.1.1).
+    pub content_hash: ContentHash,
+    /// `'CR3'`,…,`'JPEG'`,`'UNSUPPORTED'`.
+    pub format: String,
+    /// EXIF camera make, if probed.
+    pub camera_make: Option<String>,
+    /// EXIF camera model, if probed.
+    pub camera_model: Option<String>,
+    /// UTC-normalized capture time when the probe carried an offset;
+    /// verbatim otherwise (E04 spec §6.5 — closes the E01 Phase-5 deviation
+    /// "UTC-normalizing at the ingest seam is E04 cleanup").
+    pub capture_time: Option<String>,
+    /// Full-size pixel dimensions (0 if unknown).
+    pub width: u32,
+    /// Full-size pixel dimensions (0 if unknown).
+    pub height: u32,
+    /// EXIF orientation.
+    pub orientation: lightbox_types::Orientation,
+    /// File size in bytes.
+    pub bytes: u64,
+    /// File mtime, RFC3339 UTC, if available.
+    pub mtime_utc: Option<String>,
+    /// Probe/hash failure message; the asset is registered anyway, badged
+    /// (T18 convention) — `None` clears a stale `decode_error` on reopen.
+    pub decode_error: Option<String>,
+}
+
+/// What [`CatalogTxn::ensure_open_asset`] resolved (E04 spec §4.4).
+#[derive(Copy, Clone, Debug)]
+pub struct EnsureOutcome {
+    /// The (found-or-created) asset.
+    pub asset: AssetId,
+    /// The default (non-virtual) image row.
+    pub image: ImageId,
+    /// `false` = reopened an existing identity (content-hash hit).
+    pub created: bool,
+    /// The content-hash lookup hit at a path different from the row's prior
+    /// `abs_path` hint (a legacy managed row with no hint yet counts as a
+    /// change too — its hint is being set for the first time) → the hint was
+    /// refreshed.
+    pub relocated: bool,
 }
 
 impl CatalogTxn<'_> {
@@ -274,6 +327,135 @@ impl CatalogTxn<'_> {
             params![flag.to_db(), image.0],
         )?;
         expect_one(n, "image", image.0)
+    }
+
+    /// Content-hash-keyed upsert for the E04 open-in-place path (spec §3.1.1
+    /// / §4.4). Never touches `folder`/`library_root`/`import_session`.
+    ///
+    /// 1. `SELECT id, abs_path FROM asset WHERE content_hash = ?1 ORDER BY
+    ///    id LIMIT 1` — the single point where "opening a file" touches the
+    ///    edit store.
+    /// 2. **Hit** → refresh the path-hint columns (`abs_path`, `filename`,
+    ///    `mtime_utc`, `missing = 0`); when the incoming probe succeeded
+    ///    (`decode_error IS NULL`) also refresh the probe columns
+    ///    (format/camera/capture/dims/orientation) and clear a stale
+    ///    `decode_error` — a previously-corrupt file may have been fixed.
+    /// 3. **Miss** → `INSERT` the asset with `folder_id NULL`,
+    ///    `import_session_id NULL`, `abs_path` set.
+    /// 4. Clear stale claimants: `UPDATE asset SET abs_path = NULL WHERE
+    ///    abs_path = ?1 AND id != ?2` (the path now belongs to this
+    ///    content — spec §3.3 "same-path-new-content").
+    /// 5. Ensure the default image row (`is_virtual = 0`), creating it with
+    ///    `process_version = 1` if absent.
+    pub fn ensure_open_asset(&mut self, f: &OpenedFile) -> Result<EnsureOutcome> {
+        let hash: &[u8] = &f.content_hash.0;
+        let existing: Option<(i64, Option<String>)> = self
+            .txn
+            .query_row(
+                "SELECT id, abs_path FROM asset WHERE content_hash = ?1 ORDER BY id LIMIT 1",
+                params![hash],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+
+        let (asset, created, relocated) = match existing {
+            Some((id, prev_abs_path)) => {
+                let relocated = prev_abs_path.as_deref() != Some(f.abs_path.as_str());
+                self.txn.execute(
+                    "UPDATE asset SET abs_path = ?1, filename = ?2, mtime_utc = ?3, \
+                     missing = 0 WHERE id = ?4",
+                    params![f.abs_path, f.filename, f.mtime_utc, id],
+                )?;
+                if f.decode_error.is_none() {
+                    self.txn.execute(
+                        "UPDATE asset SET format = ?1, camera_make = ?2, camera_model = ?3, \
+                         capture_time = ?4, width = ?5, height = ?6, orientation = ?7, \
+                         decode_error = NULL WHERE id = ?8",
+                        params![
+                            f.format,
+                            f.camera_make,
+                            f.camera_model,
+                            f.capture_time,
+                            f.width,
+                            f.height,
+                            f.orientation.exif_value(),
+                            id,
+                        ],
+                    )?;
+                } else {
+                    self.txn.execute(
+                        "UPDATE asset SET decode_error = ?1 WHERE id = ?2",
+                        params![f.decode_error, id],
+                    )?;
+                }
+                (AssetId(id), false, relocated)
+            }
+            None => {
+                let added_at = now_rfc3339_utc();
+                let bytes = i64::try_from(f.bytes).map_err(|_| {
+                    CatalogError::InvalidArg(format!("file size {} overflows", f.bytes))
+                })?;
+                self.txn.execute(
+                    "INSERT INTO asset (folder_id, abs_path, filename, content_hash, format, \
+                     camera_make, camera_model, capture_time, width, height, orientation, \
+                     bytes, mtime_utc, decode_error, import_session_id, added_at) \
+                     VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, ?14)",
+                    params![
+                        f.abs_path,
+                        f.filename,
+                        hash,
+                        f.format,
+                        f.camera_make,
+                        f.camera_model,
+                        f.capture_time,
+                        f.width,
+                        f.height,
+                        f.orientation.exif_value(),
+                        bytes,
+                        f.mtime_utc,
+                        f.decode_error,
+                        added_at,
+                    ],
+                )?;
+                (AssetId(self.txn.last_insert_rowid()), true, false)
+            }
+        };
+
+        // Step 4: the path now belongs to THIS content; any other row still
+        // claiming it no longer resolves.
+        self.txn.execute(
+            "UPDATE asset SET abs_path = NULL WHERE abs_path = ?1 AND id != ?2",
+            params![f.abs_path, asset.0],
+        )?;
+
+        // Step 5: ensure the default (non-virtual) image row.
+        let image: Option<i64> = self
+            .txn
+            .query_row(
+                "SELECT id FROM image WHERE asset_id = ?1 AND is_virtual = 0 ORDER BY id LIMIT 1",
+                params![asset.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let image = match image {
+            Some(id) => ImageId(id),
+            None => {
+                let created_at = now_rfc3339_utc();
+                self.txn.execute(
+                    "INSERT INTO image (asset_id, is_virtual, flag, process_version, created_at) \
+                     VALUES (?1, 0, 0, 1, ?2)",
+                    params![asset.0, created_at],
+                )?;
+                ImageId(self.txn.last_insert_rowid())
+            }
+        };
+
+        Ok(EnsureOutcome {
+            asset,
+            image,
+            created,
+            relocated,
+        })
     }
 
     /// Records a decode/probe failure on the asset (spec §6 error taxonomy:

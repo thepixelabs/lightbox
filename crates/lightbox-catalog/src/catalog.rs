@@ -304,3 +304,19 @@ pub fn integrity_check_file(db_path: &Path) -> Result<Vec<String>> {
     let conn = Connection::open(db_path)?;
     integrity_findings(&conn).map_err(CatalogError::from)
 }
+
+/// `PRAGMA foreign_key_check` helper for tests and the fault harness (E04
+/// spec §5.2/§9.4, T2/T3 AC): independent re-check, from OUTSIDE the crate,
+/// of the `rebuilds_tables` migration procedure's own commit-time gate.
+/// Empty = clean.
+#[doc(hidden)]
+pub fn foreign_key_check_file(db_path: &Path) -> Result<Vec<String>> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}

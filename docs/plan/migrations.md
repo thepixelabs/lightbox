@@ -24,6 +24,7 @@ Rules (linted by `cargo xtask lint-migrations`, a CI gate):
 | 0002   | E02  | e02_color       | shipped (E02 Phase H, H1) |
 | 0003   | E09  | edit_state      | shipped (E09 Phase B, T5) |
 | 0004   | E03  | preview_pyramid | shipped (E03 Phase A, T03) |
+| 0005   | E04  | open_in_place   | shipped (E04 Phase A, T3) |
 
 Expected future reservations (from the architecture §3.1 entity map — the
 owning epics reserve the actual numbers when their specs land):

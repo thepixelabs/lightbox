@@ -231,8 +231,14 @@ fn source_kind_matches_probed_format() {
             }
         }
     }
-    assert!(raw_seen >= 7, "expected at least the pinned raw mounts, got {raw_seen}");
-    assert!(rendered_seen >= 2, "expected at least the JPEG+TIFF/PNG fixtures");
+    assert!(
+        raw_seen >= 7,
+        "expected at least the pinned raw mounts, got {raw_seen}"
+    );
+    assert!(
+        rendered_seen >= 2,
+        "expected at least the JPEG+TIFF/PNG fixtures"
+    );
 }
 
 /// T19 AC: metadata-only — a 45 MB raw probes in < 20 ms on a dev laptop.

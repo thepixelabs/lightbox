@@ -59,9 +59,9 @@ mod writer;
 
 pub use backup::{BackupOpts, BackupReport};
 #[doc(hidden)]
-pub use catalog::integrity_check_file;
+pub use catalog::{foreign_key_check_file, integrity_check_file};
 pub use catalog::{Catalog, IntegrityStatus};
-pub use dao::{InsertOutcome, NewAsset, RemovedCounts};
+pub use dao::{EnsureOutcome, InsertOutcome, NewAsset, OpenedFile, RemovedCounts};
 pub use edit_state::{
     EditBadge, EditStateRow, HistoryReplayRange, HistoryStepRow, SnapshotRow, XmpSyncRow,
 };

@@ -416,8 +416,14 @@ mod tests {
     /// `SourceKind` (or `None` for `Unsupported`).
     #[test]
     fn source_kind_mapping() {
-        assert_eq!(ProbedFormat::Raw("CR3").source_kind(), Some(SourceKind::Raw));
-        assert_eq!(ProbedFormat::Raw("NEF").source_kind(), Some(SourceKind::Raw));
+        assert_eq!(
+            ProbedFormat::Raw("CR3").source_kind(),
+            Some(SourceKind::Raw)
+        );
+        assert_eq!(
+            ProbedFormat::Raw("NEF").source_kind(),
+            Some(SourceKind::Raw)
+        );
         assert_eq!(ProbedFormat::Jpeg.source_kind(), Some(SourceKind::Rendered));
         assert_eq!(ProbedFormat::Tiff.source_kind(), Some(SourceKind::Rendered));
         assert_eq!(ProbedFormat::Png.source_kind(), Some(SourceKind::Rendered));
