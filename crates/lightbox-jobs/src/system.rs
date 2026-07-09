@@ -32,8 +32,12 @@ use crate::cancel::CancelToken;
 /// §5.3 job classes (spec §3.3, frozen surface for E06).
 ///
 /// M0 semantics: separate semaphore budgets per class — Interactive never
-/// queues behind Background. Preemption/pause is E06.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+/// queues behind Background. E06 (spec §4.1) reuses this exact enum as the
+/// scheduler's class vocabulary and adds the `Ord` derives its priority
+/// lanes need: **smaller sorts first — `Interactive < Foreground <
+/// Background` — i.e. `Ord`-ascending is precedence-descending** (the E06
+/// spec's own declaration order; document-matched, do not reorder).
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Class {
     /// Blocks what the user is looking at *right now* (loupe render source,
     /// visible thumbnail). Generous budget; jobs must be short.
@@ -45,9 +49,11 @@ pub enum Class {
 }
 
 impl Class {
-    const ALL: [Class; 3] = [Class::Interactive, Class::Foreground, Class::Background];
+    /// All classes, lane order (E06 `sched` iterates this too).
+    pub(crate) const ALL: [Class; 3] =
+        [Class::Interactive, Class::Foreground, Class::Background];
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Class::Interactive => 0,
             Class::Foreground => 1,
@@ -88,7 +94,14 @@ impl Default for JobConfig {
 
 /// Why a job did not produce its value. `Cancelled` is a **normal outcome**
 /// (spec §3.3), not an incident.
-#[derive(Debug, thiserror::Error)]
+///
+/// E06 (spec §4.3) reuses this as the scheduler's error vocabulary too —
+/// `Clone` was added so keyed-dedupe handles ([`crate::Scheduler::
+/// spawn_keyed`]) can all observe one failure. The E06 spec sketches
+/// `Failed(#[from] anyhow::Error)`; this crate keeps the E01 workspace
+/// convention instead (thiserror in libraries, stringify domain errors at
+/// the seam — see `E06-deviations.md`).
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum JobError {
     /// The job's [`CancelToken`] was cancelled (before or during the run).
@@ -400,7 +413,7 @@ fn flatten_join<T>(
     }
 }
 
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = panic.downcast_ref::<&str>() {
         (*s).to_owned()
     } else if let Some(s) = panic.downcast_ref::<String>() {

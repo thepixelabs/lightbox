@@ -138,7 +138,12 @@ bindgen = "0.72"
 # are PNGs; `png` is the image-rs codec (MIT/Apache-2.0).
 png = "0.18"
 # CPU node evaluation (spec §3.4/§5 T24 names rayon for the CPU path).
+# E06 additionally uses it for the fg-cpu/bg-cpu job pools (spec §4.4).
 rayon = "1"
+# E06 jobs (spec §3 dependency policy): lock-free ActivitySnapshot publication
+# (`ArcSwap` — the shell's per-frame poll is one atomic pointer load, §4.5)
+# and live-reappliable JobsConfig. MIT/Apache-2.0.
+arc-swap = "1"
 # E05 render node-graph engine (spec §2 module map + §3 interfaces). All
 # MIT/Apache/CC0/Zlib — cargo-deny surface-1 clean; no native/FFI, so surfaces
 # 2–3 are untouched by E05.
