@@ -1,19 +1,25 @@
 // SPDX-FileCopyrightText: 2026 Lightbox contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! E03 Phase D (T14) headless driver: `preview build/stat/verify/purge` over
-//! the `Command::BuildPreviews`/`Queries::cache_stats`/`PreviewService`
-//! seam — the exact scenario the T14 acceptance criterion names ("import
-//! fixture → `preview build --tier 1` → `Ready` events → `stat` reports
-//! rows/bytes matching disk"), run headlessly with zero shell dependency
-//! (mirrors `edit.rs`'s existing pattern for E09's CLI surface).
+//! E03 Phase D (T14) + Phase F (T21/T23) headless driver: `preview
+//! build/stat/verify/purge/relocate` over the `Command::BuildPreviews`/
+//! `Queries::cache_stats`/`PreviewService` seam — the exact scenario the
+//! T14 acceptance criterion names ("import fixture → `preview build --tier
+//! 1` → `Ready` events → `stat` reports rows/bytes matching disk"), run
+//! headlessly with zero shell dependency (mirrors `edit.rs`'s existing
+//! pattern for E09's CLI surface). `verify --full`/`purge --scope`/
+//! `relocate` close the §11 DoD's "operability" bar for T21's fuller
+//! `verify_store(Full)`/`PurgeScope`/journaled-relocate surface — Phase D's
+//! `verify_quick`/`purge_all` (the narrower, pre-Phase-F primitives, D-8)
+//! stay the default for backward compatibility with every existing script.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use lightbox_core::{
-    BuildPriority, CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, ImageQuery, Session,
-    SortOrder, Tier,
+    BuildPriority, CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, ImageQuery,
+    ProgressSink, PurgeScope, Session, SortOrder, Tier, VerifyMode,
 };
 use lightbox_types::ImageId;
 
@@ -59,7 +65,8 @@ pub(crate) fn cmd_preview(args: &[String]) -> anyhow::Result<u8> {
         Some("stat") => cmd_preview_stat(&args[1..]),
         Some("verify") => cmd_preview_verify(&args[1..]),
         Some("purge") => cmd_preview_purge(&args[1..]),
-        _ => bad_subcommand("preview", "build|stat|verify|purge"),
+        Some("relocate") => cmd_preview_relocate(&args[1..]),
+        _ => bad_subcommand("preview", "build|stat|verify|purge|relocate"),
     }
 }
 
@@ -203,21 +210,55 @@ fn cmd_preview_stat(args: &[String]) -> anyhow::Result<u8> {
     })
 }
 
-/// `preview verify --catalog <dir> [--json]` — missing-file detection only
-/// (spec's fuller `verify_store(Quick|Full)` — manifest cross-checks,
-/// checksums, orphan detection, auto re-enqueue — is Phase F's T21; see
-/// `lightbox_preview::service`'s module doc comment). Exit 0 when every
-/// indexed row's file is present on disk, exit 1 (not the corrupt/refused
-/// exit 3 — the preview store is disposable by contract, spec §3.2) when
-/// any are missing.
+/// `preview verify --catalog <dir> [--full] [--json]` — default (no
+/// `--full`) is missing-file detection only (Phase D's `verify_quick`).
+/// `--full` runs Phase F's `verify_store(VerifyMode::Full)` (T21): the same
+/// missing-file check PLUS a checksum spot-check on T0/T1 rows (drops
+/// torn files), an orphan sweep, and an orphaned-`.tmp-*` sweep — see
+/// `lightbox_preview::verify`'s module doc comment. Exit 0 when the store is
+/// clean, exit 1 (not the corrupt/refused exit 3 — the preview store is
+/// disposable by contract, spec §3.2) when `--full` found/fixed anything or
+/// the default mode found a missing file.
 fn cmd_preview_verify(args: &[String]) -> anyhow::Result<u8> {
     with_usage(|| {
         let mut flags = Flags::new(args);
         let catalog = required_catalog(&mut flags)?;
+        let full = flags.take_switch("--full");
         let json = flags.take_switch("--json");
         flags.finish()?;
 
         let (_core, session) = open_session(&catalog)?;
+        if full {
+            let report = session.preview_service().verify_store(VerifyMode::Full);
+            let dirty = report.missing_files > 0
+                || report.checksum_failures > 0
+                || report.orphans_removed > 0
+                || report.orphan_temp_files_removed > 0;
+            if json {
+                println!(
+                    "{{\"rows_checked\":{},\"missing_files\":{},\"checksum_failures\":{},\
+                     \"orphans_removed\":{},\"orphan_temp_files_removed\":{}}}",
+                    report.rows_checked,
+                    report.missing_files,
+                    report.checksum_failures,
+                    report.orphans_removed,
+                    report.orphan_temp_files_removed
+                );
+            } else {
+                println!(
+                    "checked {} row(s); {} missing, {} torn (checksum), \
+                     {} orphan(s) swept, {} orphaned temp file(s) swept",
+                    report.rows_checked,
+                    report.missing_files,
+                    report.checksum_failures,
+                    report.orphans_removed,
+                    report.orphan_temp_files_removed
+                );
+            }
+            close_quiet(session)?;
+            return Ok(if dirty { 1 } else { 0 });
+        }
+
         let report = session.preview_service().verify_quick()?;
         let missing = report.missing_files.len();
         if json {
@@ -239,15 +280,22 @@ fn cmd_preview_verify(args: &[String]) -> anyhow::Result<u8> {
     })
 }
 
-/// `preview purge --catalog <dir> --yes` — see
-/// [`lightbox_core::PreviewService::purge_all`]'s doc comment: wipes every
-/// preview row + file, a blunt whole-store reset (not Phase F's cap-based,
-/// refcounted `PurgeScope`). `--yes` is required (destructive, no default).
+/// `preview purge --catalog <dir> --yes [--scope previews|rawcache|all]` —
+/// default scope (`previews`, unspecified `--scope`) matches the pre-Phase-F
+/// behavior exactly (`PreviewService::purge_all`, D-8) for backward
+/// compatibility with any existing script; `--scope rawcache`/`--scope all`
+/// reach Phase F's fuller `PurgeService::purge(PurgeScope)` (T21). `--yes`
+/// is required (destructive, no default).
 fn cmd_preview_purge(args: &[String]) -> anyhow::Result<u8> {
     with_usage(|| {
         let mut flags = Flags::new(args);
         let catalog = required_catalog(&mut flags)?;
         let confirmed = flags.take_switch("--yes");
+        let scope = flags
+            .take_value("--scope")?
+            .map(|v| parse_purge_scope(&v))
+            .transpose()?
+            .unwrap_or(PurgeScope::Previews);
         flags.finish()?;
         if !confirmed {
             return Err(UsageError(
@@ -257,8 +305,61 @@ fn cmd_preview_purge(args: &[String]) -> anyhow::Result<u8> {
         }
 
         let (_core, session) = open_session(&catalog)?;
-        let report = session.preview_service().purge_all()?;
-        println!("purged {} preview row(s)", report.rows_deleted);
+        let report = session.preview_service().purge(scope)?;
+        println!(
+            "purged {} preview row(s), {} raw-cache row(s)",
+            report.rows_deleted, report.rawcache_rows_deleted
+        );
+        close_quiet(session)?;
+        Ok(0)
+    })
+}
+
+fn parse_purge_scope(s: &str) -> Result<PurgeScope, UsageError> {
+    match s {
+        "previews" => Ok(PurgeScope::Previews),
+        "rawcache" => Ok(PurgeScope::RawCache),
+        "all" => Ok(PurgeScope::All),
+        other => Err(UsageError(format!(
+            "--scope expects previews, rawcache, or all, got {other:?}"
+        ))),
+    }
+}
+
+/// `preview relocate --catalog <dir> --new-root <path>` — journaled
+/// relocation of the E03-owned cache surfaces (spec §5.2/§3.2, T21; see
+/// `lightbox_preview::relocate`'s module doc comment for exact scope and the
+/// resumability contract). Synchronous here (a CLI invocation has nothing
+/// better to do while it waits) — `lightbox-core`'s `Command::
+/// RelocateCacheStore` is the async, event-driven equivalent for the shell.
+/// Prints progress as it copies; **does not** reopen the session against
+/// the new root afterward (the caller does that on the next invocation —
+/// same posture as `PreviewService::relocate`'s own doc comment).
+fn cmd_preview_relocate(args: &[String]) -> anyhow::Result<u8> {
+    with_usage(|| {
+        let mut flags = Flags::new(args);
+        let catalog = required_catalog(&mut flags)?;
+        let new_root = flags
+            .take_value("--new-root")?
+            .map(PathBuf::from)
+            .ok_or_else(|| UsageError("preview relocate requires --new-root <path>".to_owned()))?;
+        flags.finish()?;
+
+        let (_core, session) = open_session(&catalog)?;
+        // `ProgressSink` is `Arc<dyn Fn(..) + Send + Sync>` (not `FnMut`) —
+        // a `Mutex` gives the throttling state interior mutability.
+        let last_print = std::sync::Mutex::new(Instant::now() - Duration::from_secs(1));
+        let progress: ProgressSink = std::sync::Arc::new(move |p| {
+            let mut last = last_print
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.elapsed() >= Duration::from_millis(250) {
+                eprintln!("relocating {}/{} files", p.done_files, p.total_files);
+                *last = Instant::now();
+            }
+        });
+        session.preview_service().relocate(&new_root, progress)?;
+        println!("relocated cache store to {}", new_root.display());
         close_quiet(session)?;
         Ok(0)
     })

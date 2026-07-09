@@ -1555,26 +1555,53 @@ phase next touches `lbx-perf` (E04's working-set loader is the natural
 owner, since "browse without stall" is really an E01+E04 integration
 property, not E03's alone) should add this scenario for real.
 
-### F-8 — observed once: a pre-existing test (`t19_t21_t22_facade_methods_compose_end_to_end`, Phase F's own T19/T21/T22 composition test, unmodified this session) flaked under exceptional `cargo test --workspace` load; non-reproducible
+### F-8 — real bug found (and fixed): `evict_to_cap` abandoned an entire tier on a single transient catalog-write failure, silently leaving over-cap rows behind under heavy load
 
-**What.** Honest-reporting requirement. One `cargo test --workspace` run
-(the very first one after this session's `cargo bench` compile — i.e. peak
-disk/CPU contention from a fresh release-profile build running concurrently
-with the full workspace test suite) failed
-`service::tests::t19_t21_t22_facade_methods_compose_end_to_end` at its
+**What.** Honest-reporting requirement, upgraded from an initial "observed,
+not chased further" note once this session ran the full `cargo test
+--workspace` suite a third and fourth time: `service::tests::
+t19_t21_t22_facade_methods_compose_end_to_end` (a pre-existing T19/T21/T22
+composition test, unmodified this session) failed its
 `assert_eq!(h.service.stats().unwrap().total_count(), 0)` line (got `1`,
-not `0`, immediately after `evict_to_cap()` with a zero cap) — consistent
-with a genuine, narrow pre-existing race between the async build's
-background-thread bookkeeping and the immediately-following synchronous
-eviction assertions, made visible only under unusually heavy system load.
-This session did not modify `service.rs`/`evict.rs`. Reran it 8× standalone
-(5× alone, 3× under artificial `yes`-process CPU load): 8/8 green. Reran
-the FULL `cargo test --workspace` a second time end to end: green,
-including this test. Not chased further (out of this session's T21/T23
-scope, and non-reproducible under every deliberate attempt to reproduce
-it) — named here rather than silently ignored, per the honest-reporting
-mandate. A future session touching `service.rs`'s eviction path should be
-aware a narrow timing window may exist there under heavy concurrent load.
+not `0`, immediately after `evict_to_cap()` with a zero cap) on **2 of the
+first 3** full-workspace runs — frequent enough under heavy load (this
+session's own new subprocess-spawning crash-loop tests, F-3, materially
+raise system contention during `cargo test --workspace`) that "narrow
+pre-existing race, not reproducible" was too optimistic a first read; it
+warranted finding the actual mechanism rather than only naming the symptom.
+
+**Root cause.** `evict::evict_to_cap` (T19, `evict.rs`) drained each tier
+in a `loop { .. match delete_row(..) { Ok(r) => merge, Err(_) => break } }`
+— a SINGLE `delete_row` failure (the catalog-write half of it: `catalog.
+writer().with_txn(|txn| txn.delete_preview(id))`) `break`s out of the
+**entire tier's loop**, silently abandoning every remaining over-cap row at
+that tier for the rest of the call, with no error surfaced anywhere the
+caller could see. Under heavy concurrent process/disk load (dozens of this
+session's own crash-loop child processes contending for CPU/disk at the
+exact moment this test's background `ThreadRuntime` build thread and its
+own writer transaction run), a single-row catalog write can plausibly hit a
+transient failure (a busy-timeout-class error) — and this code path had no
+tolerance for that at all.
+
+**Resolution.** Mirrors an ALREADY-ESTABLISHED precedent in this exact
+crate: `RawCache::evict_to_cap` (T18, deviation E-5) bounds an analogous
+"give up on a single failure" risk with a `MAX_CONSECUTIVE_RACES` retry
+counter rather than aborting outright. `evict::evict_to_cap` now retries
+the SAME tier up to `MAX_CONSECUTIVE_FAILURES = 8` times on a `delete_row`
+error before moving on to the next tier (resetting the counter on every
+success) — converging past a transient failure without spinning forever on
+a genuinely stuck row, the identical tradeoff E-5 already made and
+justified for the raw cache's own eviction loop.
+
+**Verified.** Before the fix: 2 failures in 3 full-`cargo test --workspace`
+runs. After the fix: 4 consecutive full-`cargo test --workspace` runs
+green (including one deliberately run under artificial heavy CPU load —
+four concurrent `yes` processes). `cargo test -p lightbox-preview --lib`
+alone: 108/108 green, unaffected by the retry-bound change (no existing
+test's behavior depends on a single-attempt failure path). This was
+pre-existing T19 code this session did not otherwise touch — recorded as a
+Phase-F hardening fix (T23's own charter: "fault-injection... hardening"),
+not a new task.
 
 ### F-9 — crate README added (§11 DoD item 8)
 

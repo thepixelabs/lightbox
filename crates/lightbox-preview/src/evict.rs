@@ -126,6 +126,20 @@ fn delete_row(
 /// referenced/live skip never wedges the whole pass) before moving to the
 /// next — T2 is emptied first (it is both the largest and the least
 /// "foundational" tier), T0 last (spec: "the culling floor").
+///
+/// **Bounded retry on a transient catalog-write failure** (E03 Phase F
+/// tail, T23 hardening — mirrors `RawCache::evict_to_cap`'s own documented
+/// `MAX_CONSECUTIVE_RACES` convention, E-5): a single `delete_row` failure
+/// (e.g. a busy-timeout under heavy concurrent writer/disk load) used to
+/// `break` out of the ENTIRE tier immediately, silently leaving every
+/// remaining over-cap row at that tier un-evicted for the rest of this
+/// call. Observed in practice: `service::tests::
+/// t19_t21_t22_facade_methods_compose_end_to_end` (a `cap_bytes = 0`
+/// assertion expecting `stats().total_count() == 0`) flaked under a heavily
+/// loaded `cargo test --workspace` run with exactly one row surviving.
+/// Retrying the SAME tier up to `MAX_CONSECUTIVE_FAILURES` times before
+/// giving up converges past a transient failure without spinning forever
+/// on a genuinely stuck row.
 pub(crate) fn evict_to_cap(
     store: &Store,
     catalog: &Catalog,
@@ -133,8 +147,10 @@ pub(crate) fn evict_to_cap(
     cap_bytes: u64,
     events: &EventSink,
 ) -> PreviewEvictReport {
+    const MAX_CONSECUTIVE_FAILURES: u32 = 8;
     let mut report = PreviewEvictReport::default();
     for tier in [Tier::T2, Tier::T1, Tier::T0] {
+        let mut consecutive_failures = 0u32;
         loop {
             if total_bytes(catalog) <= cap_bytes {
                 return report;
@@ -149,8 +165,18 @@ pub(crate) fn evict_to_cap(
                 break; // nothing left at this tier; advance to the next
             };
             match delete_row(store, catalog, index, events, &row) {
-                Ok(r) => report.merge(r),
-                Err(_) => break, // a catalog write failure: stop this tier, try the next
+                Ok(r) => {
+                    report.merge(r);
+                    consecutive_failures = 0;
+                }
+                Err(_) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        break; // give up on this tier; try the next
+                    }
+                    // Transient (e.g. a busy-timeout) — retry the SAME
+                    // candidate query rather than abandoning the tier.
+                }
             }
         }
     }

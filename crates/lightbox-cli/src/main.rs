@@ -110,10 +110,11 @@ USAGE:
   lightbox-cli xmp status --catalog <dir> --image <id> [--json]
 
   E03 preview pyramid (headless):
-  lightbox-cli preview build  --catalog <dir> --tier <0|1|2> [--image <id> ...] [--priority visible|neighbor|bulk]
-  lightbox-cli preview stat   --catalog <dir> [--json]
-  lightbox-cli preview verify --catalog <dir> [--json]
-  lightbox-cli preview purge  --catalog <dir> --yes
+  lightbox-cli preview build    --catalog <dir> --tier <0|1|2> [--image <id> ...] [--priority visible|neighbor|bulk]
+  lightbox-cli preview stat     --catalog <dir> [--json]
+  lightbox-cli preview verify   --catalog <dir> [--full] [--json]
+  lightbox-cli preview purge    --catalog <dir> --yes [--scope previews|rawcache|all]
+  lightbox-cli preview relocate --catalog <dir> --new-root <path>
 
 EXIT CODES:
   0 success | 1 failure | 2 usage error | 3 catalog corrupt/refused
