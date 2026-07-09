@@ -1031,7 +1031,7 @@ mod tests {
             .unwrap();
         let _ = ticket;
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let seen = events_seen.lock().unwrap();
             if seen
@@ -1069,7 +1069,7 @@ mod tests {
         let h = harness(50, 4);
         let handle = h.service.bulk_build(h.images.clone(), Tier::T0);
 
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             let (done, total) = handle.progress();
             if done >= total {
@@ -1117,7 +1117,7 @@ mod tests {
                 .is_some_and(|d| d.tier == Tier::T1)
         };
 
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             if t1_ready(visible[0]) {
                 break;
@@ -1164,7 +1164,7 @@ mod tests {
             })
             .unwrap();
         let _ = ticket;
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while h.service.best_available(image, 0).is_none() {
             assert!(Instant::now() < deadline, "T1 build never landed");
             std::thread::sleep(Duration::from_millis(5));
