@@ -43,7 +43,7 @@ mod store_dir;
 mod working_set;
 
 pub use check::{check_catalog, CatalogCheck};
-pub use command::{Command, CommandTicket, EditCommand};
+pub use command::{Command, CommandTicket, EditCommand, JobCommand};
 pub use config::CoreConfig;
 pub use edit_hub::EditHub;
 pub use error::{CoreError, Result};
@@ -65,6 +65,20 @@ pub use lightbox_edit::{
     PresetMeta, Recipe, RecipeRead, SnapshotMeta, StepLabel,
 };
 pub use lightbox_meta::xmp::sync::DivergenceStatus;
+
+// E06 (spec §4.7) — the jobs/activity vocabulary callers (the CLI, tests,
+// the E08 shell) need to drive `Command::Jobs`/`Session::{jobs, activity}`
+// without a separate `lightbox-jobs` dependency of their own (same
+// convention as the preview/edit re-exports around this). `Scheduler`
+// itself travels too: domain epics receive `Arc<Scheduler>` from
+// `Session::jobs()` and spawn on it directly. (`lightbox_jobs::
+// ProgressSink` is deliberately NOT re-exported — `lightbox_preview::
+// ProgressSink` already owns that name at this root.)
+pub use lightbox_jobs::{
+    ActivityCounts, ActivityEntry, ActivityRef, ActivitySnapshot, Class, GroupHandle, GroupId,
+    GroupSpec, JobEvent, JobId, JobKey, JobSpec, JobState, JobsConfig, Outcome, Priority,
+    ProgressStyle, ProgressView, Scheduler,
+};
 
 // E03 Phase D (spec §5.2/§5.6) — the preview build-scheduler vocabulary
 // callers (the CLI, tests, the eventual E08 shell) need to drive

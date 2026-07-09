@@ -52,6 +52,9 @@ mod e02;
 // `snapshot`/`preset`/`xmp` subcommands over the `Command::Edit`/`EditHub`
 // seam.
 mod edit;
+// E06 (spec §4.7, T12): `jobs list/watch/cancel/pause/resume/demo` over the
+// `Session::{jobs, activity}` + `Command::Jobs` seam, with `--wait-idle`.
+mod jobs;
 // E04 (spec §4.6, mandate v2.2 addendum): `open` — the headless
 // Command::OpenWorkingSet driver; `browse` — the headless folder-explorer
 // harness.
@@ -126,6 +129,17 @@ USAGE:
   lightbox-cli preview verify   --catalog <dir> [--full] [--json]
   lightbox-cli preview purge    --catalog <dir> --yes [--scope previews|rawcache|all]
   lightbox-cli preview relocate --catalog <dir> --new-root <path>
+
+  E06 jobs & activity (headless; job state is process-local — `demo` is the
+  E2E driver, spawning a synthetic group it then observes/controls):
+  lightbox-cli jobs list   --catalog <dir> [--json]
+  lightbox-cli jobs watch  --catalog <dir> [--duration <secs>]
+  lightbox-cli jobs cancel --catalog <dir> (--id <job> | --group <group>)
+  lightbox-cli jobs pause  --catalog <dir> (--id <job> | --group <group> | --class <c>)
+  lightbox-cli jobs resume --catalog <dir> (--id <job> | --group <group> | --class <c>)
+  lightbox-cli jobs demo   --catalog <dir> [--items <n>] [--item-steps <k>] [--fail <n>]
+                           [--cancel-after <ms>] [--pause-class-after <ms>]
+                           [--wait-idle <secs>] [--json]
 
 EXIT CODES:
   0 success | 1 failure | 2 usage error | 3 catalog corrupt/refused
@@ -212,6 +226,8 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
         "xmp" => edit::cmd_xmp(rest),
         // E03 Phase D (T14): preview build/stat/verify/purge.
         "preview" => preview::cmd_preview(rest),
+        // E06 (T12): jobs list/watch/cancel/pause/resume/demo.
+        "jobs" => jobs::cmd_jobs(rest),
         "--help" | "-h" | "help" => {
             print!("{USAGE}");
             Ok(0)

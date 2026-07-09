@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use lightbox_edit::{ParamSubset, PresetId};
 use lightbox_ingest::OpenRequest;
+use lightbox_jobs::{ActivityRef, Class};
 use lightbox_preview::{BuildPriority, CacheLimits, PurgeScope, Tier, TierSet};
 use lightbox_types::{Flag, ImageId, ImportSessionId, SnapshotId};
 
@@ -130,6 +131,35 @@ pub enum Command {
     /// E03 Phase F (T21, spec §5.6): scoped purge of the preview and/or raw
     /// caches. Completion arrives as `Event::CachePurged`.
     PurgeCaches(PurgeScope),
+    /// E06 (spec §4.7): job control — cancel/pause/resume/dismiss on the
+    /// activity model. **Non-transactional**: never touches the catalog or
+    /// `history_step` (job commands are not undoable history steps); the
+    /// dispatcher applies it straight to the session scheduler. Effects are
+    /// observable via `Session::activity()` and `Event::Jobs`; there is no
+    /// per-command ack event.
+    Jobs(JobCommand),
+}
+
+/// E06 job control (spec §4.7), mirroring the `lightbox_jobs::Scheduler`
+/// control surface 1:1. Rides the command bus for the uniform audit/logging
+/// path; job *observation* is the `Session::activity()` snapshot query.
+/// `#[non_exhaustive]`: E08's activity center may grow this.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum JobCommand {
+    /// Cancel a job or a whole group (fan-out to members).
+    Cancel(ActivityRef),
+    /// Pause a pausable job, or every pausable member of a group.
+    Pause(ActivityRef),
+    /// Resume a job or a group's members.
+    Resume(ActivityRef),
+    /// Pause every pausable job of a class, including subsequently spawned
+    /// ones ("pause all background analysis").
+    PauseClass(Class),
+    /// Clear a class pause (per-job pauses stay).
+    ResumeClass(Class),
+    /// Clear a lingering failed entry from the activity snapshot.
+    Dismiss(ActivityRef),
 }
 
 /// E09 edit-state mutations (spec §3.4). Every variant is durable: it lands

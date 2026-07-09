@@ -7,15 +7,23 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lightbox_ingest::OpenOptions;
-use lightbox_jobs::JobConfig;
+use lightbox_jobs::{JobConfig, JobsConfig};
 
 /// Configuration for a [`crate::Core`]. `#[non_exhaustive]`: build via
 /// [`CoreConfig::default`] and override fields.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct CoreConfig {
-    /// Job-system sizing (per-class budgets, worker threads).
+    /// Job-system sizing (per-class budgets, worker threads) — the E01
+    /// seed runtime (`JobSystem`).
     pub jobs: JobConfig,
+    /// E06 scheduler knobs (spec §4.8): lane budgets, load-shed window,
+    /// CPU-pool threads, activity-publish rate. **Prefs-store seam (T16):**
+    /// E08's preferences store loads/saves this and re-applies it live via
+    /// `Session::jobs().apply_config` — until that store exists, sessions
+    /// start from these defaults (override fields programmatically for
+    /// tests/tuning).
+    pub jobs_scheduler: JobsConfig,
     /// Capacity of the broadcast event channel (spec §3.8). Slow
     /// subscribers lag (they observe `RecvError::Lagged` and skip ahead);
     /// the writer is never blocked by them.
@@ -49,6 +57,7 @@ impl Default for CoreConfig {
     fn default() -> Self {
         CoreConfig {
             jobs: JobConfig::default(),
+            jobs_scheduler: JobsConfig::default(),
             event_capacity: 1024,
             preview_cache_bytes: 256 * 1024 * 1024,
             backup_max_age: Duration::from_secs(24 * 60 * 60),

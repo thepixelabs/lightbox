@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use lightbox_catalog::BackupReport;
 use lightbox_edit::StepLabel;
 use lightbox_ingest::{ImportReport, OpenReport};
+use lightbox_jobs::JobEvent;
 use lightbox_meta::xmp::sync::DivergenceStatus;
 use lightbox_preview::{CacheKind, PreviewDesc, PreviewError, PurgeReport, Tier};
 use lightbox_types::{AssetId, ImageId, ImportSessionId};
@@ -236,4 +237,11 @@ pub enum Event {
         /// What was actually removed.
         report: PurgeReport,
     },
+    /// E06 (spec §4.7): a scheduler event, forwarded verbatim from
+    /// `lightbox_jobs::Scheduler::subscribe` by the session's relay task.
+    /// Already throttled at the source (`Progress` ticks are coalesced to
+    /// `snapshot_publish_hz`); the shell needs only the
+    /// `Session::activity()` snapshot — this variant serves
+    /// `lightbox-cli jobs watch`, tests, and edge-triggered consumers.
+    Jobs(JobEvent),
 }

@@ -36,7 +36,9 @@ use lightbox_ingest::{
     import_add_in_place, load_working_set, plan_open, ImportEvent, ImportOptions, LoadEvent,
     OpenError, OpenRequest,
 };
-use lightbox_jobs::{CancelToken, Class, JobError, JobSystem};
+use lightbox_jobs::{
+    ActivitySnapshot, CancelToken, Class, JobError, JobSystem, Scheduler as JobScheduler,
+};
 use lightbox_preview::{
     AssetLocator, EmbeddedPreviewProvider, PreviewEvent as PvEvent, PreviewProvider,
     PreviewService, PreviewStoreConfig, Store,
@@ -52,7 +54,7 @@ use lightbox_render::GpuContext;
 use lightbox_types::PV_M0;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::command::{Command, CommandTicket, EditCommand};
+use crate::command::{Command, CommandTicket, EditCommand, JobCommand};
 use crate::config::CoreConfig;
 use crate::edit_hub::EditHub;
 use crate::error::Result;
@@ -166,6 +168,10 @@ struct SessionInner {
     /// `previews` above.
     preview_service: PreviewService,
     edit_hub: Arc<EditHub>,
+    /// E06 (spec §4.7): the session job scheduler — `Session::jobs()`.
+    /// Shut down (drained, grace-bounded) by `Session::close` BEFORE the
+    /// exit-time backup (spec §4.9 teardown ordering).
+    jobs_sched: Arc<JobScheduler>,
     /// E04 (spec §4.5): the session working-set model — `Session::
     /// working_set()`'s backing store.
     working_set: Arc<WorkingSetModel>,
@@ -374,6 +380,31 @@ impl Session {
             }
         });
 
+        // E06 (spec §4.7): the session job scheduler, dispatching onto the
+        // SAME tokio runtime the JobSystem owns (spec §4.4 — no nested
+        // runtimes). Constructed from `CoreConfig::jobs_scheduler` (the
+        // prefs-store seam, T16 — see that field's doc comment).
+        let jobs_sched = JobScheduler::new(
+            core.cfg.jobs_scheduler.clone(),
+            core.jobs.handle().clone(),
+        );
+        // Relay scheduler events onto the core bus as `Event::Jobs`
+        // (already coalesced at the source). Ends when the scheduler shuts
+        // down (channel closes) or the last session clone drops the sender.
+        let mut jobs_events = jobs_sched.subscribe();
+        let jobs_bus = events.clone();
+        core.jobs.handle().spawn(async move {
+            loop {
+                match jobs_events.recv().await {
+                    Ok(ev) => {
+                        let _ = jobs_bus.send(Event::Jobs(ev));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Queued>();
         let session_cancel = CancelToken::new();
         let in_flight = Arc::new(InFlight::default());
@@ -385,6 +416,7 @@ impl Session {
         let ctx = DispatchCtx {
             catalog: Arc::clone(&catalog),
             jobs: Arc::clone(&core.jobs),
+            jobs_sched: Arc::clone(&jobs_sched),
             events: events.clone(),
             session_cancel: session_cancel.clone(),
             in_flight: Arc::clone(&in_flight),
@@ -413,6 +445,7 @@ impl Session {
                 previews,
                 preview_service,
                 edit_hub,
+                jobs_sched,
                 working_set,
                 events,
                 cmd_tx,
@@ -456,6 +489,23 @@ impl Session {
     /// accessor pattern.
     pub fn edits(&self) -> Arc<EditHub> {
         Arc::clone(&self.inner.edit_hub)
+    }
+
+    /// The E06 job scheduler (spec §4.7 `Session::jobs`): domain subsystems
+    /// (ingest, preview, export, ML) get it here and spawn directly —
+    /// spawning is not a user command; commands like "Import…" are, and
+    /// their handlers spawn. Job *control* rides `Command::Jobs`; job
+    /// *observation* is [`Session::activity`].
+    pub fn jobs(&self) -> Arc<JobScheduler> {
+        Arc::clone(&self.inner.jobs_sched)
+    }
+
+    /// The current activity snapshot (spec §4.5): one lock-free atomic
+    /// pointer load; poll once per frame. Groups aggregate; completed
+    /// entries linger briefly; failed entries linger until
+    /// `JobCommand::Dismiss`.
+    pub fn activity(&self) -> Arc<ActivitySnapshot> {
+        self.inner.jobs_sched.activity()
     }
 
     /// The current session working-set snapshot (E04 spec §4.5): a cheap
@@ -588,6 +638,8 @@ impl std::fmt::Debug for Session {
 struct DispatchCtx {
     catalog: Arc<Catalog>,
     jobs: Arc<JobSystem>,
+    /// E06: the session scheduler `Command::Jobs` applies to.
+    jobs_sched: Arc<JobScheduler>,
     events: broadcast::Sender<Event>,
     session_cancel: CancelToken,
     in_flight: Arc<InFlight>,
@@ -673,9 +725,28 @@ async fn dispatch_loop(ctx: DispatchCtx, mut rx: mpsc::UnboundedReceiver<Queued>
                 spawn_relocate_cache_store(&ctx, ticket, new_root);
             }
             Command::PurgeCaches(scope) => spawn_purge_caches(&ctx, ticket, scope),
+            // E06 (spec §4.7): non-transactional control message — applied
+            // straight to the scheduler, no WAL txn, no `history_step`, no
+            // ack event (observe via `Session::activity()`/`Event::Jobs`).
+            Command::Jobs(cmd) => apply_job_command(&ctx.jobs_sched, ticket, cmd),
         }
     }
     tracing::debug!(target: "lightbox_core", "command dispatcher stopped");
+}
+
+/// `Command::Jobs` (E06 spec §4.7): job control, mirrored 1:1 onto the
+/// scheduler's control surface. Non-transactional by design — job commands
+/// are not undoable history steps and never touch the catalog writer.
+fn apply_job_command(sched: &Arc<JobScheduler>, ticket: CommandTicket, cmd: JobCommand) {
+    tracing::debug!(target: "lightbox_core", ticket = ticket.id(), ?cmd, "job command");
+    match cmd {
+        JobCommand::Cancel(target) => sched.cancel_ref(target),
+        JobCommand::Pause(target) => sched.pause_ref(target),
+        JobCommand::Resume(target) => sched.resume_ref(target),
+        JobCommand::PauseClass(class) => sched.pause_class(class),
+        JobCommand::ResumeClass(class) => sched.resume_class(class),
+        JobCommand::Dismiss(target) => sched.dismiss(target),
+    }
 }
 
 /// `Command::DiscardPreviews` (spec §5.6, T19/T23): unlinks preview files +
