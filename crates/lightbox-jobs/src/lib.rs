@@ -46,20 +46,26 @@
 //!   uses the same cancel-aware bounded channel instead of a hand-rolled
 //!   one.
 
+pub mod activity;
 mod cancel;
 mod config;
 mod cpu;
+pub mod group;
 pub mod model;
+mod progress;
 pub mod sched;
 pub mod system;
 mod token;
 
+pub use activity::{ActivityCounts, ActivityEntry, ActivitySnapshot, JobEvent};
 pub use cancel::CancelToken;
 pub use config::JobsConfig;
+pub use group::{GroupHandle, GroupSpec};
 pub use model::{
     ActivityRef, Class, FineState, GroupId, IllegalTransition, Input, JobError, JobId, JobKey,
     JobSpec, JobState, Outcome, Priority, ProgressStyle,
 };
+pub use progress::{ProgressSink, ProgressView};
 pub use sched::{JobContext, JobHandle, Scheduler};
 pub use token::{Interrupted, PauseGate};
 

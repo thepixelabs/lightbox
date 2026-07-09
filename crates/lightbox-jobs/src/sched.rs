@@ -33,13 +33,17 @@ use arc_swap::ArcSwap;
 use tokio::sync::Notify;
 use tracing::Instrument;
 
+use crate::activity::{ActivitySnapshot, JobEvent};
 use crate::config::JobsConfig;
 use crate::cpu::{CpuOutcome, CpuPools};
+use crate::group::{GroupHandle, GroupRecord, GroupSpec};
 use crate::model::{
-    transition, Class, FineState, Input, JobId, JobKey, JobSpec, JobState, Outcome, Priority,
+    transition, ActivityRef, Class, FineState, GroupId, Input, JobId, JobKey, JobSpec, JobState,
+    Outcome, Priority,
 };
+use crate::progress::{Dirty, ProgressSink, ProgressState};
 use crate::system::JobError;
-use crate::token::{Interrupted, PauseGate, BIT_SHOULD_YIELD};
+use crate::token::{Interrupted, PauseGate, BIT_CLASS_PAUSED, BIT_JOB_PAUSED, BIT_SHOULD_YIELD};
 
 /// Poison-tolerant lock (house convention: a poisoned scheduler lock means a
 /// panic already happened elsewhere; the state itself is a plain value).
@@ -191,6 +195,11 @@ pub(crate) struct JobRecord {
     holds_slot: AtomicBool,
     /// Woken on terminal transition (joiners).
     finished: Notify,
+    /// The job's progress counters (shared with its [`ProgressSink`]).
+    pub(crate) progress: Arc<ProgressState>,
+    /// The typed result slot, erased — `spawn_keyed` recovers
+    /// `Arc<ResultSlot<T>>` from it to hand out additional handles.
+    slot_any: Arc<dyn std::any::Any + Send + Sync>,
     /// When the job reached `Done(_)` (linger/eviction clock).
     pub(crate) terminal_at: Mutex<Option<tokio::time::Instant>>,
     /// Failed-entry dismissal (`JobCommand::Dismiss`).
@@ -306,12 +315,19 @@ pub struct JobContext {
     record: Arc<JobRecord>,
     lane: Arc<Lane>,
     sched: Weak<Scheduler>,
+    progress: ProgressSink,
 }
 
 impl JobContext {
     /// This job's id.
     pub fn job_id(&self) -> JobId {
         self.record.id
+    }
+
+    /// The job's progress reporter (spec §4.5): atomic increments, safe at
+    /// arbitrary rates; the activity publisher coalesces.
+    pub fn progress(&self) -> &ProgressSink {
+        &self.progress
     }
 
     /// The job's cancel token (thread it into sub-stages / long kernels).
@@ -562,6 +578,21 @@ pub struct Scheduler {
     /// In-flight dedupe index (spec §4.3 `spawn_keyed`): key → newest
     /// non-terminal job. Entries evict on terminal transition.
     keyed: Mutex<HashMap<JobKey, JobId>>,
+    /// Serializes `spawn_keyed`'s check-then-spawn so two concurrent keyed
+    /// spawns of the same key run the work once (T8 AC).
+    keyed_admission: Mutex<()>,
+    /// Group registry.
+    groups: Mutex<HashMap<GroupId, Arc<GroupRecord>>>,
+    next_group: AtomicU64,
+    /// Class-pause flags (spec §4.3 `pause_class`), lane order.
+    class_paused_flags: [AtomicBool; 3],
+    /// The published activity snapshot (lock-free load, spec §4.5).
+    activity: ArcSwap<ActivitySnapshot>,
+    snapshot_seq: AtomicU64,
+    /// Edge-triggered event fan-out (`lightbox-cli watch`, tests).
+    events: tokio::sync::broadcast::Sender<JobEvent>,
+    /// Publisher wake (progress writes, state changes).
+    pub(crate) dirty: Arc<Dirty>,
     /// The class-matched rayon pools (`fg-cpu`/`bg-cpu`, T6).
     cpu: CpuPools,
     /// Millis-since-epoch of the last `note_interactive_activity` call,
@@ -607,12 +638,22 @@ impl Scheduler {
             Lane::new(Class::Background),
         ];
         let cpu = CpuPools::new(&cfg);
+        let (events, _) = tokio::sync::broadcast::channel(cfg.event_capacity);
+        let dirty = Dirty::new();
         let sched = Arc::new(Scheduler {
             rt: rt.clone(),
             cfg: ArcSwap::from_pointee(cfg),
             lanes,
             jobs: Mutex::new(HashMap::new()),
             keyed: Mutex::new(HashMap::new()),
+            keyed_admission: Mutex::new(()),
+            groups: Mutex::new(HashMap::new()),
+            next_group: AtomicU64::new(1),
+            class_paused_flags: std::array::from_fn(|_| AtomicBool::new(false)),
+            activity: ArcSwap::from_pointee(ActivitySnapshot::empty()),
+            snapshot_seq: AtomicU64::new(0),
+            events,
+            dirty: Arc::clone(&dirty),
             cpu,
             interactive_last_ms: AtomicU64::new(0),
             bg_shrunk: AtomicBool::new(false),
@@ -629,6 +670,10 @@ impl Scheduler {
             for lane in &sched.lanes {
                 rt.spawn(dispatch_loop(Arc::downgrade(&sched), Arc::clone(lane)));
             }
+            rt.spawn(crate::activity::publisher_loop(
+                Arc::downgrade(&sched),
+                dirty,
+            ));
         }
         tracing::debug!(
             target: "lightbox_jobs",
@@ -645,16 +690,72 @@ impl Scheduler {
         Fut: Future<Output = Result<T, JobError>> + Send + 'static,
         T: Send + 'static,
     {
-        self.spawn_inner(spec, f, false)
+        self.spawn_inner(spec, f, Self::extract_take())
     }
 
-    fn spawn_inner<T, F, Fut>(self: &Arc<Self>, spec: JobSpec, f: F, shared: bool) -> JobHandle<T>
+    /// Keyed spawn (spec §4.3, T8): if `spec.key` matches an in-flight
+    /// (queued/running/paused) job of the same `kind`, returns a handle to
+    /// it instead of spawning — the demand-driven preview path leans on
+    /// this (grid scroll re-requests tiles without duplicating work). A
+    /// re-spawn after the keyed job completed runs the work again.
+    ///
+    /// Results are cloned to every handle (hence `T: Clone` — R4:
+    /// `Arc`-wrap large outputs).
+    pub fn spawn_keyed<T, F, Fut>(self: &Arc<Self>, spec: JobSpec, f: F) -> JobHandle<T>
+    where
+        F: FnOnce(JobContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, JobError>> + Send + 'static,
+        T: Clone + Send + 'static,
+    {
+        let Some(key) = spec.key.clone() else {
+            debug_assert!(false, "spawn_keyed requires JobSpec::key");
+            return self.spawn_inner(spec, f, Self::extract_clone());
+        };
+        // Serialize check-then-spawn: two concurrent keyed spawns of one
+        // key must run the work once (T8 AC).
+        let admission = lock(&self.keyed_admission);
+        let existing = lock(&self.keyed).get(&key).copied();
+        if let Some(id) = existing {
+            let record = lock(&self.jobs).get(&id).cloned();
+            if let Some(record) = record {
+                if record.kind == spec.kind && !lock(&record.state).is_terminal() {
+                    if let Ok(slot) = Arc::downcast::<ResultSlot<T>>(Arc::clone(&record.slot_any))
+                    {
+                        tracing::trace!(
+                            target: "lightbox_jobs",
+                            id = id.get(),
+                            key = %key,
+                            "spawn_keyed deduped onto in-flight job"
+                        );
+                        return JobHandle {
+                            record,
+                            slot,
+                            extract: Some(Self::extract_clone()),
+                            sched: Arc::downgrade(self),
+                        };
+                    }
+                    // Same key, different result type: a caller bug — fall
+                    // through and run separately rather than corrupt either.
+                    tracing::warn!(
+                        target: "lightbox_jobs",
+                        key = %key,
+                        "spawn_keyed type mismatch on in-flight key; spawning separately"
+                    );
+                }
+            }
+        }
+        let handle = self.spawn_inner(spec, f, Self::extract_clone());
+        drop(admission);
+        handle
+    }
+
+    fn spawn_inner<T, F, Fut>(self: &Arc<Self>, spec: JobSpec, f: F, extract: Extract<T>) -> JobHandle<T>
     where
         F: FnOnce(JobContext) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, JobError>> + Send + 'static,
         T: Send + 'static,
     {
-        let slot = Arc::new(ResultSlot {
+        let slot = Arc::new(ResultSlot::<T> {
             value: Mutex::new(None),
         });
         let id = JobId(
@@ -663,30 +764,72 @@ impl Scheduler {
         );
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let born_cancelled = self.closed.load(Ordering::Acquire);
+
+        // Group membership: resolve BEFORE building the record. Closed and
+        // finished groups refuse new members (close = "no more members will
+        // be added") — the job spawns ungrouped, loudly.
+        let mut group = None;
+        let mut group_id = spec.group;
+        if let Some(gid) = spec.group {
+            match lock(&self.groups).get(&gid).cloned() {
+                Some(g) if !g.closed.load(Ordering::Acquire) => group = Some(g),
+                Some(_) => {
+                    tracing::warn!(
+                        target: "lightbox_jobs",
+                        group = gid.get(),
+                        kind = spec.kind,
+                        "spawn into a closed group refused; spawning ungrouped"
+                    );
+                    group_id = None;
+                }
+                None => {
+                    tracing::warn!(
+                        target: "lightbox_jobs",
+                        group = gid.get(),
+                        kind = spec.kind,
+                        "spawn into an unknown group; spawning ungrouped"
+                    );
+                    group_id = None;
+                }
+            }
+        }
+        // Member cancel tokens are children of the group's (cancel_group
+        // fan-out reaches sub-stage tokens too).
+        let cancel = match &group {
+            Some(g) => g.cancel.child(),
+            None => crate::CancelToken::new(),
+        };
+        // Class-pause halts subsequently-spawned (pausable) jobs too (T10).
+        let class_paused = spec.pausable && self.class_paused(spec.class);
         let record = Arc::new(JobRecord {
             id,
             kind: spec.kind,
             label: spec.label,
             class: spec.class,
             pausable: spec.pausable,
-            group: spec.group,
+            group: group_id,
             key: spec.key,
             started_at: SystemTime::now(),
             state: Mutex::new(if born_cancelled {
                 FineState::Done(Outcome::Cancelled)
+            } else if class_paused {
+                // Born paused-queued (a birth state, not a transition).
+                FineState::PausedQueued
             } else {
                 FineState::Queued
             }),
             priority: AtomicI32::new(spec.priority.0),
             gen: AtomicU64::new(0),
             seq,
-            cancel: crate::CancelToken::new(),
-            gate: PauseGate::new(false),
+            cancel,
+            gate: PauseGate::new(class_paused),
             error: Mutex::new(None),
             work: Mutex::new(None),
             abort: Mutex::new(None),
             holds_slot: AtomicBool::new(false),
             finished: Notify::new(),
+            progress: Arc::new(ProgressState::new(spec.progress)),
+            slot_any: Arc::clone(&slot) as Arc<dyn std::any::Any + Send + Sync>,
             terminal_at: Mutex::new(None),
             dismissed: AtomicBool::new(false),
             last_checkpoint_ms: AtomicU64::new(0),
@@ -694,10 +837,9 @@ impl Scheduler {
         let handle = JobHandle {
             record: Arc::clone(&record),
             slot: Arc::clone(&slot),
-            extract: Some(Self::extract_take()),
+            extract: Some(extract),
             sched: Arc::downgrade(self),
         };
-        let _ = shared; // keyed spawns build their own clone-extractor (T8)
         if born_cancelled {
             // Admission closed (spec §4.9 step 1): terminal immediately,
             // never registered, never dispatched.
@@ -741,8 +883,23 @@ impl Scheduler {
             // plain `spawn` calls that carry a key.
             lock(&self.keyed).insert(key.clone(), id);
         }
+        if let Some(g) = &group {
+            // Known race window (benign, documented): `close()` landing
+            // between the resolution check above and this push means one
+            // straggler member joins a closed group — it still runs and is
+            // still counted; the group may finish before it does, in which
+            // case its terminal tick is a harmless no-op on the latch.
+            lock(&g.members).push(Arc::clone(&record));
+        }
         self.non_terminal.fetch_add(1, Ordering::AcqRel);
         self.counters.spawned.fetch_add(1, Ordering::Relaxed);
+        let _ = self.events.send(JobEvent::Spawned {
+            id,
+            kind: record.kind,
+            class: record.class,
+            group: record.group,
+        });
+        self.dirty.mark();
         tracing::debug!(
             target: "lightbox_jobs",
             id = id.get(),
@@ -751,13 +908,26 @@ impl Scheduler {
             "job spawned"
         );
 
-        // Enqueue + wake the lane.
-        self.push_queued(&record);
+        if *lock(&record.state) == FineState::Queued {
+            // Enqueue + wake the lane.
+            self.push_queued(&record);
+        }
+        if let Some(g) = &group {
+            if g.cancelled.load(Ordering::Acquire) {
+                // Spawned into an already-cancelled group: fan the cancel
+                // out to this straggler too.
+                self.cancel_record(&record);
+            }
+        }
         handle
     }
 
     fn extract_take<T: Send + 'static>() -> Extract<T> {
         Box::new(|slot| slot.take())
+    }
+
+    fn extract_clone<T: Clone + Send + 'static>() -> Extract<T> {
+        Box::new(|slot| slot.clone())
     }
 
     /// Pushes a `Queued` record's heap entry and wakes the lane.
@@ -1024,6 +1194,7 @@ impl Scheduler {
             record: Arc::clone(&record),
             lane: Arc::clone(lane),
             sched: Arc::downgrade(self),
+            progress: ProgressSink::new(Arc::clone(&record.progress), Arc::clone(&self.dirty)),
         };
         let span = tracing::info_span!(
             target: "lightbox_jobs",
@@ -1083,6 +1254,9 @@ impl Scheduler {
         };
         record.finished.notify_waiters();
         self.note_state_changed(record);
+        if let Some(gid) = record.group {
+            self.group_member_terminal(gid, outcome);
+        }
         if self.non_terminal.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.idle_notify.notify_waiters();
         }
@@ -1095,21 +1269,514 @@ impl Scheduler {
         );
     }
 
-    /// State-change hook (activity dirty-marking + `JobEvent`s land with
-    /// T9; v1 is trace-only).
+    /// State-change hook: broadcast + dirty-mark the publisher.
     pub(crate) fn note_state_changed(&self, record: &Arc<JobRecord>) {
+        let state = record.public_state();
         tracing::trace!(
             target: "lightbox_jobs",
             id = record.id.get(),
-            state = ?record.public_state(),
+            ?state,
             "state changed"
         );
+        let _ = self.events.send(JobEvent::StateChanged {
+            id: record.id,
+            state,
+        });
+        self.dirty.mark();
     }
 
     /// True when no job is in a non-terminal state (spec §4.3 —
     /// `lightbox-cli --wait-idle`).
     pub fn is_idle(&self) -> bool {
         self.non_terminal.load(Ordering::Acquire) == 0
+    }
+
+    /// Waits until [`Scheduler::is_idle`] (or the timeout). Returns whether
+    /// idle was reached (the CLI's `--wait-idle` exits non-zero otherwise).
+    pub async fn wait_idle(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.idle_notify.notified();
+            if self.is_idle() {
+                return true;
+            }
+            tokio::select! {
+                () = notified => {}
+                () = tokio::time::sleep_until(deadline) => return self.is_idle(),
+            }
+        }
+    }
+
+    // ── Pause / resume (spec §4.3/§4.4, T10) ────────────────────────────────
+
+    /// Pauses one job. **No-op unless `spec.pausable`** (and on terminal /
+    /// cancelling jobs). Queued jobs pause immediately; running jobs pause
+    /// at their next checkpoint, releasing their worker slot.
+    pub fn pause(&self, id: JobId) {
+        let record = lock(&self.jobs).get(&id).cloned();
+        if let Some(record) = record {
+            self.pause_record(&record);
+        }
+    }
+
+    fn pause_record(&self, record: &Arc<JobRecord>) {
+        if !record.pausable {
+            tracing::debug!(
+                target: "lightbox_jobs",
+                id = record.id.get(),
+                "pause ignored: job not pausable"
+            );
+            return;
+        }
+        record.gate.set_bit(BIT_JOB_PAUSED, true);
+        let changed = {
+            let mut st = lock(&record.state);
+            match *st {
+                FineState::Queued => match transition(*st, Input::Pause) {
+                    Ok(next) => {
+                        *st = next;
+                        self.lane(record.class).queued.fetch_sub(1, Ordering::AcqRel);
+                        true
+                    }
+                    Err(_) => false,
+                },
+                // Running: the state flips at the body's next checkpoint
+                // (spec §4.1); the gate bit set above is the whole request.
+                _ => false,
+            }
+        };
+        if changed {
+            self.note_state_changed(record);
+        }
+    }
+
+    /// Resumes one job (per-job bit; a class-paused job stays paused until
+    /// [`Scheduler::resume_class`]). Paused-queued jobs re-queue at their
+    /// original priority; paused-running jobs re-claim a slot and continue.
+    pub fn resume(&self, id: JobId) {
+        let record = lock(&self.jobs).get(&id).cloned();
+        if let Some(record) = record {
+            self.resume_record(&record);
+        }
+    }
+
+    fn resume_record(&self, record: &Arc<JobRecord>) {
+        record.gate.set_bit(BIT_JOB_PAUSED, false);
+        self.requeue_if_unpaused(record);
+    }
+
+    /// PausedQueued + fully-unpaused gate → back to `Queued` (+ heap push).
+    fn requeue_if_unpaused(&self, record: &Arc<JobRecord>) {
+        if record.gate.is_paused() {
+            return; // the other gate (job/class) still holds it
+        }
+        let changed = {
+            let mut st = lock(&record.state);
+            if *st == FineState::PausedQueued {
+                match transition(*st, Input::Resume) {
+                    Ok(next) => {
+                        *st = next;
+                        true
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.push_queued(record);
+            self.note_state_changed(record);
+        }
+        // PausedRunning wakes itself: `wait_if_paused` resolves on the gate
+        // clear and the parked checkpoint re-claims its slot.
+    }
+
+    /// Pauses every pausable job of `class`, **including subsequently
+    /// spawned ones** ("pause all background analysis", spec §4.3).
+    pub fn pause_class(&self, class: Class) {
+        self.class_paused_flags[class.index()].store(true, Ordering::Release);
+        let records: Vec<Arc<JobRecord>> = lock(&self.jobs)
+            .values()
+            .filter(|r| r.class == class && r.pausable)
+            .cloned()
+            .collect();
+        for record in &records {
+            record.gate.set_bit(BIT_CLASS_PAUSED, true);
+            let changed = {
+                let mut st = lock(&record.state);
+                if *st == FineState::Queued {
+                    match transition(*st, Input::Pause) {
+                        Ok(next) => {
+                            *st = next;
+                            self.lane(class).queued.fetch_sub(1, Ordering::AcqRel);
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                }
+            };
+            if changed {
+                self.note_state_changed(record);
+            }
+        }
+        self.dirty.mark();
+        tracing::info!(target: "lightbox_jobs", ?class, "class paused");
+    }
+
+    /// Clears the class pause; per-job-paused jobs stay paused.
+    pub fn resume_class(&self, class: Class) {
+        self.class_paused_flags[class.index()].store(false, Ordering::Release);
+        let records: Vec<Arc<JobRecord>> = lock(&self.jobs)
+            .values()
+            .filter(|r| r.class == class)
+            .cloned()
+            .collect();
+        for record in &records {
+            record.gate.set_bit(BIT_CLASS_PAUSED, false);
+            self.requeue_if_unpaused(record);
+        }
+        self.dirty.mark();
+        tracing::info!(target: "lightbox_jobs", ?class, "class resumed");
+    }
+
+    /// Whether `class` is class-paused.
+    pub fn is_class_paused(&self, class: Class) -> bool {
+        self.class_paused_flags[class.index()].load(Ordering::Acquire)
+    }
+
+    pub(crate) fn class_paused(&self, class: Class) -> bool {
+        self.is_class_paused(class)
+    }
+
+    // ── Groups (spec §4.5, T8) ──────────────────────────────────────────────
+
+    /// Creates a group: one activity entry aggregating many member jobs.
+    /// Spawn members with `JobSpec::group = Some(handle.id())`; call
+    /// [`GroupHandle::close`] when no more members will be added.
+    pub fn create_group(self: &Arc<Self>, spec: GroupSpec) -> GroupHandle {
+        let id = GroupId(
+            NonZeroU64::new(self.next_group.fetch_add(1, Ordering::Relaxed))
+                .expect("group ids start at 1"),
+        );
+        let record = GroupRecord::new(id, spec);
+        lock(&self.groups).insert(id, Arc::clone(&record));
+        self.dirty.mark();
+        tracing::debug!(
+            target: "lightbox_jobs",
+            id = id.get(),
+            kind = record.kind,
+            "group created"
+        );
+        GroupHandle {
+            record,
+            sched: Arc::downgrade(self),
+        }
+    }
+
+    /// Cancels every non-terminal member (child-token fan-out + state
+    /// machine per member).
+    pub fn cancel_group(&self, id: GroupId) {
+        let Some(group) = lock(&self.groups).get(&id).cloned() else {
+            return;
+        };
+        group.cancelled.store(true, Ordering::Release);
+        group.cancel.cancel();
+        let members: Vec<Arc<JobRecord>> = lock(&group.members).clone();
+        for member in &members {
+            self.cancel_record(member);
+        }
+        self.check_group_completion(&group);
+        self.dirty.mark();
+        tracing::info!(target: "lightbox_jobs", id = id.get(), "group cancelled");
+    }
+
+    /// Pauses every pausable member (the `JobCommand::Pause(Group)` path).
+    pub fn pause_group(&self, id: GroupId) {
+        let Some(group) = lock(&self.groups).get(&id).cloned() else {
+            return;
+        };
+        let members: Vec<Arc<JobRecord>> = lock(&group.members).clone();
+        for member in &members {
+            self.pause_record(member);
+        }
+    }
+
+    /// Resumes every member's per-job pause bit.
+    pub fn resume_group(&self, id: GroupId) {
+        let Some(group) = lock(&self.groups).get(&id).cloned() else {
+            return;
+        };
+        let members: Vec<Arc<JobRecord>> = lock(&group.members).clone();
+        for member in &members {
+            self.resume_record(member);
+        }
+    }
+
+    fn group_member_terminal(&self, gid: GroupId, outcome: Outcome) {
+        let Some(group) = lock(&self.groups).get(&gid).cloned() else {
+            return;
+        };
+        group.terminal_members.fetch_add(1, Ordering::AcqRel);
+        match outcome {
+            Outcome::Failed => {
+                group.failed_members.fetch_add(1, Ordering::AcqRel);
+            }
+            Outcome::Cancelled => {
+                group.cancelled_members.fetch_add(1, Ordering::AcqRel);
+            }
+            Outcome::Completed => {}
+        }
+        self.dirty.mark();
+        self.check_group_completion(&group);
+    }
+
+    /// Completion latch: closed + every member terminal ⇒ finished once.
+    pub(crate) fn check_group_completion(&self, group: &Arc<GroupRecord>) {
+        if !group.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let total = lock(&group.members).len() as u64;
+        if group.terminal_members.load(Ordering::Acquire) < total {
+            return;
+        }
+        if group.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let outcome = group.final_outcome();
+        *lock(&group.outcome) = Some(outcome);
+        *lock(&group.terminal_at) = Some(tokio::time::Instant::now());
+        let _ = self.events.send(JobEvent::GroupFinished {
+            id: group.id,
+            outcome,
+        });
+        self.dirty.mark();
+        tracing::debug!(
+            target: "lightbox_jobs",
+            id = group.id.get(),
+            ?outcome,
+            "group finished"
+        );
+    }
+
+    // ── Observation (spec §4.5, T9) ─────────────────────────────────────────
+
+    /// The current activity snapshot — one lock-free atomic pointer load;
+    /// poll once per frame.
+    pub fn activity(&self) -> Arc<ActivitySnapshot> {
+        self.activity.load_full()
+    }
+
+    /// Subscribes to the edge-triggered event stream (CLI `watch`, tests).
+    /// Slow subscribers lag; they never backpressure the scheduler.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<JobEvent> {
+        self.events.subscribe()
+    }
+
+    /// Cancels by activity reference (job or group) — the
+    /// `JobCommand::Cancel` fan-in.
+    pub fn cancel_ref(&self, target: ActivityRef) {
+        match target {
+            ActivityRef::Job(id) => self.cancel(id),
+            ActivityRef::Group(id) => self.cancel_group(id),
+        }
+    }
+
+    /// Pauses by activity reference — the `JobCommand::Pause` fan-in.
+    pub fn pause_ref(&self, target: ActivityRef) {
+        match target {
+            ActivityRef::Job(id) => self.pause(id),
+            ActivityRef::Group(id) => self.pause_group(id),
+        }
+    }
+
+    /// Resumes by activity reference — the `JobCommand::Resume` fan-in.
+    pub fn resume_ref(&self, target: ActivityRef) {
+        match target {
+            ActivityRef::Job(id) => self.resume(id),
+            ActivityRef::Group(id) => self.resume_group(id),
+        }
+    }
+
+    /// Dismisses a lingering (typically failed) terminal entry from the
+    /// activity snapshot (`JobCommand::Dismiss`). No-op on live entries.
+    pub fn dismiss(&self, target: ActivityRef) {
+        match target {
+            ActivityRef::Job(id) => {
+                let record = lock(&self.jobs).get(&id).cloned();
+                if let Some(record) = record {
+                    if lock(&record.state).is_terminal() {
+                        record.dismissed.store(true, Ordering::Release);
+                        self.dirty.mark();
+                    }
+                }
+            }
+            ActivityRef::Group(id) => {
+                let group = lock(&self.groups).get(&id).cloned();
+                if let Some(group) = group {
+                    if group.finished.load(Ordering::Acquire) {
+                        group.dismissed.store(true, Ordering::Release);
+                        self.dirty.mark();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Publisher rate (live-configurable).
+    pub(crate) fn publish_hz(&self) -> u8 {
+        self.cfg.load().snapshot_publish_hz
+    }
+
+    /// The earliest pending linger expiry across terminal entries (the
+    /// publisher's age-out wake-up).
+    pub(crate) fn earliest_linger_expiry(&self) -> Option<tokio::time::Instant> {
+        let linger = self.cfg.load().completed_linger;
+        let mut earliest: Option<tokio::time::Instant> = None;
+        let mut consider = |at: Option<tokio::time::Instant>| {
+            if let Some(at) = at {
+                let expiry = at + linger;
+                earliest = Some(earliest.map_or(expiry, |e| e.min(expiry)));
+            }
+        };
+        for record in lock(&self.jobs).values() {
+            if let JobState::Done(outcome) = record.public_state() {
+                let dismissed = record.dismissed.load(Ordering::Acquire);
+                if outcome != Outcome::Failed || dismissed {
+                    consider(*lock(&record.terminal_at));
+                }
+            }
+        }
+        for group in lock(&self.groups).values() {
+            if group.finished.load(Ordering::Acquire) {
+                let failed = matches!(*lock(&group.outcome), Some(Outcome::Failed));
+                if !failed || group.dismissed.load(Ordering::Acquire) {
+                    consider(*lock(&group.terminal_at));
+                }
+            }
+        }
+        earliest
+    }
+
+    /// Folds the registry into a fresh snapshot, publishes it, emits
+    /// coalesced `Progress` events, and sweeps aged-out terminal entries.
+    pub(crate) fn publish_now(&self, last_epochs: &mut HashMap<ActivityRef, u64>) {
+        let now = tokio::time::Instant::now();
+        let linger = self.cfg.load().completed_linger;
+        let expired = |terminal_at: &Mutex<Option<tokio::time::Instant>>| {
+            lock(terminal_at).is_none_or(|at| now >= at + linger)
+        };
+
+        // Sweep + collect jobs.
+        let mut job_records: Vec<Arc<JobRecord>> = Vec::new();
+        {
+            let mut jobs = lock(&self.jobs);
+            jobs.retain(|_, record| {
+                let keep = match record.public_state() {
+                    JobState::Done(outcome) => {
+                        if record.dismissed.load(Ordering::Acquire) {
+                            false
+                        } else if outcome == Outcome::Failed {
+                            true // lingers until dismissed
+                        } else {
+                            !expired(&record.terminal_at)
+                        }
+                    }
+                    _ => true,
+                };
+                if keep {
+                    job_records.push(Arc::clone(record));
+                }
+                keep
+            });
+        }
+        // Sweep + collect groups.
+        let mut group_records: Vec<Arc<GroupRecord>> = Vec::new();
+        {
+            let mut groups = lock(&self.groups);
+            groups.retain(|_, group| {
+                let keep = if !group.finished.load(Ordering::Acquire) {
+                    true
+                } else if group.dismissed.load(Ordering::Acquire) {
+                    false
+                } else if matches!(*lock(&group.outcome), Some(Outcome::Failed)) {
+                    true // lingers until dismissed
+                } else {
+                    !expired(&group.terminal_at)
+                };
+                if keep {
+                    group_records.push(Arc::clone(group));
+                }
+                keep
+            });
+        }
+
+        let mut entries = Vec::new();
+        let mut counts = crate::activity::ActivityCounts::default();
+        let mut epochs: HashMap<ActivityRef, u64> = HashMap::new();
+        for record in &job_records {
+            let state = record.public_state();
+            counts.count(record.class, state);
+            if record.group.is_some() {
+                continue; // aggregated into the group entry
+            }
+            let id = ActivityRef::Job(record.id);
+            epochs.insert(id, record.progress.epoch());
+            entries.push(crate::activity::ActivityEntry {
+                id,
+                kind: record.kind,
+                label: record.label.clone(),
+                detail: record.progress.detail(),
+                class: record.class,
+                state,
+                pausable: record.pausable,
+                progress: Some(record.progress.view()),
+                started_at: record.started_at,
+                error: lock(&record.error).clone(),
+            });
+        }
+        for group in &group_records {
+            let id = ActivityRef::Group(group.id);
+            epochs.insert(id, group.progress_epoch());
+            let state = group_public_state(group);
+            let error = (matches!(state, JobState::Done(Outcome::Failed))).then(|| {
+                let failed = group.failed_members.load(Ordering::Acquire);
+                format!("{failed} of {} items failed", lock(&group.members).len())
+            });
+            entries.push(crate::activity::ActivityEntry {
+                id,
+                kind: group.kind,
+                label: group.label.clone(),
+                detail: None,
+                class: group.class,
+                state,
+                pausable: group.pausable,
+                progress: Some(group.aggregate_view()),
+                started_at: group.started_at,
+                error,
+            });
+        }
+        entries.sort_by_key(|e| e.started_at);
+
+        let seq = self.snapshot_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        let class_paused = std::array::from_fn(|i| self.class_paused_flags[i].load(Ordering::Acquire));
+        self.activity.store(Arc::new(ActivitySnapshot {
+            seq,
+            entries,
+            class_paused,
+            counts,
+        }));
+
+        // Coalesced Progress ticks: one event per entry whose progress
+        // moved since the previous publish.
+        for (id, epoch) in &epochs {
+            if last_epochs.get(id) != Some(epoch) {
+                let _ = self.events.send(JobEvent::Progress { id: *id });
+            }
+        }
+        *last_epochs = epochs;
     }
 
     /// Millis since this scheduler's construction (monotonic; virtual under
@@ -1122,11 +1789,44 @@ impl Scheduler {
 impl Drop for Scheduler {
     fn drop(&mut self) {
         // Wake + retire the lane dispatch tasks (they hold only `Weak`
-        // scheduler refs and park on lane notifies).
+        // scheduler refs and park on lane notifies), and the publisher.
         for lane in &self.lanes {
             lane.closed.store(true, Ordering::Release);
             lane.notify.notify_waiters();
         }
+        self.dirty.close();
+    }
+}
+
+/// A group's representative public state for the activity entry.
+fn group_public_state(group: &GroupRecord) -> JobState {
+    if group.finished.load(Ordering::Acquire) {
+        return JobState::Done(lock(&group.outcome).unwrap_or(Outcome::Completed));
+    }
+    if group.cancelled.load(Ordering::Acquire) {
+        return JobState::Cancelling;
+    }
+    let members = lock(&group.members).clone();
+    let mut any_running = false;
+    let mut any_queued = false;
+    let mut any_paused = false;
+    for member in &members {
+        match member.public_state() {
+            JobState::Running | JobState::Cancelling => any_running = true,
+            JobState::Queued => any_queued = true,
+            JobState::Paused => any_paused = true,
+            JobState::Done(_) => {}
+        }
+    }
+    if any_running {
+        JobState::Running
+    } else if any_queued {
+        JobState::Queued
+    } else if any_paused {
+        JobState::Paused
+    } else {
+        // Empty or all-terminal-but-open: still accepting members.
+        JobState::Queued
     }
 }
 
