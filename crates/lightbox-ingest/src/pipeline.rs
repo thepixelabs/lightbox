@@ -40,8 +40,10 @@ pub const KNOWN_EXTENSIONS: &[&str] = &[
 ];
 
 /// Fixed-width RFC3339 UTC (matches the catalog's timestamp convention:
-/// lexicographic == chronological).
-const RFC3339_MICROS: &[BorrowedFormatItem<'_>] =
+/// lexicographic == chronological). `pub(crate)`: E04's `working_set` module
+/// reuses this and [`system_time_rfc3339_utc`] verbatim (same mtime
+/// formatting convention) rather than duplicating them.
+pub(crate) const RFC3339_MICROS: &[BorrowedFormatItem<'_>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z");
 
 /// What a discovery walk found.
@@ -441,17 +443,21 @@ fn commit_batch(
     Ok(())
 }
 
-fn is_hidden(name: &std::ffi::OsStr) -> bool {
+/// `pub(crate)`: reused by [`crate::working_set`]'s skip-accounting pass and
+/// [`crate::browse`]'s hidden-skip rule (E04) — the same E01 dot-name rule.
+pub(crate) fn is_hidden(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().starts_with('.')
 }
 
-fn has_known_extension(path: &Path) -> bool {
+/// `pub(crate)`: reused by [`crate::browse::browse_dir`] (E04) — same
+/// extension-claim rule as the walk, kept in one place.
+pub(crate) fn has_known_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| KNOWN_EXTENSIONS.iter().any(|k| ext.eq_ignore_ascii_case(k)))
 }
 
-fn system_time_rfc3339_utc(t: SystemTime) -> Option<String> {
+pub(crate) fn system_time_rfc3339_utc(t: SystemTime) -> Option<String> {
     time::OffsetDateTime::from(t).format(&RFC3339_MICROS).ok()
 }
 

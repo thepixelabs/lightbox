@@ -28,13 +28,26 @@
 //! No per-file error aborts the batch; cancellation commits completed
 //! batches only.
 
+// E04 (mandate v2.2 addendum): the headless, live-filesystem folder-explorer
+// primitive — Finder/Explorer-style immediate-children navigation. Reads
+// live, persists nothing; not managed import, not a library.
+mod browse;
 mod pipeline;
 mod report;
+// E04: the v2.0 working-set loader (spec §4.3) — enumerate -> probe -> order
+// -> hash -> register, replacing the retired v1.x managed-import E04. Files
+// open in place; the set itself is session state, never persisted.
+mod working_set;
 
+pub use browse::{browse_dir, DirListing, ImageEntry};
 pub use pipeline::{
     discover_files, import_add_in_place, import_files, Discovery, KNOWN_EXTENSIONS,
 };
 pub use report::{ImportEvent, ImportOptions, ImportOutcome, ImportReport};
+pub use working_set::{
+    load_working_set, plan_open, LoadEvent, OpenError, OpenOptions, OpenOrigin, OpenReport,
+    OpenRequest, PlanProgress, PlannedItem, SetPlan, SkipReason, SkippedPath,
+};
 
 /// Errors that abort an import outright (per-file problems never do — they
 /// land in [`ImportReport::errors`]).
