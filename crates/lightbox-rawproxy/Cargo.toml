@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-rawproxy"
+description = "Out-of-process LibRaw (LGPL, dyn-link) decode sandbox — owned by E02 Phase C. Never links into the app."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lightbox-rawproxy"
+path = "src/main.rs"
+
+[dependencies]
+# The wire-protocol types are shared with the supervisor client
+# (lightbox-decode::proxy_client, Phase C).
+lightbox-decode.workspace = true
+ciborium.workspace = true
+serde = { workspace = true }
+thiserror.workspace = true
+# SUPERSET deps for Phase C so it fills the sandbox without editing this
+# manifest: POSIX rlimit / shm plumbing. LibRaw itself is dynamic-linked via a
+# build script Phase C adds (LGPL-2.1, surface-2 SBOM; never a crate dep, see
+# deny.toml).
+libc.workspace = true
+
+[features]
+default = []
+# E02 Phase C (C2/C7): compiles src/libraw_shim.c and DYNAMIC-links LibRaw
+# (LGPL-2.1). OFF by default so `cargo build --workspace` stays green on
+# machines without LibRaw (spec §0). Enable in packaging with LibRaw present:
+# `cargo build -p lightbox-rawproxy --features libraw`.
+libraw = []
+
+# `cc` (MIT/Apache-2.0, already in the deny-approved graph via zstd-sys/lcms2-sys)
+# compiles the C shim under the `libraw` feature. Appended by Phase C, Phase A
+# did not declare a build-dependency. It is inert unless the feature is on.
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true

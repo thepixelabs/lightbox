@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-color"
+description = "Color management: camera matrices, DCP evaluation, ICC — owned by E02"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Camera colorimetry + identity flow FROM the decode crate (RawColorimetry,
+# CameraId). This direction (color → decode) is deliberate; RawColorimetry
+# stores plain arrays precisely so decode need not depend on this crate's Mat3
+# (see lightbox-decode raw/types.rs deviation note).
+lightbox-decode.workspace = true
+thiserror.workspace = true
+serde = { workspace = true }
+# .lblook / .dcp resolved-state and ProfileId hashing.
+ciborium.workspace = true
+twox-hash.workspace = true
+# E02 Phase D color-management engine. Little-CMS2, vendored + STATIC (MIT).
+# The GPL-3 `fast_float` plugin feature is NEVER enabled (D1 assert, R2).
+# Declared now as a SUPERSET dependency so Phase D fills icc/display/output
+# bodies without touching this manifest.
+# Phase D: `features = ["static"]` makes the vendored static build
+# deterministic, lcms2-sys's `static` feature short-circuits pkg-config so we
+# never dynamic-link a system liblcms2 that a dev box happens to have. Meets the
+# D1 "static" mandate. (Appended feature; see E02-deviations.md.)
+lcms2 = { workspace = true, features = ["static"] }
+# Phase D (D1): direct handle on the lcms2 C ABI to install a process-global
+# error-logging handler (`cmsSetLogErrorHandler`) so malformed-profile
+# diagnostics are captured, never an abort, never stderr spam under D7 fuzzing.
+# Already a transitive dep of `lcms2` at the same locked version (4.0.7) and
+# already classified in native-inventory.toml; this only promotes it to a direct
+# dependency. (Appended dep; see E02-deviations.md.)
+lcms2-sys = "4"
+
+[dev-dependencies]
+proptest.workspace = true
+# E02 Phase H (H3): the color perf bench suite (resolve_input_transform,
+# eval_cpu, display-transform bake) against the §7.5 budgets. Test-only.
+# (Appended dev-dep; see E02-deviations.md.)
+criterion.workspace = true
+# Phase E (E7 look golden): the shared golden-image harness (PNG IO + the
+# LIGHTBOX_BLESS workflow) so the look golden lives alongside every other pixel
+# epic's goldens. Test-only; leaf tool crate (png + thiserror), no cycle back to
+# lightbox-color. (Appended dev-dep; see E02-deviations.md.)
+lbx-image-compare.workspace = true
+# Phase E (E6 manifest policy checker + E3 scene-corpus manifest): parse the
+# surface-3 assets/MANIFEST.toml and the committed scene-corpus manifest.
+# Test-only. (Appended dev-dep; see E02-deviations.md.)
+toml.workspace = true
+
+# E02 Phase H (H3): color pipeline perf benches (§7.5 budgets).
+[[bench]]
+name = "color_pipeline"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[workspace]
+resolver = "2"
+members = ["crates/*", "tools/*"]
+# The cargo-fuzz seed target (spec §5 T19: fuzzing non-gating at M0) builds
+# only under `cargo fuzz` (nightly, libFuzzer); keep it out of the PR-gate graph.
+exclude = ["crates/lightbox-decode/fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+# Intra-workspace crates
+lightbox-types = { path = "crates/lightbox-types" }
+lightbox-catalog = { path = "crates/lightbox-catalog" }
+lightbox-core = { path = "crates/lightbox-core" }
+lightbox-jobs = { path = "crates/lightbox-jobs" }
+lightbox-decode = { path = "crates/lightbox-decode" }
+lightbox-color = { path = "crates/lightbox-color" }
+lightbox-preview = { path = "crates/lightbox-preview" }
+lightbox-render = { path = "crates/lightbox-render" }
+lightbox-render-testkit = { path = "crates/lightbox-render-testkit" }
+lightbox-edit = { path = "crates/lightbox-edit" }
+lightbox-meta = { path = "crates/lightbox-meta" }
+lightbox-ingest = { path = "crates/lightbox-ingest" }
+lightbox-export = { path = "crates/lightbox-export" }
+lbx-image-compare = { path = "tools/lbx-image-compare" }
+
+# Third-party (shared versions; adapt here, not per-crate)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+# wgpu is pinned to the major that current egui-wgpu/eframe (0.35) links against:
+# the zero-copy seam (spec §2.3 seam 2) requires the shell and the engine to
+# share ONE wgpu::Device, which means one wgpu crate version workspace-wide.
+wgpu = "29"
+eframe = { version = "0.35", default-features = false, features = [
+  "wgpu",
+  "default_fonts",
+  "wayland",
+  "x11",
+] }
+ciborium = "0.2"
+# Preset identity (spec §2 / §3.7): `lb:PresetId` is a uuid v4, stable across
+# renames. Already in the graph (transitive); E09 makes it a direct dep. MIT/
+# Apache-2.0 (surface-1 allowlist-clean). Note (E09-deviations E-1): the spec also
+# lists `directories` for the preset config dir, but it pulls `option-ext`
+# (MPL-2.0) which is not on the exhaustive cargo-deny allowlist; E09 resolves the
+# config dir from platform env vars instead (no new license surface).
+uuid = { version = "1", features = ["v4"] }
+# XMP substrate (spec §1.6 / §3.5). The architecture's primary is the Adobe ISO
+# 16684 XMP Toolkit via the `xmp_toolkit` bindings (CTO sign-off, 02-approval.md);
+# the NAMED reversal fallback (§1.6 / Risk R1) is our own RDF/XML behind the same
+# `XmpDoc` API, parsed/serialized with `quick-xml` (MIT, surface-1 clean; already
+# in the graph). E09 Phase D ships the fallback because Phase C's toolkit
+# integration had not landed when Phase D executed (see E09-deviations D-1).
+quick-xml = "0.39"
+tokio = { version = "1", default-features = false }
+pollster = "0.4"
+toml = "1"
+# The SQLite amalgamation is bundled (spec §4.2: no system dependency; public
+# domain); `backup` exposes the online-backup API used by verified backups.
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+zstd = "0.13"
+time = { version = "0.3", features = ["std", "formatting", "parsing", "macros"] }
+walkdir = "2"
+unicode-normalization = "0.1"
+twox-hash = { version = "2", default-features = false, features = [
+  "xxhash3_128",
+  "xxhash3_64",
+  "std",
+] }
+sha2 = "0.11"
+# Probe + embedded-preview pipeline (spec §3.6/§3.7). NOTE: the spec names
+# rawler for raw metadata, but rawler is LGPL-2.1, denied in the crate graph
+# by deny.toml/architecture §1.6, so raw containers are probed by
+# lightbox-decode's own permissive walkers instead (E01-deviations.md, Phase 5).
+kamadak-exif = "0.6"
+zune-jpeg = "0.5"
+# Non-raw codecs for E02 Phase A decode (all permissive: MIT/Apache-2.0).
+# `tiff` covers 8/16-bit TIFF sources (float-TIFF is 8/16-bit-scoped at M1 per
+# E02 Open Question 6). `png` (below) is the image-rs PNG codec.
+tiff = "0.11"
+# E02 Phase D color-management engine: the `lcms2` crate vendors Little-CMS2
+# and builds it STATIC (MIT). The GPL-3 `fast_float` plugin feature is NEVER
+# enabled (E02 §Risks R2, D1 assert). Declared at the workspace level so
+# Phase D fills bodies without touching the manifest.
+lcms2 = "6"
+# libc: POSIX rlimit/shm plumbing for the out-of-process LibRaw proxy
+# (E02 Phase C). Declared now so Phase C fills the sandbox without editing
+# the manifest.
+libc = "0.2"
+fast_image_resize = "6"
+# E03 Phase E (T17): raw-cache `get()` mmap read (spec §3.3/§5.4 "mmap read").
+# MIT/Apache-2.0, no native code of its own (wraps the platform mmap syscalls
+# directly), surface-1 clean, no cargo-deny changes needed.
+memmap2 = "0.9"
+# E03 Phase C T10: T1 JPEG backend. CODEC RECONCILIATION (see
+# E03-deviations.md, Phase C T10 for the full measurement): the spec's
+# preferred `mozjpeg` DOES build cleanly here with
+# `default-features = false` (disabling `mozjpeg-sys`'s `nasm_simd`, which
+# needs `nasm`, absent on this build machine), but the resulting
+# non-SIMD encoder measured ~475-500ms/image on an 8 MP fixture, ~2x over
+# the spec's 250ms/image latency AC (§6/T10). `jpeg-encoder` (pure Rust;
+# `simd` feature = runtime-detected AVX2 on x86_64, no `nasm`/C toolchain
+# needed at all) measured ~45ms on the same image/machine, comfortably
+# inside budget, so it ships instead, per the task's own "never fake the
+# latency AC" mandate. License `(MIT OR Apache-2.0) AND IJG`: the IJG
+# component is not on the surface-1 allowlist; a scoped `deny.toml`
+# `[licenses].exceptions` entry covers it (same pattern as the existing
+# BSL-1.0/OFL-1.1 entries there).
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+# E03 Phase C T11: pure-Rust JXL decode (MIT/Apache-2.0, no native lib), the
+# always-available half of the `jxl` feature; encode is the separately
+# feature-gated own-FFI binding (`lightbox-preview/src/codec/jxl.rs`).
+# `default-features = false` skips the optional `rayon`/`image`/`lcms2`
+# integration features this crate does not need (single-threaded decode of
+# small preview tiers is not perf-critical the way raw decode is).
+jxl-oxide = { version = "0.12", default-features = false }
+# E03 Phase C T11: bindgen generates the libjxl encoder FFI surface AT BUILD
+# TIME from whatever `jxl/encode.h` is actually installed (feature `jxl`
+# only, never a default-build dependency), deliberately NOT a hand-copied
+# struct layout: `JxlBasicInfo` is a large, version-sensitive C struct, and
+# getting its layout wrong from memory (this build machine has no libjxl to
+# bindgen against, so it is UNVERIFIED, see E03-deviations.md Phase C T11)
+# would be a silent ABI/memory-safety bug. BSD-3-Clause.
+bindgen = "0.72"
+# Golden-image harness (spec §5 T22): committed goldens + failure heatmaps
+# are PNGs; `png` is the image-rs codec (MIT/Apache-2.0).
+png = "0.18"
+# CPU node evaluation (spec §3.4/§5 T24 names rayon for the CPU path).
+rayon = "1"
+# E05 render node-graph engine (spec §2 module map + §3 interfaces). All
+# MIT/Apache/CC0/Zlib, cargo-deny surface-1 clean; no native/FFI, so surfaces
+# 2-3 are untouched by E05.
+#   blake3, content-keyed cache key + ParamHash + kernel salt (§3.5).
+#   half, f16 host-side working-tile pixels (RGBA16F, §4.2).
+#   wide, SIMD lanes for the CPU tile executor (superset; §4.4 parity path).
+#   petgraph, the render DAG (RenderGraph, §1.3/§2.2, architecturally DECIDED).
+blake3 = "1"
+half = "2"
+wide = "0.7"
+petgraph = "0.6"
+proptest = "1"
+tempfile = "3"
+fastrand = "2"
+criterion = { version = "0.8", default-features = false, features = [
+  "cargo_bench_support",
+] }
+# E08 Phase A (T A3): the native OS open dialog behind the shell's "Open
+# Files…"/"Open Folder…" affordances. MIT. Default features already select
+# the GTK-free XDG-portal backend on Linux (no `gtk3` feature enabled) per
+# the spec's license-surface note; on macOS/Windows it wraps the native
+# panels directly (no extra native toolkit pulled in).
+rfd = "0.17"
+# E08 Phase A: headless-UI test harness for the shell (kittest + AccessKit
+# under the hood), dev-dependency only, never ships in the app binary.
+# Pinned in lockstep with the `egui`/`eframe` version above (0.35.x).
+egui_kittest = "0.35"
+
+# Shared lints: `cargo clippy --workspace --all-targets -- -D warnings` is the CI gate.
+# `unsafe_code` is denied workspace-wide; only lightbox-render (GPU interop) and future
+# FFI crates may locally `#![allow(unsafe_code)]` with justification (E01 spec §5 T1).
+[workspace.lints.rust]
+unsafe_code = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+
+# Golden-image and fault-injection tests are IO/CPU heavy; keep dev-deps optimized enough.
+[profile.dev.package."*"]
+opt-level = 1
+
+# E03 Phase C T10: `jpeg-encoder` is pure Rust with no usable SIMD path on
+# this reference machine (its `simd` feature is AVX2-only, x86_64-gated; ARM
+# has none), unlike a native-library encoder its speed is entirely at the
+# mercy of LLVM's optimizer, and debug-profile codegen is dramatically
+# slower for this kind of numeric code. At the workspace-wide dev
+# `opt-level = 1` above it measured ~600ms/8MP-image; this override gets it
+# to ~400ms, real, worthwhile, but still short of the spec's 250ms/image
+# encode-latency AC (§6/T10) in a debug/test build. `--release` clears the
+# budget comfortably (~30-50ms measured). The T10 AC's own latency
+# assertion is therefore release-gated (`codec.rs`'s
+# `jpeg_encode_meets_the_250ms_latency_budget`, see its doc comment) rather
+# than asserted unconditionally under plain `cargo test`; full numbers in
+# `docs/plan/epics/E03-deviations.md`, Phase C T10. Scoped to this one crate
+# (not every dependency) to avoid inflating everyone's `cargo build`/
+# `cargo test` time for packages that don't need it.
+[profile.dev.package.jpeg-encoder]
+opt-level = 3
+overflow-checks = false
+debug-assertions = false

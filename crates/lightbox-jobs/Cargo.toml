@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-jobs"
+description = "Job system seed: Class, spawn, JobHandle, CancelToken, bounded channels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+
+[lints]
+workspace = true

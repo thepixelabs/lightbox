@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-core"
+description = "Headless core façade: Core/Session lifecycle, command bus, events, queries, observability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightbox-catalog.workspace = true
+lightbox-ingest.workspace = true
+lightbox-jobs.workspace = true
+lightbox-preview.workspace = true
+lightbox-render.workspace = true
+lightbox-types.workspace = true
+# E09 Phase B follow-up (T8/T11): `EditHub` wraps `lightbox_edit::EditStore`/
+# `EditSession`/`PresetStore` and drives the `crs:`/`lb:` XMP substrate for
+# ReadMetadata/WriteMetadata/RefreshXmpStatus.
+lightbox-edit.workspace = true
+lightbox-meta.workspace = true
+# E15 core slice: the export pipeline this crate wires behind
+# `Command::Export`/`Event::Export*` (spec §5.10, narrowed).
+lightbox-export.workspace = true
+# `AssetProbe` for the xmp_map read path, built from the catalog's own
+# `ImageDetail`, not faked (`default_for`/`from_lr_crs` currently ignore most
+# of its fields, an E09 Phase D deviation, not a T8/T11 one).
+lightbox-decode.workspace = true
+thiserror.workspace = true
+# E10 Phase D (D10): `looks.rs` hashes an installed `.cube`/HaldCLUT file's
+# bytes (xxh3-128) to derive its `content_hash`, the same primitive
+# `lightbox-color`'s `ProfileId`/`lightbox-edit`'s
+# `PresetId::derived_from_path` already use.
+twox-hash.workspace = true
+# E08 Phase G (G1): the machine-scope prefs store (`prefs.toml`, spec §6.7)
+# serde+toml for the tolerant load/atomic save, tempfile for the
+# temp-then-rename write. All three were already in the workspace graph
+# (tempfile moves up from this crate's own dev-dependencies).
+serde.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+# `sync` for the §3.8 event broadcast (tokio broadcast::Receiver is part of
+# the frozen Session surface) and the §6.7 prefs watch channels; `rt` for
+# the command dispatcher task.
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+# The one GPU type allowed across the core/shell boundary (§2.3 seam 2): the
+# `ng::DeviceProvider` impl in `render_source.rs` names `wgpu::Device`/`Queue`
+# directly (E05 Phase F5).
+wgpu.workspace = true
+
+[dev-dependencies]
+fastrand.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+zstd.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-preview"
+description = "PreviewProvider trait + in-memory EmbeddedPreviewProvider (M0 stand-in for E03's store)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightbox-catalog.workspace = true
+# E02 post-epic (Display-P3 / AdobeRGB input transform): resolving an embedded
+# ICC profile to a *named* colour space is colour science, and E02 owns colour
+# science. This crate calls `lightbox_color::classify_icc_source_space` and
+# stores the answer; it parses no ICC bytes of its own (the hardened,
+# size-capped `IccProfile::from_bytes` stays the only parsing path). The edge
+# is preview → color → decode, the same direction color already depends in, so
+# there is no cycle; LCMS2 was already in the workspace graph.
+lightbox-color.workspace = true
+lightbox-decode.workspace = true
+lightbox-jobs.workspace = true
+lightbox-types.workspace = true
+ciborium.workspace = true
+fast_image_resize.workspace = true
+memmap2.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+twox-hash.workspace = true
+uuid.workspace = true
+zstd.workspace = true
+zune-jpeg.workspace = true
+# E03 Phase F (T22): `thumbcache.sqlite` is its OWN store, a separate SQLite
+# DB/connection, deliberately NOT routed through `lightbox-catalog`'s
+# single-writer `Catalog` type (that type IS the main edit/catalog DB; a
+# delete-safe, disposable thumbnail atlas is not part of that invariant).
+# `rusqlite` is already in-graph transitively via `lightbox-catalog`; this is
+# a direct dependency, not a new license/native surface (bundled SQLite
+# amalgamation, public domain, same as the workspace-pinned feature set).
+rusqlite.workspace = true
+# E03 Phase F (T21): `statvfs` for the ENOSPC pre-flight free-space probe
+# (unix only; `rawcache/diskspace.rs`). Already an in-graph workspace
+# dependency (E02's LibRaw sandbox), no new license/native surface.
+libc.workspace = true
+# T1 JPEG backend (T10), always available, unconditional dependency. See
+# the workspace Cargo.toml's own comment for the mozjpeg-vs-jpeg-encoder
+# codec reconciliation (measured latency, not a build-failure fallback).
+jpeg-encoder.workspace = true
+# JXL decode (T11), pure-Rust, always buildable, but only ever exercised
+# behind the `jxl` feature (a JXL file can only exist on disk if something
+# encoded one, and encode is feature-gated, see `codec/jxl.rs`). Kept as an
+# optional/feature-gated dep too so the default build's dependency graph
+# stays JXL-free, matching the "default build never needs libjxl" mandate.
+jxl-oxide = { workspace = true, optional = true }
+
+[build-dependencies]
+# Only invoked when built with `--features jxl` (see build.rs), generates
+# the libjxl encoder FFI surface from installed headers. Optional so the
+# default build never compiles bindgen or needs libclang.
+bindgen = { workspace = true, optional = true }
+
+[features]
+default = []
+# T11: own minimal libjxl encode FFI + jxl-oxide decode. OFF by default
+# this build machine has no libjxl installed, so this feature is unverified
+# here (E03-deviations.md, Phase C T11). With it off, T1 falls back to the
+# JPEG codec with no API change (spec Risk R1's reversal trigger).
+jxl = ["dep:jxl-oxide", "dep:bindgen"]
+
+[dev-dependencies]
+criterion.workspace = true
+fastrand.workspace = true
+tempfile.workspace = true
+
+[[bench]]
+name = "preview_budgets"
+harness = false
+
+[lints]
+workspace = true

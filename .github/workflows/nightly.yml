@@ -1,0 +1,379 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# Nightly gates (E01 spec §5 T13/T28, §6, DoD §8.3; E03 spec §8/§11 DoD #4):
+# the 1000-iteration kill -9 fault-injection run at 0 corruptions / 0 lost
+# commits, its E03 Phase F nightly-full siblings (blob/T2/T0-T1-rawcache/
+# relocate crash loops), plus the perf scenario harness, lbx-perf
+# (import-1k, page-query @100k, nav-swap), the scripted perf-strip capture
+# (E08 H2, via lbx-perf --scenario perf-strip),
+# and the criterion micro-benches (catalog/decode/color/preview §6-§7
+# budgets). Perf regressions are REPORTED (job summary + tracked issue),
+# never blocking (spec §8: "regression ⇒ tracked issue, non-blocking"), the
+# fault-injection legs ARE blocking (0 corruptions is a hard bar).
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write # perf-regression tracking issues (T28)
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fault-injection:
+    name: kill -9 fault injection x1000 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Crash-safety is filesystem/OS-semantics dependent, run the long
+        # leg on all three platforms, like the PR subset.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      # E03's T0/T1/raw-cache crash loop (below) needs the real pinned raw
+      # fixture corpus (it decodes an actual CR2), the other legs on this
+      # job (catalog/blob/T2/relocate) are all synthetic and need nothing.
+      - name: Cache fixture corpus
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
+
+      - name: Fetch + verify pinned fixtures
+        run: cargo run -p xtask -- fixtures
+
+      - name: fault injection (1000 iterations, release)
+        env:
+          LIGHTBOX_FAULT_ITERS: "1000"
+        run: >
+          cargo test -p lightbox-catalog --test fault_injection --release --
+          kill9_leaves_catalog_clean_and_committed_txns_present
+          --exact --nocapture
+
+      # E03 Phase F (T21/T23): the nightly-full leg of the crash-loop suite
+      # split (spec §8: "PR-blocking (fast subset) / nightly (full)", the
+      # PR gate already runs every one of these at its fast default via the
+      # `cargo test --workspace` step in ci.yml; this job re-runs the same
+      # tests at a much higher iteration count for a stronger crash-safety
+      # signal, matching the catalog fault-injection step immediately above.
+      - name: E03 blob atomic-write crash loop (300 iterations, release)
+        env:
+          LIGHTBOX_BLOB_FAULT_ITERS: "300"
+        run: >
+          cargo test -p lightbox-preview --test blob_crash_loop --release --
+          kill9_during_blob_writes_leaves_zero_torn_visible_files
+          --exact --nocapture
+
+      - name: E03 T2 manifest crash loop (150 iterations, release)
+        env:
+          LIGHTBOX_T2_FAULT_ITERS: "150"
+        run: >
+          cargo test -p lightbox-preview --lib --release --
+          t2_crash_loop::kill9_during_t2_builds_leaves_every_present_tile_readable
+          --exact --nocapture
+
+      - name: E03 T0/T1/raw-cache write-path crash loop (300 iterations, release)
+        env:
+          LIGHTBOX_STORE_FAULT_ITERS: "300"
+        run: >
+          cargo test -p lightbox-preview --lib --release --
+          store_crash_loop::kill9_across_preview_and_rawcache_writes_leaves_the_store_verify_clean
+          --exact --nocapture
+
+      - name: E03 journaled-relocate crash loop (60 iterations, release)
+        env:
+          LIGHTBOX_RELOCATE_FAULT_ITERS: "60"
+        run: >
+          cargo test -p lightbox-preview --lib --release --
+          relocate_crash_loop::kill9_mid_relocate_then_reopen_resumes_and_completes_with_zero_lost_entries
+          --exact --nocapture
+
+  # E01 Phase 8 (T28): the perf scenario harness. Publishes a per-OS table
+  # to the job summary; compares against the committed dev-machine baselines
+  # + the absolute §6/§7 budgets (page-query p95 < 100 ms @100 k, nav-swap
+  # p95 < 50 ms). Non-blocking: regressions file/refresh a tracked issue.
+  perf:
+    name: perf scenarios (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Mesa software Vulkan adapter (lavapipe)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
+          echo "VK_LOADER_DEBUG=error" >> "$GITHUB_ENV"
+
+      - name: Cache fixture corpus
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
+
+      - name: Fetch + verify pinned fixtures
+        run: cargo xtask fixtures
+
+      - name: Run scenario harness (import-1k, page-query @100k, nav-swap)
+        shell: bash
+        run: |
+          cargo run --release -p lbx-perf -- \
+            --out perf-results-${{ matrix.os }}.json \
+            --baseline tools/lbx-perf/baselines.json | tee perf-table.md
+          cat perf-table.md >> "$GITHUB_STEP_SUMMARY"
+
+      # E02 Phase H (H3): + the color/decode pipeline benches (resolve transform,
+      # eval_cpu, display bake, probe, linearize) against the §7.5 budgets.
+      # E03 Phase F (T23): + the §6 preview-pyramid/raw-cache budgets
+      # (best_available@100k, cold T0/T1, warm thumb, raw-cache get/put,
+      # eviction reclaim, `benches/preview_budgets.rs`).
+      - name: Criterion micro-benches (catalog + E02 decode/color + E03 preview pipeline)
+        run: cargo bench -p lightbox-catalog -p lightbox-decode -p lightbox-color -p lightbox-preview
+
+      - name: Upload perf artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ matrix.os }}
+          path: |
+            perf-results-${{ matrix.os }}.json
+            perf-table.md
+            target/criterion/**/estimates.json
+          if-no-files-found: warn
+
+      # Regression ⇒ tracked issue, non-blocking (spec §8). One issue per
+      # OS+day; duplicates are acceptable noise until E16 tooling.
+      - name: File tracked issue on regression
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if grep -q '^REGRESSION' perf-table.md; then
+            gh issue create \
+              --title "nightly perf regression: ${{ matrix.os }} $(date -u +%F)" \
+              --label performance \
+              --body-file perf-table.md || true
+          fi
+
+  # E08 Phase H (H2): the scripted filmstrip-scroll frame-time capture
+  # through the real shell, the named replacement for the retired
+  # `--perf-scroll` grid capture (E08 rescoped the shell into the editor;
+  # see docs/plan/epics/E08-deviations.md "A1 (consequence)" and Phase H).
+  # `lbx-perf --scenario perf-strip` spawns `lightbox --perf-strip` (a
+  # ~300-entry synthetic set, two sawtooth sweeps + a nav phase, develop
+  # rail open), parses its one-line JSON summary, and asserts the §7
+  # budgets BUDGET-FIRST against tools/lbx-perf/baselines.json (frame p95
+  # < 16 ms with the rail open, nav-swap p95 < 50 ms), a regression files
+  # the tracked issue, non-blocking, per E01 semantics. Windowed app on
+  # hosted runners, observational (continue-on-error) like the CI shell
+  # smoke until seen green across the fleet; the dev-machine numbers live
+  # in tools/lbx-perf/baselines.json.
+  strip-scroll:
+    name: perf-strip capture (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the release shell binary under test
+        run: cargo build --release -p lightbox-shell
+
+      - name: Capture (Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxkbcommon-x11-0 mesa-vulkan-drivers libvulkan1
+          xvfb-run -a cargo run --release -p lbx-perf -- \
+            --scenario perf-strip --baseline tools/lbx-perf/baselines.json \
+            | tee strip-table.md
+      - name: Capture
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cargo run --release -p lbx-perf -- \
+            --scenario perf-strip --baseline tools/lbx-perf/baselines.json \
+            | tee strip-table.md
+
+      - name: Publish to summary
+        shell: bash
+        run: |
+          {
+            echo '### Filmstrip perf-strip capture (${{ matrix.os }})'
+            cat strip-table.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Regression => tracked issue, non-blocking (E01 semantics; same
+      # convention as the perf job above).
+      - name: File tracked issue on regression
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if grep -q '^REGRESSION' strip-table.md; then
+            gh issue create \
+              --title "nightly perf-strip regression: ${{ matrix.os }} $(date -u +%F)" \
+              --label performance \
+              --body-file strip-table.md || true
+          fi
+
+  # E02 Phase H (H4): AddressSanitizer + LeakSanitizer over the decode + FFI
+  # surfaces, the in-crate permissive walkers, the LCMS2 wrapper
+  # (lightbox-color), and the proxy client (and the libheif path when the `heic`
+  # feature is enabled). Runs the full corpus + adversarial fixtures under ASan;
+  # LSan is on via ASAN_OPTIONS. Needs a nightly toolchain + `-Zbuild-std` so the
+  # std allocator is instrumented too. Non-blocking (nightly); a real UB/leak
+  # fails the job. NOTE: this recipe is committed but UNVERIFIED on the E02 build
+  # machine (macOS, no nightly ASan runner), see E02-deviations.md (H4).
+  # E05 Phase F (F1/F4, DoD #4/#9): the reference-hardware perf gate and the
+  # extended fuzz/soak legs the E05 spec names as nightly-by-design (§8: "10k
+  # soak" / "24 h fuzz" are not PR-gate steps). Runs on the hosted 3-OS
+  # matrix, NOT the self-hosted RTX-3060/M-series reference runner the spec
+  # names (§7), that runner does not exist yet (recorded in
+  # `docs/plan/epics/E05-deviations.md`, F1). Until it is provisioned this
+  # job's p95 numbers are indicative time-series data, not the gate of
+  # record; regressions are reported (job summary), never blocking, matching
+  # the perf job's convention above.
+  e05-extended:
+    name: E05 extended fuzz/soak/perf (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Mesa software Vulkan adapter (lavapipe)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
+          echo "VK_LOADER_DEBUG=error" >> "$GITHUB_ENV"
+
+      # F4: a much larger bounded proptest case count than the PR-blocking
+      # default (2000), a practical stand-in for the spec's 24 h continuous
+      # fuzz run, NOT equivalent to real coverage-guided fuzzing (cargo-fuzz
+      # is not set up here; see fuzz_compile.rs module docs).
+      - name: Extended compiler fuzz (F4)
+        env:
+          PROPTEST_CASES: "200000"
+        run: cargo test -p lightbox-render --release --test fuzz_compile
+
+      # F4: the same bounded concurrency stress test, repeated many times to
+      # widen the window for a scheduling-order-dependent race the single
+      # in-gate run might miss.
+      - name: Repeated concurrency stress (F4)
+        shell: bash
+        run: |
+          for i in $(seq 1 50); do
+            cargo test -p lightbox-render --release --test concurrency_stress -- --exact \
+              concurrent_submit_poll_cancel_never_corrupts_the_ticket_store_or_cache
+          done
+
+      # C10: the full 10k-iteration soak (the in-gate PR run uses a reduced
+      # count, see E05-deviations.md).
+      - name: Full 10k-iteration interactive soak (C10)
+        run: cargo test -p lightbox-render-testkit --release --test soak -- --ignored --nocapture
+
+      # F1: local (non-reference-hardware) slider-latency indicative numbers,
+      # release build, published to the job summary, never asserted against
+      # the <100 ms budget here (that gate needs the §7 reference runner).
+      - name: Slider-latency scenario (F1, indicative only)
+        shell: bash
+        run: |
+          cargo test -p lightbox-render-testkit --release f1_slider_latency -- --nocapture \
+            2>&1 | tee f1-latency.log
+          {
+            echo '### F1 slider-latency (${{ matrix.os }}, NOT the reference-runner gate of record)'
+            echo '```'
+            grep '\[F1\]' f1-latency.log || echo '(no sample captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sanitizers:
+    name: ASan/LSan (decode + FFI surfaces)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: "-Zsanitizer=address"
+      RUSTDOCFLAGS: "-Zsanitizer=address"
+      # LSan is bundled into ASan on Linux; keep leak detection explicit.
+      ASAN_OPTIONS: "detect_leaks=1:detect_stack_use_after_return=1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly with rust-src (build-std)
+        run: |
+          rustup toolchain install nightly --component rust-src --profile minimal
+          rustup default nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cache fixture corpus
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
+
+      - name: Fetch + verify pinned fixtures
+        run: cargo run -p xtask -- fixtures
+
+      # Instrument std too (-Zbuild-std) so allocations across the FFI boundary
+      # are tracked. lightbox-decode owns the raw/DCP/ICC parse surfaces and the
+      # proxy client; lightbox-color owns the LCMS2 wrapper.
+      - name: ASan/LSan over decode + color
+        run: >
+          cargo +nightly test -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          -p lightbox-decode -p lightbox-color

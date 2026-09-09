@@ -1,0 +1,43 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Build outputs
+target/
+dist/
+build/
+node_modules/
+
+# Rust
+**/*.rs.bk
+*.pdb
+
+# Test fixtures: fetched by `cargo xtask fixtures`, never committed —
+# only the pinned manifest is (E01 spec §2 workspace layout).
+/fixtures/*
+!/fixtures/manifest.toml
+
+# Local scratch
+*.log
+.env
+.env.*
+
+# Lightbox catalogs created during local testing
+*.lbdata/
+
+# Editor and tooling scratch, never committed
+.claude/
+.tasks/
+
+# Local, untracked pointer to DEVELOPMENT.md
+CLAUDE.md
+
+# Competitor feature research. Kept locally as working material, not published:
+# it is of no use to anyone outside the project and reads badly next to the
+# mandate's independent-implementation position.
+/docs/research/

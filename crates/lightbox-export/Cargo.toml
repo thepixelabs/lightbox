@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-export"
+description = "Export pipeline — owned by E15"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightbox-types.workspace = true
+lightbox-edit.workspace = true
+lightbox-render.workspace = true
+lightbox-color.workspace = true
+lightbox-jobs.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tracing.workspace = true
+# [E15 core slice] Pixel-post resize (Lanczos3), same crate/API
+# `lightbox-preview`'s T1 pipeline already uses (E03 Phase C); no new
+# license surface.
+fast_image_resize.workspace = true
+# [E15 core slice] The three core-slice encoders: JPEG (already the T1
+# preview backend, ICC-capable via `add_icc_profile`), PNG (iCCP chunk via
+# `Encoder::set_icc_profile`), TIFF (8/16-bit, `Tag::IccProfile` = 34675
+# already defined by the crate). All already workspace deps (E02/E03), no
+# cargo-deny changes needed.
+jpeg-encoder.workspace = true
+png.workspace = true
+tiff.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# JPEG decode-back for the encoder round-trip test (already an in-tree
+# decode dependency, E02/E03), never shipped, test-only.
+zune-jpeg.workspace = true
+
+[lints]
+workspace = true

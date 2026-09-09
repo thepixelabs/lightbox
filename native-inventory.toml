@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# Native-dependency inventory, the SBOM surface-2 PLACEHOLDER (E01 spec
+# §8 DoD 6; architecture §8 license surface 2, owned by E16).
+#
+# Every `*-sys` crate in Cargo.lock must be classified here; CI enforces the
+# match (`cargo xtask lint-native-deps`). A new native dependency therefore
+# lands only with an explicit, reviewed entry, that review is where the
+# license surface-2/3 conversation happens (E16 turns the `bundled-c`
+# entries into a real SBOM with per-binary license attribution).
+#
+# kinds:
+#   bundled-c    compiles/links VENDORED C or C++ sources into our binaries
+#                (this is the SBOM surface-2 inventory)
+#   os-binding   declarations for OS-provided libraries (linked or dlopened
+#                at runtime; we ship no third-party native code for these)
+#   wasm-binding JS/wasm interface types; no native code at all
+#
+# Limitations (accepted at M0): crates that bundle C without the `-sys`
+# naming convention are not auto-detected, they must be added here by the
+# PR that introduces them. E16 replaces this heuristic with a build-script/
+# `links`-key audit over `cargo metadata`.
+#
+# ---------------------------------------------------------------------------
+# SURFACE-2 SBOM ROW, LibRaw (E02 Phase C, task C7). Documented here as a
+# comment, NOT a `[[package]]` entry: the placeholder checker only models
+# `-sys` CRATES, and LibRaw is not a crate, it is a system library that
+# `lightbox-rawproxy`'s build script DYNAMIC-LINKS *only* under the (off-by-
+# default) `libraw` feature. It never enters the crate graph (deny.toml bans
+# rawler/dnglab; there is no libraw `-sys` crate) and never links into any app
+# binary, the app spawns `lightbox-rawproxy` as a subprocess.
+#
+#   library     : LibRaw
+#   version     : 0.22.x (build-machine: Homebrew 0.22.1)
+#   license     : LGPL-2.1  (dynamic-link + relink obligation satisfied; the
+#                 proxy links libraw.dylib/.so at runtime, never static)
+#   linkage     : dynamic, out-of-process (lightbox-rawproxy sandbox only)
+#   feature     : `libraw` (default OFF, default build links nothing native)
+#   transitive  : jpeg-turbo, libtiff, little-cms2 (LibRaw's own deps, dynamic)
+#   audit       : the default proxy binary carries ZERO LibRaw symbols, see
+#                 `no_libraw_symbols_in_default_proxy_binary`
+#                 (crates/lightbox-rawproxy/tests/proxy_integration.rs).
+#
+# E16 turns this comment into a real per-artifact SBOM entry once the inventory
+# model grows a "dynamic-external" kind. Until then this is the recorded row.
+# ---------------------------------------------------------------------------
+
+[[package]]
+name = "libsqlite3-sys"
+kind = "bundled-c"
+note = "SQLite amalgamation via rusqlite `bundled` (spec §4.2 mandates bundling; public domain)"
+
+[[package]]
+name = "zstd-sys"
+kind = "bundled-c"
+note = "vendored libzstd (BSD-3-Clause/MIT) for verified catalog backups (spec §3.2)"
+
+[[package]]
+name = "lcms2-sys"
+kind = "bundled-c"
+note = "vendored Little-CMS2 (MIT), STATIC, for E02 color management (working/display/output transforms). The GPL-3 fast_float plugin is NEVER enabled (E02 §Risks R2 / D1 assert). LibRaw stays out-of-process in lightbox-rawproxy — never a -sys crate."
+
+[[package]]
+name = "clang-sys"
+kind = "os-binding"
+note = "E03 Phase C (T11): `bindgen`'s libclang binding, pulled in ONLY by lightbox-preview's `jxl` feature (default OFF) to generate the libjxl encoder FFI surface at build time — see crates/lightbox-preview/build.rs. Best-fit classification, not a perfect one: unlike this inventory's other `os-binding` rows, libclang is loaded at BUILD time (bindgen's default `runtime`/dlopen path, never statically linked), not by the shipped app binary at runtime — no clang-sys/libclang code, symbols, or bytes ship in any Lightbox binary. Kept as `os-binding` (not `bundled-c`: nothing here is compiled/linked INTO our binaries) since the inventory's three kinds have no dedicated 'build-tool-only' bucket; flagged for whoever adds one (E16)."
+
+[[package]]
+name = "core-foundation-sys"
+kind = "os-binding"
+note = "macOS CoreFoundation declarations (winit/wgpu)"
+
+[[package]]
+name = "jni-sys"
+kind = "os-binding"
+note = "JNI declarations (winit's android leg; never built for our targets)"
+
+[[package]]
+name = "js-sys"
+kind = "wasm-binding"
+note = "wasm-bindgen JS types (wgpu/winit wasm leg; never built for our targets)"
+
+[[package]]
+name = "linux-raw-sys"
+kind = "os-binding"
+note = "Linux syscall ABI constants (rustix); pure declarations"
+
+[[package]]
+name = "ndk-sys"
+kind = "os-binding"
+note = "Android NDK declarations (winit's android leg; never built for our targets)"
+
+[[package]]
+name = "objc-sys"
+kind = "os-binding"
+note = "Objective-C runtime declarations, macOS (winit)"
+
+[[package]]
+name = "renderdoc-sys"
+kind = "os-binding"
+note = "RenderDoc in-app API declarations (wgpu debug hook; dlopened only if RenderDoc is present)"
+
+[[package]]
+name = "wayland-sys"
+kind = "os-binding"
+note = "libwayland declarations, dlopened at runtime on Linux (winit)"
+
+[[package]]
+name = "web-sys"
+kind = "wasm-binding"
+note = "wasm-bindgen web API types (wgpu/winit wasm leg; never built for our targets)"
+
+[[package]]
+name = "windows-sys"
+kind = "os-binding"
+note = "Windows API declarations (winit/wgpu/rustix)"

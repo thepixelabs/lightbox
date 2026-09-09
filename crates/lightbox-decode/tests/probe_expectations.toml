@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# Committed probe expectations for the pinned fixture corpus (E01 spec §5
+# T19 AC). One entry per fixture in fixtures/manifest.toml; values verified
+# against an independent (python) container walk at authoring time and
+# sanity-checked against the cameras' published specs. The fixtures are
+# hash-pinned, so these values can only change if probe() changes, which is
+# exactly what this file is here to catch.
+#
+# Notes:
+# - `width`/`height` are the probe's full-size dims: EXIF PixelX/YDimension
+#   when present (authoritative under crop modes), else the largest non-preview
+#   IFD (sensor-area dims, e.g. the E-1's 2624x1966), else the largest
+#   embedded preview's SOF dims (the RAF path).
+# - `embedded` is sorted largest-first; byte ranges are absolute in the file.
+# - The corrupt corpus asserts `error = "malformed"`, an Err, never a panic.
+
+[[fixture]]
+name = "canon-eos-350d.cr2"
+format = "CR2"
+width = 3456
+height = 2304
+orientation = 1
+make = "Canon"
+model = "Canon EOS 350D DIGITAL"
+capture_time = "2008-05-23T14:51:02"
+embedded = [
+  { width = 3456, height = 2304, start = 9728, end = 3352208 },
+  { width = 160, height = 120, start = 3352720, end = 3360210 },
+]
+
+[[fixture]]
+name = "canon-eos-r6.cr3"
+format = "CR3"
+width = 3408
+height = 2272
+orientation = 1
+make = "Canon"
+model = "Canon EOS R6"
+capture_time = "2021-05-12T12:21:21+02:00"
+embedded = [
+  { width = 3408, height = 2272, start = 492032, end = 1454707 },
+  { width = 1620, height = 1080, start = 102176, end = 491626 },
+  { width = 160, height = 120, start = 18288, end = 34293 },
+]
+
+[[fixture]]
+name = "nikon-d4s.nef"
+format = "NEF"
+width = 2464   # small-raw (sRAW) capture; the raw SubIFD's own dims
+height = 1640
+orientation = 1
+make = "NIKON CORPORATION"
+model = "NIKON D4S"
+capture_time = "2018-01-13T16:13:41"
+embedded = [
+  { width = 2464, height = 1640, start = 1114624, end = 1451490 },
+  { width = 1620, height = 1080, start = 242688, end = 1114572 },
+]
+
+[[fixture]]
+name = "nikon-z6.nef"
+format = "NEF"
+width = 4548   # DX-crop capture; the raw SubIFD's own dims
+height = 3030
+orientation = 1
+make = "NIKON CORPORATION"
+model = "NIKON Z 6"
+capture_time = "2019-11-29T17:15:20+01:00"
+embedded = [
+  { width = 3024, height = 2016, start = 2166272, end = 2598760 },
+  { width = 1620, height = 1080, start = 1428992, end = 2166035 },
+]
+
+[[fixture]]
+name = "sony-ilce7s.arw"
+format = "ARW"
+width = 2768   # APS-C-crop capture; EXIF PixelX/YDimension
+height = 1848
+orientation = 1
+make = "SONY"
+model = "ILCE-7S"
+capture_time = "2017-07-13T16:58:28"
+embedded = [
+  { width = 1616, height = 1080, start = 144034, end = 878152 },
+  { width = 160, height = 120, start = 38516, end = 47424 },
+]
+
+[[fixture]]
+name = "fujifilm-xt1.raf"
+format = "RAF"
+width = 1920   # dims of the embedded rendition (RAF metadata = its JPEG)
+height = 1280
+orientation = 1
+make = "FUJIFILM"
+model = "X-T1"
+capture_time = "2017-12-29T11:09:16"
+embedded = [
+  { width = 1920, height = 1280, start = 148, end = 874779 },
+]
+
+[[fixture]]
+name = "fujifilm-x100.raf"
+format = "RAF"
+width = 2176
+height = 1448
+orientation = 1
+make = "FUJIFILM"
+model = "FinePix X100"
+capture_time = "2014-07-21T16:50:55"
+embedded = [
+  { width = 2176, height = 1448, start = 148, end = 767499 },
+]
+
+[[fixture]]
+name = "olympus-e1.orf"
+format = "ORF"
+width = 2624   # sensor-area dims from the raw IFD (output crop is 2560x1920)
+height = 1966
+orientation = 1
+make = "OLYMPUS CORPORATION"
+model = "E-1"
+capture_time = "2006-12-10T11:20:15"
+# The E-1 carries only a 160x120 thumbnail, the spec's "tiny embedded
+# preview" case (T20 AC: the preview provider reports NoEmbedded for it).
+embedded = [
+  { width = 160, height = 120, start = 11942, end = 18337 },
+]
+
+[[fixture]]
+name = "sigma-fp.dng"
+format = "DNG"
+width = 1936   # 16:9 crop capture; the raw IFD0's own dims
+height = 1090
+orientation = 1
+make = "SIGMA"
+model = "SIGMA fp"
+capture_time = "2024-02-29T19:09:57-04:00"
+# This DNG has no JPEG rendition at all (IFD0 is the CFA mosaic itself)
+# the spec's "no embedded preview" case.
+embedded = []
+
+[[fixture]]
+name = "lightbox-tiny.jpg"
+format = "JPEG"
+width = 16
+height = 16
+orientation = 1
+# A JPEG original is its own embedded preview (whole-file byte range) so the
+# M0 preview pipeline serves imported JPEGs uniformly.
+embedded = [{ width = 16, height = 16, start = 0, end = 826 }]
+
+[[fixture]]
+name = "gradient-8x8.png"
+format = "PNG"
+width = 8
+height = 8
+orientation = 1
+embedded = []
+
+[[fixture]]
+name = "gradient-8x8.tiff"
+format = "TIFF"
+width = 8
+height = 8
+orientation = 1
+embedded = []
+
+[[fixture]]
+name = "corrupt-truncated.cr2"
+error = "malformed"
+
+[[fixture]]
+name = "corrupt-garbage.nef"
+error = "malformed"

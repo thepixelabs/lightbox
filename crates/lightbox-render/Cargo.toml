@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-render"
+description = "GPU render engine seed: GpuContext, Engine ticket lifecycle, NodeRegistry, DisplayTransformNode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightbox-types.workspace = true
+lightbox-edit.workspace = true
+lightbox-jobs.workspace = true
+# E05: engine-owned xform.display node consumes color math from lightbox-color
+# (the engine contains ZERO color science, it calls into color, per E02).
+# Superset dep declared by the scaffold so the A-gpu wave fills the node body
+# without touching this manifest.
+lightbox-color.workspace = true
+wgpu.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+twox-hash.workspace = true
+pollster.workspace = true
+# The display.transform CPU path (spec §3.4/§5 T24 names rayon).
+rayon.workspace = true
+# E05 render node-graph engine deps (spec §2/§3). Declared here by the
+# scaffold so downstream phase agents touch strictly-disjoint source files,
+# never this manifest. Some are unused-in-scaffold (superset, per deliverable D).
+blake3.workspace = true
+half.workspace = true
+wide.workspace = true
+petgraph.workspace = true
+# broadcast/watch channels for EngineEvent / CanvasFrame (spec §3.6/§3.7).
+tokio = { workspace = true, features = ["sync"] }
+# E10 Phase D task D8 (`nodes/common/lut3d.rs`): HaldCLUT packs are PNG images
+# (identity-cube images at level 8/12). Already a workspace-pinned dep used by
+# lightbox-decode/lightbox-export/lightbox-render-testkit (surface-1 clean,
+# MIT/Apache-2.0, already `cargo deny`-covered), no new license surface.
+png.workspace = true
+
+[build-dependencies]
+# E05 A6 (A-gpu): naga-validate every WGSL shader at BUILD time (invalid WGSL
+# fails the build, not runtime). naga is wgpu's own shader front-end, already
+# vendored in the graph at the pinned wgpu major, no new external surface.
+naga = { version = "29", features = ["wgsl-in"] }
+
+[dev-dependencies]
+pollster.workspace = true
+# Golden-image + CPU/GPU parity tests (spec §5 T22-T24).
+lbx-image-compare.workspace = true
+# E05 A-core unit/property tests: serde round-trips (A2) + canonical-CBOR
+# order-independence property (A3).
+serde_json.workspace = true
+proptest.workspace = true
+# A-gpu integration tests (ng_gpu.rs) construct f16 working-format pixels.
+half.workspace = true
+# E05 Phase B cache integration tests (ng_cache.rs) + benches build KernelSalts
+# and content keys directly.
+blake3.workspace = true
+# E05 Phase B micro-benches (task B8): tail-only recompute vs full-graph,
+# cache hit rate under slider churn.
+criterion.workspace = true
+# E05 Phase E: the CPU/GPU parity gate (E6, ng_parity.rs) reuses the testkit's
+# validated ΔE2000 (Sharma-Wu-Dalal) / PSNR comparators as the single ground
+# truth. This is a dev-only edge, the render *library* never depends on the
+# dev/test testkit; only its test target does (Cargo permits the dev-dep cycle).
+lightbox-render-testkit = { path = "../lightbox-render-testkit" }
+
+[[bench]]
+name = "cache"
+harness = false
+
+[lints]
+workspace = true

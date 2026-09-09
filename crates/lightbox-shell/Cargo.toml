@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-shell"
+description = "egui/eframe UI shell sharing one wgpu device with the render engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lightbox"
+path = "src/main.rs"
+
+[dependencies]
+lightbox-color.workspace = true
+lightbox-core.workspace = true
+lightbox-edit.workspace = true
+lightbox-jobs.workspace = true
+lightbox-preview.workspace = true
+lightbox-render.workspace = true
+lightbox-types.workspace = true
+# E15 core slice: the Export dialog's settings model (`ExportSettings` and
+# friends), the shell never talks to the render engine or encoders
+# directly, only `Command::Export`/`Event::Export*` (headless-boundary
+# lint, §2.3 seam 1).
+lightbox-export.workspace = true
+eframe.workspace = true
+wgpu.workspace = true
+# `sync` only: Session::events() hands out a tokio broadcast Receiver (the
+# frozen §3.8 surface); the frame pump drains it with try_recv.
+tokio = { workspace = true, features = ["sync"] }
+# Smoke mode stages its throwaway catalog + import source in a temp dir.
+tempfile.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+# A3: the native OS open dialog behind "Open Files…"/"Open Folder…".
+rfd.workspace = true
+# D3: keymap.toml override persistence (delta-only; spec §5.2). Already in
+# the workspace graph via lightbox-color/-decode/-preview.
+toml.workspace = true
+# Developer `--screenshot` capture writes the viewport as a PNG (the same
+# workspace image-rs codec the export/golden paths already use). Encoder
+# only; nothing on the normal frame path touches it.
+png.workspace = true
+
+[dev-dependencies]
+# UI testing (spec §9): headless kittest harnesses for the intake/empty-state
+# widget tests. Never a runtime dependency of the shipped binary.
+egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
+# D3 AC: keymap-override round-trip property test.
+proptest.workspace = true
+# Panel-layout persistence round trip against a real `prefs.toml`.
+tempfile.workspace = true
+
+[lints]
+workspace = true

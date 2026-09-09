@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Privacy: Lightbox</title>
+<meta name="description" content="What this website measures, what it does not, and what the Lightbox application itself sends.">
+<meta name="theme-color" content="#08090a">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="index, follow">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/site.css">
+<style>
+  .doc{ max-width:720px; margin-inline:auto; padding:clamp(96px,12vh,160px) var(--pad) 96px; }
+  .doc h1{ font-family:var(--display); font-weight:800; letter-spacing:-.035em;
+           font-size:clamp(2rem,4vw,2.9rem); line-height:1.05; margin:0 0 8px; }
+  .doc .stamp{ color:var(--ink-4); margin:0 0 40px; }
+  .doc h2{ font-family:var(--display); font-weight:650; letter-spacing:-.02em;
+           font-size:1.15rem; margin:44px 0 12px; }
+  .doc p{ color:var(--ink-2); line-height:1.7; margin:0 0 16px; }
+  .doc ul{ color:var(--ink-2); line-height:1.7; padding-left:20px; margin:0 0 16px; }
+  .doc li{ margin-bottom:6px; }
+  .doc a{ color:var(--accent-hi); text-decoration:none; border-bottom:1px solid rgba(116,163,200,.35); }
+  .doc a:hover{ border-bottom-color:var(--accent-hi); }
+  .back{ display:inline-block; margin-bottom:32px; color:var(--ink-3); text-decoration:none; }
+  .back:hover{ color:var(--ink); }
+</style>
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<main class="doc">
+  <a class="back mono" href="./">&larr; Lightbox</a>
+
+  <h1>Privacy</h1>
+  <p class="stamp mono">Last updated 9 September 2026</p>
+
+  <p>Two different things are worth separating here: this website, and the Lightbox application you install. They are not the same and they do not collect the same things.</p>
+
+  <h2>This website</h2>
+
+  <p>This page and the rest of the site use Cloudflare Web Analytics. It counts visits so we can tell whether anyone is reading this and where they arrived from. It sets no cookies, it does not fingerprint your browser, and it does not follow you to any other site.</p>
+
+  <p>What it records:</p>
+  <ul>
+    <li>Which pages were loaded, and how long they took</li>
+    <li>The site you arrived from, if any</li>
+    <li>Country, browser, operating system and rough device type</li>
+  </ul>
+
+  <p>What it does not record: your IP address in any stored form, any identifier that persists between visits, and anything that could pick you out from anyone else who visited the same page from the same country on the same kind of device. There is no advertising on this site and nothing here is sold or shared with anyone.</p>
+
+  <p>Because none of it is personal data and nothing is stored on your device, there is no cookie banner to click through. That is the point of choosing this over the alternative.</p>
+
+  <h2>The Lightbox application</h2>
+
+  <p>Lightbox does not send anything anywhere today. It has no account system, no sync, and no update check.</p>
+
+  <p>That will change: we intend to add anonymous usage reporting, so we can see which controls people actually reach for and stop guessing. When it arrives you will be asked on first run, you will be able to say no, and you will be able to turn it off afterwards in Preferences.</p>
+
+  <p>The line we will hold, and which you can check in the source because the source is public: <strong>it will never include your files, your filenames, or anything from inside your photographs.</strong> We do not upload your pictures, we do not look at them, and we will not train anything on them.</p>
+
+  <h2>Getting in touch</h2>
+
+  <p>Questions about any of this go to <a href="mailto:privacy@pixelabs.net">privacy@pixelabs.net</a>. If you think something here is wrong, or that the code does not match what this page says, please open an issue on <a href="https://github.com/thepixelabs/lightbox">GitHub</a>, because that is a bug worth fixing quickly.</p>
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <p class="footer-fine">Copyright 2026 PixeLabs. Lightbox is an independent implementation and is not affiliated with, endorsed by, or derived from any other photo editing product.</p>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# cargo-deny, CI license surface 1 of 3 (E01 spec §5 T3; architecture §1.6/§8).
+#
+# Surface 1 (this file) gates the RUST CRATE GRAPH: permissive licenses only.
+# GPL/AGPL/LGPL are denied here by construction, the allowlist below is
+# exhaustive, so any copyleft license fails `cargo deny check licenses`.
+# LGPL code may enter the *product* only via dynamically-linked C libraries in
+# later epics; those are audited by surface 2 (native-binary SBOM, E16), and
+# bundled content/data by surface 3 (data manifest, E16). See
+# docs/plan/licensing.md.
+#
+# CI runs: cargo deny check licenses bans sources
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+# Lightbox's own crates are AGPL-3.0-or-later and every one of them is
+# `publish = false`, so they are skipped here rather than allowlisted.
+# Allowlisting AGPL would also admit THIRD-PARTY AGPL crates, which is exactly
+# what must not happen: PixeLabs sells a commercial license alongside the AGPL,
+# and anything that cannot be relicensed proprietarily cannot ship in the
+# product.
+private = { ignore = true }
+
+# The allowlist below is unchanged by the move to copyleft, and the reason it
+# exists has changed rather than gone away. Under Apache-2.0 the binding
+# constraint was the outbound license. It is now the COMMERCIAL license, which
+# is a strictly tighter constraint: a dependency Lightbox cannot sublicense to a
+# paying customer cannot be linked in, whatever the AGPL would permit. Additions
+# require a licensing review PR that updates docs/plan/licensing.md alongside
+# this file.
+allow = [
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Apache-2.0",
+  "Zlib",
+  "Unicode-3.0",
+  "ISC",
+  "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+# Scoped, per-crate exceptions (NOT global allowlist additions, the global
+# list above stays exactly the spec §5 T3 set). Each entry names why it is
+# acceptable; all are recorded in docs/plan/epics/E01-deviations.md (Phase 2)
+# and flagged for licensing review.
+exceptions = [
+  # Boost Software License 1.0, OSI-approved permissive (Boost, NOT the
+  # "Business Source License"). Windows clipboard support pulled in by
+  # egui-winit → arboard. Consistent with Phase 1's stance of not adding
+  # BSL-1.0 globally (xxhash-rust was swapped out instead of allowlisted).
+  { crate = "clipboard-win", allow = ["BSL-1.0"] },
+  { crate = "error-code", allow = ["BSL-1.0"] },
+  # egui's embedded UI fonts. OFL-1.1 and Ubuntu-font-1.0 are font licenses
+  # permitting embedding/redistribution with attribution; they apply to the
+  # font DATA, making this the first entry of license surface 3 (bundled
+  # content, E16) rather than a code-license question. Flagged for review.
+  { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+  # E03 Phase C (T10): the T1 JPEG backend (`jpeg-encoder`, pure Rust
+  # see the workspace Cargo.toml's comment for the mozjpeg-vs-jpeg-encoder
+  # measurement that picked it). License `(MIT OR Apache-2.0) AND IJG`: MIT/
+  # Apache-2.0 are already allowlisted; IJG (Independent JPEG Group) is a
+  # short, permissive, BSD-like attribution license (libjpeg's own
+  # historical license, crates.io's license metadata attributes it here,
+  # presumably for IJG-derived constants such as standard quantization
+  # tables), not copyleft, just not on the exhaustive surface-1 allowlist.
+  # Flagged for licensing review, same pattern as the BSL-1.0/OFL-1.1
+  # entries above.
+  { crate = "jpeg-encoder", allow = ["IJG"] },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Intra-workspace path dependencies carry no version; that is fine for
+# private (publish = false) crates.
+allow-wildcard-paths = true
+# Known-bad crates named explicitly (belt over the license suspenders).
+deny = [
+  { crate = "openssl", reason = "native TLS not wanted; use rustls if TLS is ever needed" },
+  # E02 §1.1 / §5.1 / R1: rawler (and dnglab) are LGPL-2.1. The ONLY LGPL code
+  # the product may touch is LibRaw, dynamic-linked and isolated in the
+  # out-of-process lightbox-rawproxy sandbox (surface 2), never a crate
+  # dependency. rawler is banned graph-wide so it can never link into any app
+  # binary; raw mosaic decode is the LibRaw proxy, raw metadata is
+  # lightbox-decode's own permissive TIFF-IFD/EXIF walkers.
+  { crate = "rawler", reason = "LGPL-2.1: cannot be included in a PixeLabs commercial license; raw mosaic decode stays in the out-of-process LibRaw proxy (E02 §1.1/§5.1/R1)" },
+  { crate = "dnglab", reason = "LGPL-2.1: cannot be included in a PixeLabs commercial license; DNG conversion (if ever needed) runs as a subprocess, never linked (E02 §1.2)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # quick-xml 0.39.x DoS advisories (quadratic attribute check; unbounded
+  # namespace allocation). quick-xml enters the graph ONLY as a build-time
+  # dependency of the wayland-scanner proc-macro (Linux windowing codegen),
+  # where it parses the trusted Wayland protocol XML shipped inside the
+  # wayland-protocols crates, never untrusted input, never at runtime.
+  # wayland-scanner (latest 0.31.10) pins quick-xml 0.39; the fix requires
+  # >=0.41, so no compatible upgrade exists yet. Remove these when
+  # wayland-scanner bumps its quick-xml requirement.
+  { id = "RUSTSEC-2026-0194", reason = "build-time-only proc-macro dep parsing trusted protocol XML; no upstream fix available" },
+  { id = "RUSTSEC-2026-0195", reason = "build-time-only proc-macro dep parsing trusted protocol XML; no upstream fix available" },
+]

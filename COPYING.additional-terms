@@ -1,0 +1,78 @@
+Additional terms under section 7 of the GNU Affero General Public License
+========================================================================
+
+Lightbox is licensed to you under the GNU Affero General Public License,
+version 3 or, at your option, any later version. The full text of that
+license is in the file LICENSE.
+
+In addition to that license, and as expressly permitted by section 7(b) of
+it, PixeLabs requires the preservation of the author attribution set out
+below. These terms are applied by PixeLabs as the sole copyright holder in
+the Lightbox material, as section 7 requires.
+
+
+1. Required attribution
+-----------------------
+
+Any work that contains Lightbox or any part of it, and that you convey, or
+that you make available to users remotely through a computer network under
+section 13 of the license, must display the following credit among the
+Appropriate Legal Notices, as defined in section 0 of the license, that the
+work displays:
+
+    Includes Lightbox by PixeLabs
+    https://github.com/thepixelabs/lightbox
+
+The credit must be legible, must be displayed with no less prominence than
+the other Appropriate Legal Notices shown alongside it, and must remain
+present in every copy you convey.
+
+
+2. Preservation of existing notices
+-----------------------------------
+
+You must preserve the copyright notices, the license notices, and the
+notices referring to these additional terms that appear in the source files
+of Lightbox and in the LICENSE and COPYING.additional-terms files, in any
+copy of the source that you convey.
+
+
+3. Scope and limits
+-------------------
+
+This is an attribution and notice preservation requirement of the kind
+permitted by section 7(b), and it is nothing more.
+
+It does not require you to advertise or publicise Lightbox or PixeLabs. It
+does not require you to display the credit anywhere other than in
+Appropriate Legal Notices that your work already displays. It does not
+restrict any right the license grants you. It places no obligation
+whatsoever on anyone who merely runs the software, whether they have
+modified it or not.
+
+These terms apply to the Lightbox material only. You may not apply them to
+material you add.
+
+
+4. Trademarks
+-------------
+
+Nothing here grants any right to use the names "Lightbox" or "PixeLabs", or
+any PixeLabs logo, as a mark for your own product, or in any way that
+suggests PixeLabs endorses your work. Section 7(e) of the license applies.
+The credit required by clause 1 is a statement of fact about the origin of
+the code and is not a use of that kind.
+
+
+5. Commercial licensing
+-----------------------
+
+PixeLabs also offers Lightbox under a separate commercial license, which is
+not subject to the AGPL or to these additional terms. That license suits
+anyone who wants to build Lightbox into a product distributed under their
+own terms, or to offer it as a hosted or networked service, without the
+copyleft obligation. Write to licensing@pixelabs.net.
+
+
+Copyright 2026 PixeLabs. All rights reserved except as granted by the
+license.

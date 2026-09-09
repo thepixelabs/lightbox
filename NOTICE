@@ -1,0 +1,36 @@
+Lightbox
+Copyright 2026 PixeLabs
+https://github.com/thepixelabs/lightbox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by the
+Free Software Foundation, either version 3 of the License, or (at your
+option) any later version, together with the additional terms under section
+7 of that license set out in COPYING.additional-terms.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+A commercial license, which lifts the copyleft obligation, is available from
+PixeLabs. Write to licensing@pixelabs.net.
+
+Third-party components keep their own licenses. Notable obligations that
+travel with any binary distribution:
+
+  * This software is based in part on the work of the Independent JPEG
+    Group.
+
+  * The bundled Inter and JetBrains Mono typefaces are licensed under the
+    SIL Open Font License 1.1. See LICENSES/OFL-1.1.txt.
+
+  * The test fixture corpus is CC0-1.0. Raw files originate from
+    raw.pixls.us; per-file provenance is recorded in fixtures/manifest.toml.
+
+  * Builds configured with the `libraw` feature dynamically link LibRaw
+    (LGPL-2.1) in a separate process. Distributions of such a build must
+    carry the LGPL text and an offer of LibRaw's source.
+
+The complete set of third-party notices is shown in the application's About
+window.

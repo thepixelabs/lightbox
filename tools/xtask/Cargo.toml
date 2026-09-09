@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "xtask"
+description = "Workspace task runner: pinned fixture fetch, CI helpers (migration-registry lint arrives in E01 Phase 3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+twox-hash.workspace = true
+sha2.workspace = true
+# App-icon rasterization for `bundle-mac` (the icon is generated, not a
+# committed asset, see tools/xtask/src/icon.rs).
+png.workspace = true
+
+[lints]
+workspace = true

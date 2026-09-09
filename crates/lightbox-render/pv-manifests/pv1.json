@@ -1,0 +1,17 @@
+{
+  "pv": 1,
+  "stages": [
+    {
+      "node": "src.decoded",
+      "kernel_salt": "e0e0df4ac00de7ed8cc9bb056c34586bb5c72d7e5d28b749a33f288338c7607c"
+    },
+    {
+      "node": "util.resize",
+      "kernel_salt": "5e91757f67970197a8969227d3b5243fe6621d5fb3c86f251d7a0fbd1b8c6957"
+    },
+    {
+      "node": "xform.display",
+      "kernel_salt": "8521f374af998a6e4447be145702bb4d020435f1b0fea224b737168a65ef96b0"
+    }
+  ]
+}

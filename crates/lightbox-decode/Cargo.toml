@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-decode"
+description = "Probe + embedded-preview extraction; raw decode arrives with E02"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lightbox-jobs.workspace = true
+lightbox-types.workspace = true
+kamadak-exif.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+twox-hash.workspace = true
+# E02 Phase A non-raw decode (permissive codecs).
+zune-jpeg.workspace = true
+png.workspace = true
+tiff.workspace = true
+# Camera-alias table (A4) is TOML data compiled in; DecodedRawState (E03
+# contract, C6) is CBOR, both parsed at runtime by these.
+serde = { workspace = true }
+toml.workspace = true
+ciborium.workspace = true
+# E02 Phase C (C6): the DecodedRawState v1 pixel frame is a zstd frame (§4.2).
+# Appended by Phase C (Phase A did not declare it for lightbox-decode); already
+# in the crate graph via lightbox-catalog, deny-approved (BSD-3-Clause/MIT).
+zstd.workspace = true
+
+[features]
+default = []
+# A8: HEIC decode via libheif (LGPL-3, dyn-link) is OFF by default, libheif
+# is absent on the build machine (E02 §0: A8 DEFERRED). Enabling this feature
+# is a Phase-C/later task that adds the libheif binding; the default build
+# never links it and stays green.
+heic = []
+
+[dev-dependencies]
+criterion.workspace = true
+fastrand.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+
+# T28: hash-throughput micro-bench (nightly perf harness).
+[[bench]]
+name = "hash_throughput"
+harness = false
+
+# E02 Phase H (H3): probe latency (§7.5 ≤ 5 ms p50) + linearize throughput.
+[[bench]]
+name = "decode_pipeline"
+harness = false
+
+[lints]
+workspace = true

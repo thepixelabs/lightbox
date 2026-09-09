@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# Camera-identity alias table (E02 A4, spec §3.6). DATA, not code: this file is
+# `include_str!`-compiled and parsed once at first `normalize_camera` call.
+#
+# Two roles:
+#   [[make]], canonicalize vendor spelling drift. `match` is an ASCII,
+#               case-insensitive PREFIX of the raw EXIF Make; the first entry
+#               whose prefix matches wins, so list more-specific prefixes
+#               first. `canonical` is the joined key stored in
+#               camera_profile.camera_make and used for curated-profile /
+#               lensfun (E11) matching.
+#   [[model]], canonicalize a specific body's model string AFTER the make
+#               token is stripped and whitespace collapsed. `make` is the
+#               canonical make; `match` is the case-insensitive stripped model.
+#
+# This is the initial ~30-alias seed across the corpus makers (A4 acceptance);
+# it grows as bodies are added. Reused verbatim by E11's lensfun matching.
+
+# ---- Make canonicalization (most-specific prefix first) --------------------
+[[make]]
+match = "NIKON CORPORATION"
+canonical = "Nikon"
+[[make]]
+match = "NIKON"
+canonical = "Nikon"
+[[make]]
+match = "CANON"
+canonical = "Canon"
+[[make]]
+match = "SONY"
+canonical = "Sony"
+[[make]]
+match = "FUJIFILM"
+canonical = "Fujifilm"
+[[make]]
+match = "OM DIGITAL SOLUTIONS"
+canonical = "OM System"
+[[make]]
+match = "OLYMPUS IMAGING CORP."
+canonical = "Olympus"
+[[make]]
+match = "OLYMPUS CORPORATION"
+canonical = "Olympus"
+[[make]]
+match = "OLYMPUS"
+canonical = "Olympus"
+[[make]]
+match = "PANASONIC"
+canonical = "Panasonic"
+[[make]]
+match = "MATSUSHITA"
+canonical = "Panasonic"
+[[make]]
+match = "RICOH IMAGING COMPANY, LTD."
+canonical = "Pentax"
+[[make]]
+match = "PENTAX RICOH IMAGING"
+canonical = "Pentax"
+[[make]]
+match = "PENTAX"
+canonical = "Pentax"
+[[make]]
+match = "SIGMA"
+canonical = "Sigma"
+[[make]]
+match = "LEICA CAMERA AG"
+canonical = "Leica"
+[[make]]
+match = "HASSELBLAD"
+canonical = "Hasselblad"
+[[make]]
+match = "EASTMAN KODAK COMPANY"
+canonical = "Kodak"
+
+# ---- Model canonicalization (make + stripped model) ------------------------
+# Nikon Z bodies: EXIF writes the mount with a space ("Z 6"); the catalog key
+# and marketing name drop it ("Z6"). Second-gen bodies use a "_2" suffix.
+[[model]]
+make = "Nikon"
+match = "Z 6"
+canonical = "Z6"
+[[model]]
+make = "Nikon"
+match = "Z 7"
+canonical = "Z7"
+[[model]]
+make = "Nikon"
+match = "Z 9"
+canonical = "Z9"
+[[model]]
+make = "Nikon"
+match = "Z 5"
+canonical = "Z5"
+[[model]]
+make = "Nikon"
+match = "Z 8"
+canonical = "Z8"
+[[model]]
+make = "Nikon"
+match = "Z 6_2"
+canonical = "Z6II"
+[[model]]
+make = "Nikon"
+match = "Z 7_2"
+canonical = "Z7II"
+[[model]]
+make = "Nikon"
+match = "Z 50"
+canonical = "Z50"
+# Fujifilm hyphenation is already canonical in EXIF ("X-T1", "X100"); no
+# rewrite needed. Sony ILCE model codes are kept verbatim (they ARE the curated
+# key, e.g. ILCE-7M4.dcp, spec §4.3), so no Sony model aliases here.

@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-meta"
+description = "XMP substrate: packet parse/serialize, typed property access, atomic sidecar-only I/O (spec §3.5). Owned by E09."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# XMP packets are RDF/XML. This is the §1.6 fallback substrate (own RDF/XML behind
+# the `XmpDoc` API) that E09 Phase D shipped ahead of Phase C's ISO toolkit; the
+# CI-grep encapsulation rule (spec §3.5 / T13) keeps the substrate swappable.
+quick-xml = { workspace = true }
+# Sidecar content stamp: xxh3-128, big-endian, matching the E01 pin convention.
+twox-hash = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

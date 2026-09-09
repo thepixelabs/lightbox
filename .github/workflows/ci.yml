@@ -1,0 +1,161 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# PR gate (E01 spec §5 T2/T3): 3-OS matrix × {fmt, clippy -D warnings, build,
+# test}, plus cargo-deny (license surface 1) and REUSE lint. The wgpu adapter
+# smoke test runs inside `cargo test`: macOS uses Metal, Windows falls back to
+# DX12 WARP, Ubuntu gets a software Vulkan adapter (Mesa lavapipe).
+# The 50-iteration kill -9 fault-injection subset (E01 T13, Risk-5 gate) runs
+# inside `cargo test`; the 1000-iteration leg is in nightly.yml (perf harness
+# T28 joins it in Phase 8).
+#
+# E05 Phase F2 (cross-platform golden subset, §8 DoD #8): this SAME 3-OS
+# `cargo test --workspace` step is also E05's cross-platform gate, it
+# carries the E05.1/E05.2/E05.3 phase gates (A16 single-node golden, B5
+# tail-invalidation, C2 fit-view ≤~8 MP), the D3 fast per-PV golden subset,
+# the E6 CPU/GPU parity + determinism gates, the F4 compiler-fuzz/
+# concurrency-stress subset, and the F5 headless CLI render→golden E2E, once
+# per OS/backend (Metal / DX12-WARP / Vulkan-lavapipe) with the single §4.4
+# ΔE2000 ≤ 1.0 / PSNR ≥ 45 dB tolerance, no platform carve-outs. Only the
+# macOS/Metal leg has actually been observed green from this workstation (no
+# lavapipe/WARP installed here); the Windows/Linux legs are configured and
+# committed but unverified from this sandbox, see
+# `docs/plan/epics/E05-deviations.md` (F2).
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  test:
+    name: build-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the toolchain; any rustup-aware invocation
+      # installs it (with rustfmt + clippy) on first use.
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Mesa software Vulkan adapter (lavapipe)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+          echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
+          echo "VK_LOADER_DEBUG=error" >> "$GITHUB_ENV"
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: migration registry lint (E01 T9)
+        run: cargo xtask lint-migrations
+
+      # E01 Phase 8 (DoD 6): SBOM-inventory placeholder, every *-sys crate
+      # in Cargo.lock must be classified in native-inventory.toml; the
+      # bundled-C set stays exactly the two spec-mandated exceptions
+      # (SQLite amalgamation, vendored libzstd) until E02+ adds more via
+      # review. E16 owns the real SBOM (license surface 2).
+      - name: native-dependency inventory (SBOM surface-2 placeholder)
+        run: cargo xtask lint-native-deps
+
+      - name: build
+        run: cargo build --workspace
+
+      # E01 Phase 7 (T27): the CLI is the headless proof of seam 1, its
+      # dependency tree must never contain egui/eframe/winit. `-e normal`
+      # excludes dev-dependencies (tests may use whatever they like).
+      - name: CLI dependency-tree assertion (no egui/eframe/winit)
+        shell: bash
+        run: |
+          tree="$(cargo tree -p lightbox-cli -e normal)"
+          if echo "$tree" | grep -qiE '(^|[ (])(egui|egui-[a-z]+|eframe|winit)[ v]'; then
+            echo "FAIL: lightbox-cli depends on a UI crate:"
+            echo "$tree" | grep -iE 'egui|eframe|winit'
+            exit 1
+          fi
+          echo "OK: lightbox-cli tree is UI-free"
+
+      - name: Cache fixture corpus
+        uses: actions/cache@v4
+        with:
+          path: fixtures
+          key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
+
+      - name: Fetch + verify pinned fixtures
+        run: cargo xtask fixtures
+
+      # `cargo test --workspace` is PR-blocking and carries the per-process-
+      # version golden gates keyed `pv=1` (E02 Phase H, H5): the E02 CPU-reference
+      # golden (lightbox-color `reference/pv1/matrix_base_srgb`), the default-look
+      # golden (`look/pv1`), and the CLI render golden (`cli.render/pv1`), each at
+      # max ΔE2000 ≤ 1.0 ∧ PSNR ≥ 45 dB. `LIGHTBOX_BLESS` is refused in CI, so a
+      # PR can never silently rewrite a frozen pv1 reference; a §5.2 stage-order
+      # change is a NEW process version, never a re-bless (PV-immutability guard).
+      - name: test
+        run: cargo test --workspace
+
+      # E01 Phase 6 (T22): golden-image mismatches write actual/heatmap/golden
+      # PNGs under target/tmp/golden-failures, surfaced as CI artifacts so a
+      # red golden gate is diagnosable without a local repro.
+      - name: Upload golden-image failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures-${{ matrix.os }}
+          path: target/tmp/golden-failures/
+          if-no-files-found: ignore
+
+      # E01 Phase 7 (T25/T26, upgraded from the Phase-2 tracer): zero-copy
+      # seam smoke, boots the real shell on a throwaway catalog, imports an
+      # embedded JPEG through the command bus, opens grid → loupe, and
+      # verifies a texture produced by Engine::submit was composited on the
+      # SHARED wgpu device (exit 1 otherwise). Linux runs under Xvfb;
+      # macOS/Windows use the runner's desktop session.
+      # continue-on-error until observed green across the runner fleet
+      # promotion to a blocking gate is part of the T29 exit drill (recorded
+      # in docs/plan/epics/E01-deviations.md).
+      - name: shell seam smoke (Xvfb)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y xvfb libxkbcommon-x11-0
+          xvfb-run -a cargo run -p lightbox-shell --bin lightbox -- --smoke 60
+      - name: shell seam smoke
+        if: runner.os != 'Linux'
+        continue-on-error: true
+        run: cargo run -p lightbox-shell --bin lightbox -- --smoke 60
+
+  deny:
+    name: cargo-deny (license surface 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+
+  reuse:
+    name: REUSE / SPDX lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5

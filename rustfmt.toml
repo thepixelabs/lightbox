@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# Stable-rustfmt options only; `cargo fmt --all --check` is a PR gate.
+
+edition = "2021"
+newline_style = "Unix"
+use_field_init_shorthand = true

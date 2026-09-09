@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+
+[package]
+name = "lightbox-cli"
+description = "Headless driver over lightbox-core (create/import/list/render/backup/check) — seam-1 proof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+# Seam 1 (spec §3.10/T27): everything goes through lightbox-core. The render
+# types (RenderRequest/GpuContext) and Recipe::identity are the same frozen
+# §3.4/§3.9 surfaces the shell consumes, NEVER lightbox-shell/egui/winit
+# (asserted in CI via `cargo tree`).
+lightbox-core.workspace = true
+lightbox-edit.workspace = true
+lightbox-render.workspace = true
+lightbox-types.workspace = true
+# E15 core slice: the `export` subcommand (single-image path calls
+# `lightbox_export::run::export_one` directly, same "bypass the command bus"
+# convention `render` already uses; the batch path drives `Command::Export`).
+lightbox-export.workspace = true
+# E02 Phase E: the `look-dev` authoring harness loads a `.lblook` and renders
+# the synthetic scene corpus to a base-vs-look contact sheet. (Appended dep; see
+# E02-deviations.md.)
+lightbox-color.workspace = true
+# E02 Phase H (H2): the `probe`/`decode`/`render-ref`/`profile`/`look`
+# subcommands wire the decode→color→look reference path headlessly. `decode`
+# uses the decode crate directly (probe, decode_image, decode_for_develop via
+# the LibRaw proxy supervisor); `profile install`/`list` register color assets
+# in the `camera_profile` registry (migration 0002). (Appended deps; see
+# E02-deviations.md.)
+lightbox-decode.workspace = true
+lightbox-catalog.workspace = true
+# `profile install` hashes the profile file with the canonical streaming
+# xxh3-128 (lightbox_decode::hash_file needs a CancelToken). (Appended dep; see
+# E02-deviations.md.)
+lightbox-jobs.workspace = true
+# PNG encoding for `render --out` (the workspace `png` codec, wrapped by the
+# golden harness's Rgba8Image, no new third-party dependency).
+lbx-image-compare.workspace = true
+# `open --json`'s per-item line type derives Serialize (Appended dep; E04).
+serde.workspace = true
+serde_json.workspace = true
+# `sync` only: Session::events() hands out a tokio broadcast Receiver (the
+# frozen §3.8 surface); draining it needs the broadcast error types.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+# Test-only: E04's corrupt-store E2E forces a WAL checkpoint before
+# bit-flipping the main db file (a small test catalog may never cross
+# SQLite's automatic checkpoint threshold on its own). Not part of the
+# shipped binary's dependency tree (dev-dependency only).
+rusqlite.workspace = true
+
+[lints]
+workspace = true
