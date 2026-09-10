@@ -381,22 +381,6 @@ a{ color:inherit; }
 .hero-credit .sep{ opacity:.4; margin-inline:7px; }
 
 /* =========================================================================
-   STAT STRIP
-   ========================================================================= */
-.strip{ border-block:1px solid var(--line); background:var(--bg-2); }
-.strip-inner{
-  max-width:var(--wrap); margin-inline:auto; padding:34px var(--pad);
-  display:grid; grid-template-columns:repeat(6, 1fr); gap:20px;
-}
-.strip-item{ display:flex; flex-direction:column; gap:3px; }
-.strip-item b{
-  font-size:clamp(1.5rem,2.3vw,2rem); font-weight:600;
-  letter-spacing:-.03em; color:var(--ink);
-  font-family:var(--mono); font-variant-numeric:tabular-nums;
-}
-.strip-item span{ font-size:12.5px; color:var(--ink-4); letter-spacing:.005em; }
-
-/* =========================================================================
    ENTRY
    ========================================================================= */
 .entry-demo{
@@ -961,12 +945,11 @@ a{ color:inherit; }
    RESPONSIVE
    ========================================================================= */
 @media (max-width:1080px){
-  .strip-inner{ grid-template-columns:repeat(3,1fr); row-gap:28px; }
   .grid-tools{ grid-template-columns:repeat(2,1fr); }
   .tool{ grid-column:span 1; }
   .tool-wide{ grid-column:span 2; }
   .status-grid{ grid-template-columns:1fr; }
-  
+}
 @media (max-width:900px){
   .nav-links{ display:none; }
   .nav-brand{ margin-right:auto; }
@@ -988,7 +971,6 @@ a{ color:inherit; }
 }
 
 @media (max-width:680px){
-  .strip-inner{ grid-template-columns:repeat(2,1fr); }
   /* The cue sits over the hero note at this width and says nothing a phone
      user does not already know. */
   .scroll-cue{ display:none; }
@@ -999,7 +981,7 @@ a{ color:inherit; }
   .hero-sticky{ align-items:end; }
   .hero-copy{ padding-bottom:96px; }
   .nav-cta .btn-ghost{ display:none; }
-  
+}
 /* =========================================================================
    MOTION PREFERENCES
    ========================================================================= */

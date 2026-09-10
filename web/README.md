@@ -26,7 +26,7 @@ to a static image.
 | `index.html` | The whole page. One file, sectioned with comments. |
 | `css/site.css` | Design tokens at the top, then sections in page order, responsive rules and reduced-motion overrides at the bottom. |
 | `js/develop.js` | A small raw develop pipeline in WebGL: white balance, exposure, tone, saturation, split tone, vignette and grain, plus histogram read-back from a 128 by 80 offscreen target. |
-| `js/scenes.js` | The canvas set pieces: the render-graph diagram, the interactive tone curve, and the HSL, white balance, crop, histogram and export demonstrations. All share one animation loop that only runs while a scene is on screen. |
+| `js/scenes.js` | The canvas set pieces: the interactive tone curve, and the HSL, white balance, crop, histogram and export demonstrations. All share one animation loop that only runs while a scene is on screen. |
 | `js/site.js` | Navigation, reveal on scroll, counters, the scroll-driven hero develop sequence, the preset picker, the crash-drill terminal and the copy buttons. |
 | `assets/img/` | Photographs and screenshots, WebP only apart from the social card. See the provenance note below. |
 | `assets/fonts/` | Self-hosted webfonts. Inter and JetBrains Mono are Latin subsets of the very TTFs the application embeds; Inter Tight is the Latin subset of the variable face. All SIL OFL 1.1. |
@@ -56,14 +56,18 @@ If you change the imagery, keep both facts true. The claim that these are real
 engine renders is one of the more persuasive things on the page, and it is only
 worth making while it is accurate.
 
-## No third-party requests
+## Third-party requests
 
-The page loads nothing from anyone else's server. No font CDN, no analytics, no
-tag manager, no embedded video. That is deliberate rather than incidental: a
-page arguing that Lightbox never phones home has no business opening a
-connection to Google to draw its own headline, and the claim is easy for a
-sceptical reader to check with the network tab open. If you add anything to
-this page, keep it that way.
+The page self-hosts its fonts and loads no tag manager, no embedded video and
+nothing from a font CDN. There is exactly one external request, and it is
+deliberate: a Cloudflare Web Analytics beacon, which is cookieless, collects no
+personal data and therefore needs no consent banner. It is gated to the
+production host, so running this locally or from a fork sends nothing at all.
+`privacy.html` says what it records.
+
+Keep it to that one. A page arguing that Lightbox never phones home has no
+business opening a connection to Google to draw its own headline, and a
+sceptical reader can check the whole claim with the network tab open.
 
 ## Conventions
 

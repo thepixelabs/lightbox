@@ -153,6 +153,17 @@ jobs:
         with:
           command: check licenses bans sources
 
+  site:
+    # Runs on EVERY push, unlike the Pages deploy, which only fires when a file
+    # under web/ changes. That distinction is the whole point: the commit that
+    # makes the website untrue is a commit to the application code, so a guard
+    # living in the deploy job structurally cannot catch it.
+    name: Website structure and claims
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/site-checks/check_site.py
+
   reuse:
     name: REUSE / SPDX lint
     runs-on: ubuntu-latest

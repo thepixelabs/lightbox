@@ -1,6 +1,6 @@
 /* =========================================================================
    site.js: navigation, scroll choreography, the hero develop sequence,
-   counters, the preset picker, the crash-drill terminal and copy buttons.
+   the preset picker, the develop panel and copy buttons.
    ========================================================================= */
 (function () {
   'use strict';
@@ -60,32 +60,6 @@
       if (n.getBoundingClientRect().bottom < 0) n.classList.add('is-in');
       else io.observe(n);
     });
-  })();
-
-  /* ---------------------------------------------------------------------
-     Counters in the statistics strip
-     --------------------------------------------------------------------- */
-  (function counters() {
-    var nodes = [].slice.call(document.querySelectorAll('[data-count]'));
-    if (!nodes.length) return;
-    var io = new IntersectionObserver(function (entries) {
-      entries.forEach(function (e) {
-        if (!e.isIntersecting) return;
-        var el = e.target;
-        io.unobserve(el);
-        var target = parseFloat(el.getAttribute('data-count'));
-        var suffix = el.getAttribute('data-suffix') || '';
-        if (REDUCED) { el.textContent = target + suffix; return; }
-        var t0 = performance.now(), dur = 1150;
-        (function tick(now) {
-          var p = clamp((now - t0) / dur, 0, 1);
-          var eased = 1 - Math.pow(1 - p, 3);
-          el.textContent = Math.round(target * eased) + (p === 1 ? suffix : '');
-          if (p < 1) requestAnimationFrame(tick);
-        })(t0);
-      });
-    }, { threshold: 0.5 });
-    nodes.forEach(function (n) { io.observe(n); });
   })();
 
   /* ---------------------------------------------------------------------
