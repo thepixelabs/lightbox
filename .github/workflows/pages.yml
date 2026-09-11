@@ -39,16 +39,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Cheap guard against the most common way this page goes stale: a
-      # licence claim in the HTML drifting away from the repository's LICENSE.
-      - name: Check the licence claim still matches
-        run: |
-          set -euo pipefail
-          if grep -qiE 'source[ -]available|polyform|noncommercial' web/index.html; then
-            echo "web/index.html still describes a licence this project no longer uses" >&2
-            exit 1
-          fi
-          grep -q 'Affero' web/index.html
+      # The same checks CI runs, rather than a weaker copy of one of them.
+      # This job used to carry its own inline licence grep that demanded the
+      # literal word "Affero", which failed the deploy the moment the page
+      # started naming the licence by its SPDX identifier instead. Two guards
+      # for one claim is one guard too many: the second only ever drifts.
+      - name: Site structure and claims
+        run: python3 tools/site-checks/check_site.py
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
