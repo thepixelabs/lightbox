@@ -58,3 +58,11 @@ docs/research/
 # the generator. The published WebP and JPEG derivatives under web/assets/img/
 # are what the site serves; web/README.md records how they are produced.
 assets/site-sources/
+
+# Working plans and agent scratch. These live outside the repository by
+# convention; this entry exists so that a stray write inside it cannot be
+# committed by accident.
+/rawplan/
+/.plan/
+/plans/
+*.plan.md

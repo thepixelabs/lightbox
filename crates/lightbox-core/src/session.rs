@@ -59,7 +59,7 @@ use crate::looks::CatalogLookResolver;
 use crate::preview_runtime::TokioBuildRuntime;
 use crate::previews::CatalogAssetLocator;
 use crate::queries::Queries;
-use crate::render_source::{NullDeviceProvider, PreviewSourceProvider, SharedDeviceProvider};
+use crate::render_source::{NullDeviceProvider, SharedDeviceProvider};
 use crate::working_set::{WorkingSetModel, WorkingSetSnapshot};
 
 /// The headless core (spec §3.8): owns the job system; opens sessions.
@@ -164,6 +164,10 @@ struct SessionInner {
     /// E03 Phase D (T14): the build-scheduler facade, additive alongside
     /// `previews` above.
     preview_service: PreviewService,
+    /// Where the pixels for each raw file actually came from, written by the
+    /// source router. The canvas badge and the status notice both read it, so
+    /// the two can never disagree about what the user is looking at.
+    raw_status: crate::raw_source::StatusMap,
     edit_hub: Arc<EditHub>,
     /// E04 (spec §4.5): the session working-set model, `Session::
     /// working_set()`'s backing store.
@@ -272,8 +276,15 @@ impl Session {
             // No adapter: `ForceCpu` below never calls `DeviceProvider`.
             None => Arc::new(NullDeviceProvider),
         };
-        let source_provider: Arc<dyn SourceProvider> =
-            Arc::new(PreviewSourceProvider::new(Arc::clone(&previews)));
+        // Raw files take the sensor path; everything else goes to the same
+        // preview-backed provider it always did. The router owns both and
+        // records which one served each image so the canvas can say so.
+        let router = Arc::new(crate::render_source::RoutingSourceProvider::new(
+            Arc::clone(&previews),
+            Arc::clone(&locator),
+        ));
+        let raw_status = router.status_map();
+        let source_provider: Arc<dyn SourceProvider> = router;
         let backend = if gpu.is_some() {
             BackendPref::Auto
         } else {
@@ -445,6 +456,7 @@ impl Session {
                 scheduler,
                 previews,
                 preview_service,
+                raw_status,
                 edit_hub,
                 working_set,
                 events,
@@ -540,6 +552,22 @@ impl Session {
     /// unused by the live app; see `docs/plan/epics/E05-deviations.md`).
     pub fn engine(&self) -> Arc<Engine> {
         Arc::clone(&self.inner.engine)
+    }
+
+    /// Where `image`'s pixels came from: real sensor data, a disclosed fallback
+    /// to the camera's embedded preview, or not a raw file at all.
+    ///
+    /// Returns [`RawSourceStatus::NotRaw`] for an image that has not been
+    /// rendered yet, because nothing has been decided about it. Callers that
+    /// need to distinguish "not raw" from "not yet decided" should wait for a
+    /// completed render first.
+    pub fn raw_source_status(&self, image: ImageId) -> crate::RawSourceStatus {
+        self.inner
+            .raw_status
+            .read()
+            .ok()
+            .and_then(|m| m.get(&image).cloned())
+            .unwrap_or(crate::RawSourceStatus::NotRaw)
     }
 
     /// The render scheduler (spec §3.7): latest-wins coalescing + the canvas

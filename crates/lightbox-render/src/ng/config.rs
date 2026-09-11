@@ -21,6 +21,21 @@ pub struct EngineConfig {
     pub backend: BackendPref,
     /// Device-lost degradation policy (§4.4).
     pub device_lost_degrade: DegradePolicy,
+    /// Host-memory ceiling for the decoded-source pin, in bytes.
+    ///
+    /// The pin keeps decoded sources in RAM so a render after GPU cache
+    /// eviction or device loss re-uploads without touching
+    /// [`crate::ng::SourceProvider::fetch`]. It used to be unbounded, which was
+    /// survivable only because every entry was a camera's embedded JPEG
+    /// preview: about 12 MB for a 2176x1448 frame. A demosaiced sensor frame
+    /// from the same file is 4310x2870 at `Rgba16F`, near 99 MB, and a 45
+    /// megapixel body lands around 360 MB. Browsing ten raw files would then
+    /// hold gigabytes that nothing could ever release.
+    ///
+    /// Eviction is least recently used, and the image being rendered right now
+    /// is never evicted, so a single source larger than the whole budget still
+    /// renders rather than thrashing.
+    pub source_pin_budget_bytes: usize,
 }
 
 impl Default for EngineConfig {
@@ -31,6 +46,9 @@ impl Default for EngineConfig {
             cpu_threads: None,
             backend: BackendPref::Auto,
             device_lost_degrade: DegradePolicy::default(),
+            // 1 GiB: room for roughly ten embedded previews, or two to three
+            // full sensor frames from a high-resolution body.
+            source_pin_budget_bytes: 1024 * 1024 * 1024,
         }
     }
 }

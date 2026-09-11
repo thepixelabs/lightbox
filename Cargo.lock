@@ -2112,6 +2112,7 @@ version = "0.1.0"
 dependencies = [
  "fastrand",
  "lightbox-catalog",
+ "lightbox-color",
  "lightbox-decode",
  "lightbox-edit",
  "lightbox-export",
@@ -2121,6 +2122,7 @@ dependencies = [
  "lightbox-preview",
  "lightbox-render",
  "lightbox-types",
+ "rayon",
  "serde",
  "tempfile",
  "thiserror 2.0.18",

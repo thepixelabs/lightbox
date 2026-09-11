@@ -135,7 +135,7 @@
       <li><b>Presets</b><span>Thirty-six bundled, plus everything you make</span></li>
     </ul>
 
-    <p class="rail-note reveal"><b>One thing to know before you download.</b> The editor currently grades the finished JPEG your camera embedded in the raw file, and not yet on the sensor data behind it. Full raw decoding through LibRaw is built and bundled, and today only <code>lightbox-cli</code> reaches it. Wiring the sensor path into the editor is the next thing being built.</p>
+    <p class="rail-note reveal"><b>Raw files are graded from sensor data.</b> Not from the small JPEG your camera embedded: Lightbox decodes the sensor through LibRaw, converts it with the colour matrices your camera wrote into the file, and hands the editor the full frame. If the decoder is ever unavailable it falls back to the embedded preview and tells you so, on the canvas, rather than quietly showing you less than you asked for.</p>
 
   </div>
 </section>
@@ -153,72 +153,72 @@
     <div class="looks reveal">
       <div class="lk-grid">
         <figure class="lk">
-          <img src="assets/img/presets/original.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the As shot preset applied">
+          <img src="assets/img/presets/original.webp" srcset="assets/img/presets/original@700.webp 700w, assets/img/presets/original.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the As shot preset applied">
           <figcaption>
             <p class="lk-name">As shot<span class="lk-group">No grade applied</span></p>
             <ul class="lk-vals"><li class="lk-none">No values. This is the file as it came off the card.</li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/glasshouse.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Glasshouse preset applied">
+          <img src="assets/img/presets/glasshouse.webp" srcset="assets/img/presets/glasshouse@700.webp 700w, assets/img/presets/glasshouse.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Glasshouse preset applied">
           <figcaption>
             <p class="lk-name">Glasshouse<span class="lk-group">Tonal</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">-4</span></li><li><span>Highlights</span><span class="mono">+8</span></li><li><span>Shadows</span><span class="mono">+24</span></li><li><span>Whites</span><span class="mono">+22</span></li><li><span>Blacks</span><span class="mono">+4</span></li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/super8.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Super 8 preset applied">
+          <img src="assets/img/presets/super8.webp" srcset="assets/img/presets/super8@700.webp 700w, assets/img/presets/super8.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Super 8 preset applied">
           <figcaption>
             <p class="lk-name">Super 8<span class="lk-group">Retro</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+18</span></li><li><span>Highlights</span><span class="mono">+32</span></li><li><span>Shadows</span><span class="mono">+10</span></li><li><span>Whites</span><span class="mono">-22</span></li><li><span>Blacks</span><span class="mono">+6</span></li><li><span>Vibrance</span><span class="mono">-4</span></li><li><span>Saturation</span><span class="mono">-8</span></li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/sunday-chrome.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Sunday Chrome preset applied">
+          <img src="assets/img/presets/sunday-chrome.webp" srcset="assets/img/presets/sunday-chrome@700.webp 700w, assets/img/presets/sunday-chrome.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Sunday Chrome preset applied">
           <figcaption>
             <p class="lk-name">Sunday Chrome<span class="lk-group">Retro</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+12</span></li><li><span>Highlights</span><span class="mono">+26</span></li><li><span>Shadows</span><span class="mono">+16</span></li><li><span>Whites</span><span class="mono">-20</span></li><li><span>Blacks</span><span class="mono">+18</span></li><li><span>Vibrance</span><span class="mono">-8</span></li><li><span>Saturation</span><span class="mono">-6</span></li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/noir-grain.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Noir Grain preset applied">
+          <img src="assets/img/presets/noir-grain.webp" srcset="assets/img/presets/noir-grain@700.webp 700w, assets/img/presets/noir-grain.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Noir Grain preset applied">
           <figcaption>
             <p class="lk-name">Noir Grain<span class="lk-group">Mono</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+46</span></li><li><span>Highlights</span><span class="mono">+28</span></li><li><span>Shadows</span><span class="mono">-24</span></li><li><span>Whites</span><span class="mono">-16</span></li><li><span>Blacks</span><span class="mono">-28</span></li><li><span>Saturation</span><span class="mono">-100</span></li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/neon-rain.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Neon Rain preset applied">
+          <img src="assets/img/presets/neon-rain.webp" srcset="assets/img/presets/neon-rain@700.webp 700w, assets/img/presets/neon-rain.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Neon Rain preset applied">
           <figcaption>
             <p class="lk-name">Neon Rain<span class="lk-group">Neon</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+26</span></li><li><span>Highlights</span><span class="mono">+26</span></li><li><span>Shadows</span><span class="mono">-10</span></li><li><span>Whites</span><span class="mono">-16</span></li><li><span>Blacks</span><span class="mono">-24</span></li><li><span>Vibrance</span><span class="mono">+14</span></li><li><span>Saturation</span><span class="mono">-4</span></li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/moss-slate.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Moss and Slate preset applied">
+          <img src="assets/img/presets/moss-slate.webp" srcset="assets/img/presets/moss-slate@700.webp 700w, assets/img/presets/moss-slate.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Moss and Slate preset applied">
           <figcaption>
             <p class="lk-name">Moss and Slate<span class="lk-group">Verdant</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+16</span></li><li><span>Highlights</span><span class="mono">-26</span></li><li><span>Shadows</span><span class="mono">+12</span></li><li><span>Whites</span><span class="mono">-6</span></li><li><span>Blacks</span><span class="mono">-8</span></li><li><span>Vibrance</span><span class="mono">-6</span></li><li><span>Saturation</span><span class="mono">-10</span></li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/concrete-brutal.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Concrete Brutal preset applied">
+          <img src="assets/img/presets/concrete-brutal.webp" srcset="assets/img/presets/concrete-brutal@700.webp 700w, assets/img/presets/concrete-brutal.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Concrete Brutal preset applied">
           <figcaption>
             <p class="lk-name">Concrete Brutal<span class="lk-group">Edge</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+42</span></li><li><span>Highlights</span><span class="mono">+36</span></li><li><span>Shadows</span><span class="mono">-22</span></li><li><span>Whites</span><span class="mono">-16</span></li><li><span>Blacks</span><span class="mono">-32</span></li><li><span>Vibrance</span><span class="mono">-6</span></li><li><span>Saturation</span><span class="mono">-18</span></li></ul>
           </figcaption>
         </figure>
         <figure class="lk">
-          <img src="assets/img/presets/fog-bank.webp" width="900" height="604" loading="lazy" decoding="async"
-               alt="The same photograph rendered by Lightbox with the Fog Bank preset applied">
+          <img src="assets/img/presets/fog-bank.webp" srcset="assets/img/presets/fog-bank@700.webp 700w, assets/img/presets/fog-bank.webp 1400w" sizes="(max-width: 640px) 100vw, (max-width: 1100px) 50vw, 33vw" width="1400" height="939" loading="lazy" decoding="async"
+               alt="A narrow old town street at dusk, rendered by Lightbox with the Fog Bank preset applied">
           <figcaption>
             <p class="lk-name">Fog Bank<span class="lk-group">Atmosphere</span></p>
             <ul class="lk-vals"><li><span>Contrast</span><span class="mono">-34</span></li><li><span>Highlights</span><span class="mono">-10</span></li><li><span>Shadows</span><span class="mono">+30</span></li><li><span>Whites</span><span class="mono">-26</span></li><li><span>Blacks</span><span class="mono">+34</span></li><li><span>Vibrance</span><span class="mono">-20</span></li><li><span>Saturation</span><span class="mono">-26</span></li></ul>
@@ -415,7 +415,7 @@ lightbox-cli export --catalog "$STORE" --images "$(paste -sd, ids.txt)" \
       <div class="status-col reveal">
         <h3 class="status-h status-note">Before you download it</h3>
         <ul class="status-list status-list-muted">
-          <li><b>The editor works on the preview your camera embedded, not yet on the sensor data.</b> Every raw file carries a finished JPEG inside it so the camera has something to put on its own screen, and that is what the editor currently grades. The canvas says so, in the badge under the image. Full sensor decoding is built and shipped, and today only <code>lightbox-cli</code> reaches it. Wiring it into the editor is the next thing we are building.</li>
+          <li><b>Raw files open on their sensor data.</b> Highlight recovery from raw latitude is not built yet, so what you get is the full frame with your camera’s own colour matrices applied, not reconstruction of anything the sensor clipped.</li>
           <li>macOS on Apple Silicon is the only platform anyone has really used. Every measurement and every crash drill in the repository was done there.</li>
           <li>No camera profiles ship yet. The editor grades the preview your camera embedded, which is already in a standard colour space, so a per-camera matrix has nothing to act on until sensor decoding is wired into the editor. Building real profiles needs physical colour targets, and we have not done it.</li>
         </ul>

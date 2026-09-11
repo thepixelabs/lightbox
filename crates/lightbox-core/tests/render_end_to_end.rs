@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use lightbox_core::RawSourceStatus;
 use lightbox_core::{
     CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, ImageQuery, Session, SortOrder,
 };
@@ -194,12 +195,52 @@ fn session_renders_fixture_previews_through_the_engine() {
         other => panic!("expected Complete for the JPEG, got {other:?}"),
     }
 
-    // --- No usable embedded preview → a Source failure, never a crash. ---
+    // --- No embedded preview at all: the sensor path, or an honest failure. ---
+    //
+    // `sigma-fp.dng` carries no embedded preview, so before the source router
+    // existed this could only ever fail. If it renders, the pixels came from
+    // the sensor: there is no other source for them. That makes this the
+    // sharpest available proof that raw decoding reaches the graph, and it
+    // needs no golden to say so.
+    //
+    // Without a LibRaw proxy the fallback has nothing to fall back to, so the
+    // original `NotFound` is still the correct answer. Both outcomes are
+    // accepted here, and which one happened is asserted precisely.
     let dng = image_by_filename(&session, "sigma-fp.dng");
     let ticket = session.engine().submit(request(dng, 64, 64));
     match wait_terminal(&session, &ticket) {
-        RenderState::Failed(RenderError::Source(SourceError::NotFound)) => {}
-        other => panic!("expected Failed(Source(NotFound)) for the previewless DNG, got {other:?}"),
+        RenderState::Complete(out) => {
+            let OutputPayload::Pixels(px) = out.payload else {
+                panic!("expected pixels from the sensor path");
+            };
+            assert_eq!((px.extent.w, px.extent.h), (64, 64));
+            match session.raw_source_status(dng) {
+                RawSourceStatus::Sensor { width, height } => {
+                    assert!(
+                        width > 0 && height > 0,
+                        "the sensor path must report the resolution it decoded"
+                    );
+                }
+                other => panic!(
+                    "a previewless DNG that rendered can only have come from sensor data, \
+                     but the session reports {other:?}"
+                ),
+            }
+        }
+        RenderState::Failed(RenderError::Source(SourceError::NotFound)) => {
+            // No proxy: the embedded-preview fallback has nothing to serve.
+            // The failure must still be disclosed rather than silent.
+            assert!(
+                matches!(
+                    session.raw_source_status(dng),
+                    RawSourceStatus::FellBack { .. }
+                ),
+                "a raw that could not reach the sensor must disclose why"
+            );
+        }
+        other => {
+            panic!("previewless DNG: expected sensor pixels or a disclosed failure, got {other:?}")
+        }
     }
 
     // --- Unknown image id → a Source failure through the same lifecycle. ---

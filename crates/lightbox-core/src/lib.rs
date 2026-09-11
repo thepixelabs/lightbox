@@ -23,6 +23,7 @@
 mod check;
 mod command;
 mod config;
+mod raw_source;
 // E09 Phase B follow-up (T8): `EditHub`, the edit-state session registry +
 // durable command dispatcher (spec §3.4).
 mod edit_hub;
@@ -116,3 +117,5 @@ pub use lightbox_ingest::{
     browse_dir, DirListing, ImageEntry, OpenOptions, OpenOrigin, OpenReport, OpenRequest,
     SkipReason, SkippedPath,
 };
+
+pub use raw_source::{RawFallbackReason, RawSourceProvider, RawSourceStatus};

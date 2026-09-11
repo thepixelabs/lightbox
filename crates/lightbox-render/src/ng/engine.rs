@@ -242,6 +242,9 @@ struct Shared {
     tile_size: u32,
     /// rayon pool size for the CPU path (used when degrading to CPU).
     cpu_threads: Option<usize>,
+    /// Host-memory ceiling for [`Engine::source_pin`], see
+    /// [`crate::ng::EngineConfig::source_pin_budget_bytes`].
+    source_pin_budget: usize,
     /// The configured backend preference, distinguishes a deliberate `ForceCpu`
     /// engine from a GPU engine degraded to CPU (the E7 clamp applies only to the
     /// latter).
@@ -259,7 +262,7 @@ struct Shared {
     /// semantics). Host memory, so it survives GPU cache eviction and device
     /// loss: a post-rebuild render re-uploads from it with **zero**
     /// `SourceProvider::fetch` (re-warm, task E3).
-    source_pin: Mutex<HashMap<ImageId, Arc<SourceImage>>>,
+    source_pin: Mutex<SourcePin>,
     /// The shell's canvas double-buffer publisher (task **F5** M1
     /// integration; installed via [`Engine::install_canvas`]). `None` until
     /// the [`crate::ng::RenderScheduler`] wires one in, a `Canvas` target
@@ -536,7 +539,7 @@ impl Shared {
             .source_pin
             .lock()
             .ok()
-            .and_then(|m| m.get(&req.image).cloned());
+            .and_then(|mut m| m.touch(req.image));
         let image = match pinned {
             Some(img) => img,
             None => {
@@ -547,7 +550,7 @@ impl Shared {
                 ))?;
                 let arc = Arc::new(fetched);
                 if let Ok(mut m) = self.source_pin.lock() {
-                    m.insert(req.image, Arc::clone(&arc));
+                    m.insert(req.image, Arc::clone(&arc), self.source_pin_budget);
                 }
                 arc
             }
@@ -777,7 +780,120 @@ pub struct Engine {
     worker: Option<JoinHandle<()>>,
 }
 
+/// The engine's RAM pin for decoded sources, bounded and least-recently-used.
+///
+/// This used to be a bare `HashMap` that was inserted into and never removed
+/// from. That was survivable only while every entry was a camera's embedded
+/// JPEG preview. A demosaiced sensor frame is roughly eight times larger, so
+/// the same browsing session would hold gigabytes nothing could release.
+///
+/// The policy is deliberately simple: evict the least recently used entry until
+/// the total fits. There is no attempt to be clever about which image the user
+/// is likely to return to, because the cost of being wrong is one re-fetch and
+/// the cost of the old behaviour was an unbounded leak.
+///
+/// **A source larger than the whole budget is still kept.** Eviction stops when
+/// only one entry remains, so opening a single very large raw renders rather
+/// than evicting itself and thrashing.
+#[derive(Default)]
+struct SourcePin {
+    entries: HashMap<ImageId, PinEntry>,
+    /// Monotonic use counter. Wrapping is not a correctness concern: it would
+    /// take longer than any session to reach, and the worst outcome is one
+    /// suboptimal eviction.
+    clock: u64,
+    bytes: usize,
+}
+
+struct PinEntry {
+    image: Arc<SourceImage>,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl SourcePin {
+    /// Fetch `image` and mark it most recently used.
+    fn touch(&mut self, image: ImageId) -> Option<Arc<SourceImage>> {
+        self.clock = self.clock.wrapping_add(1);
+        let clock = self.clock;
+        let e = self.entries.get_mut(&image)?;
+        e.last_used = clock;
+        Some(Arc::clone(&e.image))
+    }
+
+    /// Pin `src` for `image`, then evict least-recently-used entries until the
+    /// total is within `budget`. The entry just inserted is never evicted.
+    fn insert(&mut self, image: ImageId, src: Arc<SourceImage>, budget: usize) {
+        let bytes = src.pixels.bytes.len();
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(old) = self.entries.insert(
+            image,
+            PinEntry {
+                image: src,
+                bytes,
+                last_used: self.clock,
+            },
+        ) {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+
+        while self.bytes > budget && self.entries.len() > 1 {
+            let victim = self
+                .entries
+                .iter()
+                .filter(|(k, _)| **k != image)
+                .min_by_key(|(_, v)| v.last_used)
+                .map(|(k, _)| *k);
+            let Some(victim) = victim else { break };
+            if let Some(e) = self.entries.remove(&victim) {
+                self.bytes = self.bytes.saturating_sub(e.bytes);
+            }
+        }
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn release(&mut self, image: ImageId) -> bool {
+        match self.entries.remove(&image) {
+            Some(e) => {
+                self.bytes = self.bytes.saturating_sub(e.bytes);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 impl Engine {
+    /// Total host bytes currently held by the decoded-source pin.
+    ///
+    /// Exposed so the shell can show it and so a test can prove the pin is
+    /// bounded. Before this existed the pin grew without limit.
+    pub fn source_pin_bytes(&self) -> usize {
+        self.shared
+            .source_pin
+            .lock()
+            .map(|m| m.total_bytes())
+            .unwrap_or(0)
+    }
+
+    /// Drop `image`'s pinned source. Returns whether one was dropped.
+    ///
+    /// The pin evicts on its own once it passes its budget; this is for the
+    /// case where the host knows an image is gone, such as an image leaving
+    /// the working set, and would rather reclaim the memory now than wait for
+    /// pressure from something else.
+    pub fn release_source_pin(&self, image: ImageId) -> bool {
+        self.shared
+            .source_pin
+            .lock()
+            .map(|mut m| m.release(image))
+            .unwrap_or(false)
+    }
+
     /// Construct an engine on the shell's shared device (via `dp`), pulling
     /// pixels through `sp`, dispatching `registry`'s nodes under `cfg`. The
     /// built-in PV1 template ([`GraphTemplate::pv1`]) is registered.
@@ -862,12 +978,13 @@ impl Engine {
             }),
             probe,
             tile_size: cfg.tile_size,
+            source_pin_budget: cfg.source_pin_budget_bytes,
             cpu_threads: cfg.cpu_threads,
             backend_pref: cfg.backend,
             recover: RecoverStateMachine::new(cfg.device_lost_degrade),
             events_tx,
             device_gen: AtomicU64::new(0),
-            source_pin: Mutex::new(HashMap::new()),
+            source_pin: Mutex::new(SourcePin::default()),
             canvas: RwLock::new(None),
         });
 

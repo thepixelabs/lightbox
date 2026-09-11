@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use lightbox_jobs::{CancelToken, Class};
 use lightbox_preview::{
-    PreviewClass, PreviewColorspace, PreviewError, PreviewProvider, PreviewState,
+    AssetLocator, PreviewClass, PreviewColorspace, PreviewError, PreviewProvider, PreviewState,
 };
 use lightbox_render::ng::{
     BoxFuture, DeviceError, DeviceProvider, SourceColorimetry, SourceError, SourceImage,
@@ -249,6 +249,122 @@ impl SourceProvider for PreviewSourceProvider {
                 }
             }
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The router: raw files to the sensor path, everything else exactly as before.
+// ---------------------------------------------------------------------------
+
+/// Sends raw files to [`RawSourceProvider`] and everything else to
+/// [`PreviewSourceProvider`], unchanged.
+///
+/// **The rendered path is not touched.** `PreviewSourceProvider` is delegated
+/// to byte for byte, so a JPEG, a PNG or a TIFF renders exactly the pixels it
+/// rendered before this type existed. That is the whole reason this is a router
+/// wrapping the old provider rather than a branch inside it.
+///
+/// When the sensor path cannot be used, the fallback is to the embedded preview
+/// **with the reason recorded** in [`RoutingSourceProvider::status`], which the
+/// canvas badge and the status notice both read. Falling back silently is what
+/// the editor used to do, and it is the reason the website had to apologise for
+/// its own behaviour.
+pub(crate) struct RoutingSourceProvider {
+    rendered: Arc<PreviewSourceProvider>,
+    raw: Option<Arc<crate::raw_source::RawSourceProvider>>,
+    locator: Arc<dyn AssetLocator>,
+    status: crate::raw_source::StatusMap,
+}
+
+impl RoutingSourceProvider {
+    pub(crate) fn new(
+        previews: Arc<dyn PreviewProvider>,
+        locator: Arc<dyn AssetLocator>,
+    ) -> RoutingSourceProvider {
+        let raw = crate::raw_source::RawSourceProvider::autodetect().map(Arc::new);
+        if raw.is_none() {
+            tracing::info!(
+                "no raw decode proxy found; raw files will render from their embedded preview \
+                 and say so"
+            );
+        }
+        RoutingSourceProvider {
+            rendered: Arc::new(PreviewSourceProvider::new(previews)),
+            raw,
+            locator,
+            status: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// A handle on the status map, for the session to expose to the shell.
+    pub(crate) fn status_map(&self) -> crate::raw_source::StatusMap {
+        Arc::clone(&self.status)
+    }
+
+    fn record(&self, image: ImageId, st: crate::RawSourceStatus) {
+        if let Ok(mut m) = self.status.write() {
+            m.insert(image, st);
+        }
+    }
+}
+
+impl SourceProvider for RoutingSourceProvider {
+    fn fetch(
+        &self,
+        image: ImageId,
+        want: SourceWant,
+        cancel: &CancelToken,
+    ) -> BoxFuture<'static, Result<SourceImage, SourceError>> {
+        // Resolve the file and decide whether it is raw at all. Anything that
+        // is not a raw file, and anything we cannot classify, goes down the
+        // path it always went down.
+        let located = self.locator.locate(image).ok();
+        let is_raw = located.as_ref().is_some_and(|a| {
+            lightbox_decode::probe(&a.path)
+                .ok()
+                .and_then(|p| p.format.source_kind())
+                .is_some_and(|k| k == lightbox_types::SourceKind::Raw)
+        });
+
+        if !is_raw {
+            self.record(image, crate::RawSourceStatus::NotRaw);
+            return self.rendered.fetch(image, want, cancel);
+        }
+
+        let Some(raw) = self.raw.as_ref() else {
+            self.record(
+                image,
+                crate::RawSourceStatus::FellBack {
+                    reason: crate::RawFallbackReason::ProxyUnavailable,
+                },
+            );
+            return self.rendered.fetch(image, want, cancel);
+        };
+
+        // Safe: `is_raw` is only true when `located` is `Some`.
+        let asset = located.expect("is_raw implies a located asset");
+        match raw.decode(&asset.path, asset.orientation, cancel) {
+            Ok(img) => {
+                self.record(
+                    image,
+                    crate::RawSourceStatus::Sensor {
+                        width: img.full_extent.w,
+                        height: img.full_extent.h,
+                    },
+                );
+                Box::pin(async move { Ok(img) })
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    image = image.0,
+                    path = %asset.path.display(),
+                    reason = ?reason,
+                    "sensor decode failed; falling back to the embedded preview and disclosing it"
+                );
+                self.record(image, crate::RawSourceStatus::FellBack { reason });
+                self.rendered.fetch(image, want, cancel)
+            }
+        }
     }
 }
 

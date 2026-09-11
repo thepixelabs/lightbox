@@ -52,6 +52,17 @@ This is enforced by `cargo deny check` (surface 1: the Rust crate graph) and `ca
 
 **The nuance worth understanding:** this policy is driven by the commercial licence, not by the AGPL. PixeLabs needs to be able to offer Lightbox under a separate commercial licence to companies that can't accept the AGPL's obligations, and it can only make that offer for code it can license on those terms. If GPL or LGPL code from a third party were linked into the product, PixeLabs would have no right to relicense that code commercially, no matter what licence the rest of Lightbox carries. So this constraint does not relax now that the project itself is AGPL rather than permissively licensed; it stays exactly as strict as it always was, because it was never about avoiding copyleft for its own sake, it was about preserving the ability to dual-license.
 
+## A note on references to `docs/plan/`
+
+Around 86 files carry comments citing paths like `docs/plan/epics/E02-deviations.md`.
+Those documents are the project's internal planning and deviation log, and they are
+not published. The citations are left in place deliberately rather than stripped,
+because each one marks a decision that was argued somewhere and records that the
+code in front of you is deliberate rather than accidental. If a comment cites one
+and you need the reasoning behind it, open an issue and ask: the answer is usually
+a paragraph, and it is more useful written into the comment than left in a document
+nobody can read.
+
 ## Where to read, and the order to read it in
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): the map. What is in each crate, the seams between them, and the decisions everything else rests on.

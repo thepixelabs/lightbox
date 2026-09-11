@@ -1826,7 +1826,6 @@ impl eframe::App for LightboxApp {
                 filename: String,
                 width: u32,
                 height: u32,
-                is_raw: bool,
             },
         }
         let projection = self.working_set.active().map(|item| match item.state {
@@ -1836,11 +1835,6 @@ impl eframe::App for LightboxApp {
                 filename: item.filename.clone(),
                 width: item.width,
                 height: item.height,
-                // Probe-derived, the same §4 authority the develop rail uses
-                // to decide which raw-only panels exist. Feeds the canvas
-                // badge, which has to say "embedded preview" on a raw file
-                // and must NOT say it on a JPEG, where the file IS the image.
-                is_raw: item.source_kind == Some(lightbox_types::SourceKind::Raw),
             },
             ItemState::Failed => ActiveProjection::SourceFailed(
                 item.decode_error
@@ -1974,13 +1968,12 @@ impl eframe::App for LightboxApp {
                             filename,
                             width,
                             height,
-                            is_raw,
                         } => CanvasContent::Ready(ActiveEntry {
+                            raw_pixels: (&self.session.raw_source_status(*image)).into(),
                             image: *image,
                             filename,
                             width: *width,
                             height: *height,
-                            is_raw: *is_raw,
                         }),
                     };
                     let scheduler = self.session.render_scheduler();

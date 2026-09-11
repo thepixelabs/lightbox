@@ -189,6 +189,33 @@ fn cropped_extent(source_w: u32, source_h: u32, crop: Crop) -> (u32, u32) {
 
 // ─── Canvas content contract (what `lib.rs` hands the canvas each frame) ───
 
+/// What the canvas is actually showing for this image.
+///
+/// A copyable summary of `lightbox_core::RawSourceStatus`, which carries the
+/// fallback reason as an owned `String` and so cannot be `Copy` like
+/// [`ActiveEntry`] is. The reason itself is not lost: the status notice reads
+/// it from the session, where it lives in full.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RawPixels {
+    /// Not a raw file. Nothing to say.
+    NotRaw,
+    /// Real sensor data, decoded through LibRaw and the camera's own matrices.
+    Sensor,
+    /// The sensor path was unavailable, so this is the JPEG the camera
+    /// embedded. The badge says so rather than letting it pass as sensor data.
+    EmbeddedPreview,
+}
+
+impl From<&lightbox_core::RawSourceStatus> for RawPixels {
+    fn from(s: &lightbox_core::RawSourceStatus) -> RawPixels {
+        match s {
+            lightbox_core::RawSourceStatus::NotRaw => RawPixels::NotRaw,
+            lightbox_core::RawSourceStatus::Sensor { .. } => RawPixels::Sensor,
+            lightbox_core::RawSourceStatus::FellBack { .. } => RawPixels::EmbeddedPreview,
+        }
+    }
+}
+
 /// The working-set entry the canvas should render this frame, same role
 /// as the pre-Phase-C `ActiveEntry`, unchanged shape.
 #[derive(Copy, Clone, Debug)]
@@ -201,17 +228,10 @@ pub struct ActiveEntry<'a> {
     pub width: u32,
     /// Full-size height.
     pub height: u32,
-    /// Whether the source is a raw file (probe-derived `SourceKind::Raw`).
-    ///
-    /// Only the badge uses this, and only to keep it honest. Every image the
-    /// canvas draws today, raw or not, arrives through
-    /// `EmbeddedPreviewProvider`, which hardcodes
-    /// `SourceTier::EmbeddedPreview`. On a JPEG that tier name is meaningless
-    /// (the file IS the image), so tier alone cannot drive the badge without
-    /// mislabelling every rendered file. On a raw file it means something
-    /// specific and unflattering: these are the camera's finished preview
-    /// pixels, not the sensor's.
-    pub is_raw: bool,
+    /// Where this image's pixels came from. Derived from the session's source
+    /// router, so the badge and the router can never disagree about what the
+    /// user is looking at.
+    pub raw_pixels: RawPixels,
 }
 
 /// What the working set says about the currently active entry (C5:
@@ -1289,12 +1309,18 @@ impl EditorCanvas {
         // when the shell learns to ask the proxy for sensor pixels, and update
         // `web/index.html` and `README.md` in the same commit, which
         // `tools/site-checks/check_site.py` will insist on.
-        let source =
-            if entry.is_raw && matches!(self.tier.tier(), Some(SourceTier::EmbeddedPreview)) {
-                "  ·  embedded preview"
-            } else {
-                ""
-            };
+        // Where the pixels came from, said on every frame.
+        //
+        // `quality` above describes the RENDER: how far the engine got. It says
+        // nothing about what was rendered, so on a raw file "full-res" alone
+        // once read as "you are looking at your sensor data" when you were not.
+        // This segment answers that question directly, from the router that
+        // actually made the decision.
+        let source = match entry.raw_pixels {
+            RawPixels::Sensor => "  ·  sensor",
+            RawPixels::EmbeddedPreview => "  ·  embedded preview",
+            RawPixels::NotRaw => "",
+        };
 
         let text = format!(
             "{}  ·  {}×{}  ·  {}{}  ·  {}  ·  {}/{}",
@@ -1337,6 +1363,39 @@ impl EditorCanvas {
 
 #[cfg(test)]
 mod tests {
+
+    /// The badge must name the source the router actually chose.
+    ///
+    /// This is the honesty surface. It said "embedded preview" for every raw
+    /// file for as long as that was true, and the moment sensor decoding
+    /// landed it had to stop saying it, or the app would have been lying in
+    /// the opposite direction. Pin the mapping so neither can happen silently.
+    #[test]
+    fn the_badge_names_the_source_the_router_chose() {
+        use lightbox_core::{RawFallbackReason, RawSourceStatus};
+
+        assert_eq!(
+            RawPixels::from(&RawSourceStatus::Sensor {
+                width: 4310,
+                height: 2870
+            }),
+            RawPixels::Sensor
+        );
+        assert_eq!(
+            RawPixels::from(&RawSourceStatus::FellBack {
+                reason: RawFallbackReason::ProxyUnavailable
+            }),
+            RawPixels::EmbeddedPreview,
+            "a fallback must never be allowed to read as sensor data"
+        );
+        assert_eq!(
+            RawPixels::from(&RawSourceStatus::FellBack {
+                reason: RawFallbackReason::DecodeFailed("signal 9".to_owned())
+            }),
+            RawPixels::EmbeddedPreview
+        );
+        assert_eq!(RawPixels::from(&RawSourceStatus::NotRaw), RawPixels::NotRaw);
+    }
     use super::*;
 
     // ── E11 canvas-display fix, Part A: `cropped_extent` (pure math) ────

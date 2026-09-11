@@ -126,19 +126,34 @@ cargo xtask bundle-mac --with-libraw --install
 
 That builds the proxy with the feature on, places it beside the editor inside `Lightbox.app` (which is where `ProxyConfig::autodetect` looks for it), vendors LibRaw and its dependent libraries into `Contents/Frameworks` with `@rpath` install names, ships LibRaw's licence text under `Contents/Resources/licenses/`, and verifies with `otool -L` that no binary in the bundle reaches for anything outside it. Without `--with-libraw` you get a bundle with no decoder in it, which is fine for development and is not a shipping configuration. The downloadable release is always built with it.
 
-**What the editor shows you today, which is the part people get wrong.** Shipping the decoder is necessary and it is not sufficient. `decode_for_develop`, the function that produces sensor-derived pixels, currently has exactly one caller in the workspace: `lightbox-cli`. The editor does not call it. `lightbox-shell` does not depend on `lightbox-decode` at all; its pixels come through `lightbox-preview`'s `EmbeddedPreviewProvider`, which decodes the finished JPEG your camera embedded in the raw file. The canvas tier badge says `embedded preview` for exactly this reason.
+**What the editor shows you.** Raw files open on their sensor data. The router
+in `lightbox-core` probes each file, sends raw ones through
+`decode_for_develop` and the out-of-process LibRaw proxy, converts camera-native
+linear to working-space linear using the colour matrices the camera wrote into
+the file, bakes EXIF orientation, and hands the graph a full-resolution
+half-float frame. Everything else, JPEG and PNG and TIFF, takes exactly the path
+it always took: the rendered-source provider is delegated to unchanged, and a
+byte-comparison of a graded JPEG before and after this landed is identical.
 
-You can measure it on any raw file:
+You can see the difference on any raw file:
 
 ```sh
-lightbox-cli open photo.raf --store /tmp/s.lbdata      # the editor's entry path
-lightbox-cli render --catalog /tmp/s.lbdata --image 1 --out editor.png
-lightbox-cli render-ref --file photo.raf --out sensor.png
+lightbox-cli render --catalog /tmp/s.lbdata --image 1 --out sensor.png
 ```
 
-On the Fujifilm fixture in this repository the first writes 2176x1448, the preview's size, and the second writes 4310x2870, the sensor's.
+The clearest proof is `fixtures/sigma-fp.dng`, which carries no embedded preview
+at all. Before the sensor path existed it could not render; the test suite
+asserted the failure. It renders now, and there is no source for those pixels
+other than the sensor.
 
-So: **full sensor decoding is built, shipped, and reachable through `lightbox-cli`. The editor grades the embedded preview.** Wiring the shell's source provider to the proxy is the next substantial piece of work and it belongs with the E10/E11 develop epics, alongside a raw-only extension to the recipe schema. Until then, pushing white balance or highlight recovery in the editor is operating on eight-bit rendered pixels, not on latitude that is still there.
+**When the decoder is unavailable**, a raw file falls back to its embedded
+preview and says so, on the canvas and in a notice. That disclosure is the
+point: silently serving a smaller, already-processed image is what the editor
+used to do, and it is why highlight recovery appeared not to work.
+
+**Still not built:** highlight reconstruction from raw latitude. LibRaw hands
+over pixels that are already clipped, so recovery has to happen on the mosaic.
+Doing it after demosaic would be guesswork presented as recovery.
 
 ## Repository layout
 

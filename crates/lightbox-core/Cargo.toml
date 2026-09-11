@@ -30,6 +30,11 @@ lightbox-export.workspace = true
 # `ImageDetail`, not faked (`default_for`/`from_lr_crs` currently ignore most
 # of its fields, an E09 Phase D deviation, not a T8/T11 one).
 lightbox-decode.workspace = true
+# Direct as of the raw source path: camera matrices and the default look. Already
+# transitive via lightbox-preview, so cargo-deny sees no new licence surface.
+lightbox-color.workspace = true
+# Per-pixel camera-to-working transform over a full sensor frame.
+rayon.workspace = true
 thiserror.workspace = true
 # E10 Phase D (D10): `looks.rs` hashes an installed `.cube`/HaldCLUT file's
 # bytes (xxh3-128) to derive its `content_hash`, the same primitive
