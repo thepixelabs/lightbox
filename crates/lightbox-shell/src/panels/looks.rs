@@ -356,6 +356,8 @@ mod tests {
         fn can_redo(&self) -> bool {
             false
         }
+        fn reset_all(&mut self) {}
+
         fn undo(&mut self) {}
         fn redo(&mut self) {}
         fn history(&self) -> &[HistoryStepMeta] {

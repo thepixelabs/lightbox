@@ -41,3 +41,20 @@ CLAUDE.md
 # it is of no use to anyone outside the project and reads badly next to the
 # mandate's independent-implementation position.
 /docs/research/
+
+# Python bytecode from tools/site-checks
+__pycache__/
+
+# Internal planning and research record. Kept locally, not published: it is a
+# working log of how the program was run rather than documentation anyone
+# building or using Lightbox needs, and it carries process detail that has no
+# business on a public repository. The two files with a machine consumer moved
+# to docs/reference/ so `cargo xtask lint-migrations` and cargo-deny still work.
+docs/plan/
+docs/research/
+
+# Full-resolution sources for the website imagery. 18 MB that nobody building
+# or using Lightbox needs, and the files carry C2PA provenance metadata from
+# the generator. The published WebP and JPEG derivatives under web/assets/img/
+# are what the site serves; web/README.md records how they are produced.
+assets/site-sources/

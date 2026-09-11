@@ -294,9 +294,35 @@ impl FrameStats {
 /// exist, so a build that DOES ship elsewhere degrades to "no starter
 /// library" rather than failing to start.
 fn bundled_preset_files() -> Vec<PathBuf> {
-    let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/presets"));
+    // Packaged first, dev tree second.
+    //
+    // `cargo xtask bundle-mac` copies `assets/presets/` into the app's
+    // `Contents/Resources/presets/`, so a downloaded Lightbox finds its
+    // starter library beside itself. Before that existed, this function knew
+    // only the compile-time source path, which meant the shipped app silently
+    // started with an empty preset library on every machine that was not the
+    // one that built it, while the website advertised thirty-six presets.
+    // `tools/site-checks/check_site.py` now fails the build if the bundle
+    // stops carrying them.
     let mut out = Vec::new();
-    collect_xmp_files(&dir, &mut out);
+
+    if let Ok(exe) = std::env::current_exe() {
+        // Contents/MacOS/Lightbox -> Contents/Resources/presets
+        if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
+            collect_xmp_files(&contents.join("Resources/presets"), &mut out);
+        }
+        // A plain unbundled binary with a presets/ directory beside it.
+        if out.is_empty() {
+            if let Some(dir) = exe.parent() {
+                collect_xmp_files(&dir.join("presets"), &mut out);
+            }
+        }
+    }
+
+    if out.is_empty() {
+        let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/presets"));
+        collect_xmp_files(&dir, &mut out);
+    }
     out
 }
 
@@ -1800,6 +1826,7 @@ impl eframe::App for LightboxApp {
                 filename: String,
                 width: u32,
                 height: u32,
+                is_raw: bool,
             },
         }
         let projection = self.working_set.active().map(|item| match item.state {
@@ -1809,6 +1836,11 @@ impl eframe::App for LightboxApp {
                 filename: item.filename.clone(),
                 width: item.width,
                 height: item.height,
+                // Probe-derived, the same §4 authority the develop rail uses
+                // to decide which raw-only panels exist. Feeds the canvas
+                // badge, which has to say "embedded preview" on a raw file
+                // and must NOT say it on a JPEG, where the file IS the image.
+                is_raw: item.source_kind == Some(lightbox_types::SourceKind::Raw),
             },
             ItemState::Failed => ActiveProjection::SourceFailed(
                 item.decode_error
@@ -1942,11 +1974,13 @@ impl eframe::App for LightboxApp {
                             filename,
                             width,
                             height,
+                            is_raw,
                         } => CanvasContent::Ready(ActiveEntry {
                             image: *image,
                             filename,
                             width: *width,
                             height: *height,
+                            is_raw: *is_raw,
                         }),
                     };
                     let scheduler = self.session.render_scheduler();

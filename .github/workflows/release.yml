@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: 2026 PixeLabs
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additional terms under AGPL section 7 apply: see COPYING.additional-terms.
+#
+# Cuts a macOS release when a `v*` tag is pushed.
+#
+# Two properties of this workflow are load-bearing and easy to lose in a
+# later edit:
+#
+# 1. **`--with-libraw` is mandatory.** Without it the app still builds, still
+#    opens raw files and still shows you a picture, but that picture is the
+#    small JPEG the camera embedded, not the sensor data. It looks like it
+#    works. The `assert the raw decoder shipped` step below exists so that a
+#    build missing the decoder can never reach a download page.
+#
+# 2. **Every artifact is uploaded twice**, once with the version in its name
+#    and once under a fixed name. GitHub's `releases/latest/download/<file>`
+#    link only resolves when the filename never changes, so the fixed-name
+#    copy is what the website's download button points at. Drop it and the
+#    button breaks on the next release instead of this one, which is the
+#    worst time to find out.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Lets us rehearse the whole thing, artifacts included, without tagging.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  macos:
+    name: macOS (Apple silicon)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      # LibRaw is built into the disk image from here, so a person who
+      # downloads Lightbox installs nothing and types nothing.
+      - name: Install LibRaw
+        run: brew install libraw
+
+      # A tag that disagrees with the version in the code produces a release
+      # whose filenames lie about their contents. Catch it before building.
+      - name: Check the tag matches the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$tag" != "$code" ]; then
+            echo "tag v$tag does not match [workspace.package] version $code in Cargo.toml"
+            echo "Bump the version in Cargo.toml, or retag, so the two agree."
+            exit 1
+          fi
+          echo "version $code"
+          echo "VERSION=$code" >> "$GITHUB_ENV"
+
+      - name: Read the version (untagged rehearsal run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          code="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "VERSION=$code" >> "$GITHUB_ENV"
+
+      # Building the app and the disk image is one xtask command so that it is
+      # exactly the command a maintainer can run locally to reproduce a
+      # release. This workflow deliberately adds no packaging logic of its own.
+      - name: Build the app and disk image
+        run: cargo run --release -p xtask -- bundle-mac --with-libraw --dmg
+
+      # Belt and braces over xtask's own check. If a binary in the bundle
+      # still points at Homebrew, the app works here and on no other Mac.
+      - name: Assert the raw decoder shipped and nothing points outside the app
+        shell: bash
+        run: |
+          app=target/macos/Lightbox.app
+          test -x "$app/Contents/MacOS/lightbox-rawproxy" \
+            || { echo "FAIL: the raw decoder is not in the bundle"; exit 1; }
+          test -x "$app/Contents/MacOS/lightbox-cli" \
+            || { echo "FAIL: lightbox-cli is not in the bundle"; exit 1; }
+          test -f "$app/Contents/Resources/licenses/LGPL-2.1-or-later.txt" \
+            || { echo "FAIL: LibRaw's licence text is missing (LGPL requires it)"; exit 1; }
+          # The website sells thirty-six presets. For one release they shipped
+          # in none of them, because the app only knew the build machine's own
+          # source path. Count them in the artefact, not in the repo.
+          repo_presets=$(find assets/presets -name '*.xmp' | wc -l | tr -d ' ')
+          app_presets=$(find "$app" -name '*.xmp' | wc -l | tr -d ' ')
+          if [ "$app_presets" != "$repo_presets" ]; then
+            echo "FAIL: the repo has $repo_presets presets, the app ships $app_presets"
+            exit 1
+          fi
+          echo "OK: $app_presets presets shipped"
+          bad=0
+          while IFS= read -r bin; do
+            while IFS= read -r dep; do
+              case "$dep" in
+                /usr/lib/*|/System/*|@rpath/*|@executable_path/*|@loader_path/*) ;;
+                *) echo "FAIL: $bin needs $dep, which is outside the bundle"; bad=1 ;;
+              esac
+            done < <(otool -L "$bin" | tail -n +2 | awk '{print $1}')
+          done < <(find "$app/Contents/MacOS" "$app/Contents/Frameworks" -type f -perm +111)
+          [ "$bad" = 0 ] || exit 1
+          echo "OK: self-contained, decoder present, LibRaw licence shipped"
+
+      # Proves the shipped decoder actually decodes, rather than trusting that
+      # the file is present. A raw file read through the embedded JPEG returns
+      # the preview's dimensions; only the real decoder returns the sensor's.
+      - name: Decode a raw file with the bundled decoder
+        shell: bash
+        run: |
+          cargo xtask fixtures
+          # No LIGHTBOX_RAWPROXY_BIN. The bundled CLI must find the bundled
+          # proxy by the sibling rule alone, which is what a person who only
+          # downloaded the disk image actually gets.
+          out=$(target/macos/Lightbox.app/Contents/MacOS/lightbox-cli \
+                decode --file "$PWD/fixtures/fujifilm-x100.raf" --json)
+          echo "$out"
+          echo "$out" | grep -q '"backend": *"libraw_proxy"' \
+            || { echo "FAIL: fell back to the embedded preview"; exit 1; }
+          echo "OK: real sensor data, with nothing configured"
+
+      - name: Package the zip and fingerprints
+        shell: bash
+        run: |
+          cd target/macos
+          ditto -c -k --keepParent Lightbox.app "Lightbox-${VERSION}.zip"
+          cp "Lightbox-${VERSION}.dmg" Lightbox.dmg
+          cp "Lightbox-${VERSION}.zip" Lightbox.zip
+          shasum -a 256 Lightbox-*.dmg Lightbox-*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artifacts for a rehearsal run
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release-rehearsal
+          path: |
+            target/macos/Lightbox-*.dmg
+            target/macos/Lightbox-*.zip
+            target/macos/SHA256SUMS
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            target/macos/Lightbox-${{ env.VERSION }}.dmg
+            target/macos/Lightbox-${{ env.VERSION }}.zip
+            target/macos/Lightbox.dmg
+            target/macos/Lightbox.zip
+            target/macos/SHA256SUMS
+          body: |
+            ## Install
+
+            Download `Lightbox.dmg`, open it, and drag Lightbox to Applications.
+
+            **macOS will probably say "Lightbox is damaged and can't be opened."
+            It is not damaged.** Lightbox is not signed with an Apple certificate
+            yet, and macOS words that refusal badly. Open Terminal and run:
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/Lightbox.app
+            ```
+
+            Lightbox opens normally from then on. The same explanation is inside
+            the disk image, next to the app.
+
+            ## Verify the download
+
+            ```
+            shasum -a 256 ~/Downloads/Lightbox.dmg
+            ```
+
+            Compare it to `SHA256SUMS` below.
+
+            ## What is in it
+
+            Apple silicon Macs, macOS 11 and later. Raw decoding is built in:
+            nothing to install, nothing to configure.

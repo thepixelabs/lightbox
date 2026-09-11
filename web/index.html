@@ -3,27 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Lightbox: a raw editor with no catalogue and no import step</title>
-<meta name="description" content="Open source raw photo editor. Drop a file on the window and you are in the develop panel. The full colour toolset on your GPU, 36 looks, unlimited history, and your originals are never touched.">
-<meta name="theme-color" content="#08090a">
-<meta name="color-scheme" content="dark">
+<title>Lightbox: a raw editor that never loses your edit</title>
+<meta name="description" content="Open source raw photo editor for macOS. Your edits are tracked by the content of the photograph, so renaming or moving a file never orphans them. Full colour toolset on your GPU, 36 presets, unlimited history, and your originals are never touched.">
+<meta name="theme-color" content="#faf9f7">
+<meta name="color-scheme" content="light dark">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="https://lightbox.pixelabs.net/">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Lightbox">
-<meta property="og:title" content="Lightbox: a raw editor with no catalogue and no import step">
-<meta property="og:description" content="Drop a photo in and you are already editing. No library, no import step, no subscription. Open source raw develop with the full colour toolset.">
+<meta property="og:title" content="Lightbox: a raw editor that never loses your edit">
+<meta property="og:description" content="Your edits are tracked by the photograph itself, so renaming or moving a file never loses them. Open source raw develop with the full colour toolset. No subscription.">
 <meta property="og:image" content="https://lightbox.pixelabs.net/assets/img/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Lightbox: a raw editor with no catalogue and no import step">
-<meta name="twitter:description" content="Drop a photo in and you are already editing. No library, no import step, no subscription.">
+<meta name="twitter:title" content="Lightbox: a raw editor that never loses your edit">
+<meta name="twitter:description" content="Your edits are tracked by the photograph itself, so renaming or moving a file never loses them. Open source raw develop with the full colour toolset. No subscription.">
 <meta name="twitter:image" content="https://lightbox.pixelabs.net/assets/img/og.jpg">
 
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="preload" as="image" href="assets/img/hero-base.webp" fetchpriority="high">
+<link rel="preload" as="image" href="assets/img/app-editor.webp" fetchpriority="high">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/InterTight-var.woff2" crossorigin>
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/Inter-Regular.woff2" crossorigin>
 <link rel="stylesheet" href="css/site.css">
@@ -37,9 +37,8 @@
 <header class="nav" id="nav">
   <a class="nav-brand" href="#top" aria-label="Lightbox, back to top">
     <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-      <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".45"/>
-      <path d="M16 3.4 A12.6 12.6 0 0 1 27.2 22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-      <circle cx="16" cy="16" r="4.6" fill="currentColor"/>
+      <path d="M10.15 6H6a3 3 0 0 0-3 3v14a3 3 0 0 0 3 3h7.65Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+      <path d="M14.35 6H26a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3h-8.15Z" fill="currentColor" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
     </svg>
     <span class="brand-word">Lightbox</span>
   </a>
@@ -47,6 +46,7 @@
     <a href="#start">Start</a>
     <a href="#colour">Colour</a>
     <a href="#looks">Looks</a>
+    <a href="#cli">Command line</a>
     <a href="#your-work">Your work</a>
     <a href="#status">Status</a>
   </nav>
@@ -61,41 +61,32 @@
 
 <main id="main">
 
-<!-- ==================== HERO ==================== -->
+<!-- ==================== HERO ====================
+     An ordinary section. It scrolls with the page: nothing here pins the
+     viewport, and no script listens to scroll or wheel events. The only
+     motion is a single cross-fade from the flat preview to the developed
+     frame, played once when the shader has the frame ready, and skipped
+     entirely under prefers-reduced-motion. -->
 <section class="hero" id="top">
-  <div class="hero-track" id="heroTrack">
-    <div class="hero-sticky">
+  <div class="wrap hero-inner">
 
-      <div class="hero-stage">
-        <canvas id="heroCanvas" class="hero-canvas" aria-hidden="true"></canvas>
-        <img id="heroFallback" class="hero-fallback" src="assets/img/hero-base.webp" alt="A sandstone fin in Arches National Park under a bright sky, developed in Lightbox">
-        <div class="hero-vignette" aria-hidden="true"></div>
+    <div class="hero-copy">
+      <p class="eyebrow">Open source raw editor <span class="dot"></span> No catalogue <span class="dot"></span> No subscription</p>
+      <h1 class="display">Drag a photo in.<br><em>You are already editing.</em></h1>
+      <p class="lede">Lightbox is a raw editor with no catalogue and no import step. Drop a file or a whole folder on the window and the develop panel opens on it, with everything you brought sitting in the filmstrip. Your original file is never moved or written to, so there is no save button and nothing to overwrite. Export when you want a copy to send out.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary btn-lg" href="#get">Get it</a>
+        <a class="btn btn-ghost btn-lg" href="#status">What works today</a>
       </div>
-
-      <div class="hero-copy">
-        <p class="eyebrow">Open source raw editor <span class="dot"></span> No catalogue <span class="dot"></span> No subscription</p>
-        <h1 class="display">Drag a photo in.<br><em>You are already editing.</em></h1>
-        <p class="lede">Lightbox is a raw editor with no catalogue and no import step. Drop a file or a whole folder on the window and the develop panel opens on it, with everything you brought sitting in the filmstrip. Your originals are never moved or rewritten, and there is no save button, because there is nothing to save.</p>
-        <div class="hero-actions">
-          <a class="btn btn-primary btn-lg" href="#get">Get it</a>
-          <a class="btn btn-ghost btn-lg" href="#status">What works today</a>
-        </div>
-        <p class="hero-note">Free software under the AGPL. Pre-1.0, so you build it from source for now. Commercial licence available for companies building on it.</p>
-      </div>
-
-      <!-- Floating develop panel, driven by scroll -->
-      <aside class="hero-panel" id="heroPanel" aria-hidden="true">
-        <div class="panel-head"><span>Develop</span><span class="mono panel-pv">pv1</span></div>
-        <div class="panel-hist"><canvas id="heroHist" width="480" height="150"></canvas></div>
-        <div class="panel-body" id="heroSliders"></div>
-      </aside>
-
-      <div class="scroll-cue" id="scrollCue" aria-hidden="true">
-        <span class="mono">Scroll to develop this frame</span>
-        <i class="cue-line"></i>
-      </div>
-
+      <p class="hero-note">Free software under the AGPL. Download it for macOS, or build it from source. A commercial licence is available for companies building on it.</p>
     </div>
+
+    <figure class="hero-demo">
+      <img src="assets/img/app-editor.webp" width="1600" height="1000"
+           fetchpriority="high" decoding="async"
+           alt="The Lightbox editor: a Highland road photograph on the canvas, a filmstrip of three images below it, and the develop rail open on the right">
+    </figure>
+
   </div>
 </section>
 
@@ -105,125 +96,47 @@
     <header class="sec-head reveal">
       <p class="eyebrow">01 <span class="dot"></span> Getting in</p>
       <h2 class="h2">There is nothing to import into.</h2>
-      <p class="sec-lede">Most editors want a library before they will let you work. Lightbox skips that step on purpose. Drag a file, a selection, or a folder onto the window and the editor opens on it, with a filmstrip of whatever you brought. Nothing is copied, nothing is indexed, and your photographs stay exactly where you left them on disk.</p>
+      <p class="sec-lede">Most editors want a library before they will let you work. Lightbox skips that step on purpose. Drag a file, a selection, or a folder onto the window and the editor opens on it, with a filmstrip of whatever you brought. Nothing is copied and your photographs stay exactly where you left them on disk. Lightbox does keep a small local record of what you have opened, because that is what carries your edits back to a file you renamed or moved, and there is no catalogue to browse, curate or maintain.</p>
     </header>
 
-    <div class="entry-demo reveal">
-      <div class="entry-shots">
-        <figure class="shot shot-base">
-          <img src="assets/img/app-editor.webp" alt="The Lightbox editor with a landscape photograph on canvas, a filmstrip of raw files and the develop rail open" loading="lazy" decoding="async" width="1600" height="1000">
-          <figcaption class="mono cap-after">Editing, one second later</figcaption>
-        </figure>
-        <figure class="shot shot-over" id="shotEmpty">
-          <img src="assets/img/app-empty.webp" alt="The Lightbox window before any photo is open, showing a dashed drop target" loading="lazy" decoding="async" width="1400" height="900">
-          <figcaption class="mono">An empty window</figcaption>
-        </figure>
-        <div class="drop-token" id="dropToken" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 5h16v14H4z"/><path d="m4 16 5-5 4 4 3-3 4 4"/><circle cx="9" cy="9" r="1.4"/></svg>
-          <span class="mono">DSCF2371.RAF</span>
-        </div>
-      </div>
-      <ol class="entry-steps">
-        <li class="reveal"><b>Drop</b><span>Files, a selection, or a folder. There is an ordinary open dialog too, and a folder browser if you would rather navigate to things. A Dropbox or Drive folder is just a folder, so those work today.</span></li>
-        <li class="reveal"><b>Edit</b><span>The picture is on screen straight away and swaps to the full render a moment later. Nothing waits behind a progress bar.</span></li>
-        <li class="reveal"><b>Come back later</b><span>Lightbox recognises a photograph by its contents, not by its filename. Rename it, move it to another drive, open it again next year, and your edit is still on it.</span></li>
-      </ol>
-    </div>
+    <ol class="entry-steps reveal">
+      <li><b>Drop</b><span>Files, a selection, or a folder. There is an ordinary open dialog too, and a folder browser if you would rather navigate to things. A Dropbox or Drive folder is just a folder, so those work today.</span></li>
+      <li><b>Edit</b><span>The picture is on screen straight away and swaps to the full render a moment later. Nothing waits behind a progress bar.</span></li>
+      <li><b>Come back later</b><span>Lightbox recognises a photograph by its contents, not by its filename. Rename it, move it to another drive, open it again next year, and your edit is still on it.</span></li>
+    </ol>
   </div>
 </section>
 
-<!-- ==================== TOOLS ==================== -->
+<!-- ==================== DEVELOP SURFACE ====================
+     Was a ten group accordion listing about sixty controls with their
+     parameter ranges. The ranges are reference material and belong with the
+     application, not on a landing page. What survives is the line each group
+     already carried in its own summary, which is the part that says what the
+     product does. -->
 <section class="section section-alt" id="colour">
   <div class="wrap">
+
     <header class="sec-head reveal">
       <p class="eyebrow">02 <span class="dot"></span> The develop rail</p>
-      <h2 class="h2">Colour is the whole product.</h2>
-      <p class="sec-lede">Lightbox is not trying to be an everything app. It is trying to be very good at turning a raw capture into the picture you saw when you pressed the shutter. Every control runs on your own GPU in floating point, and the picture keeps up with the slider.</p>
+      <h2 class="h2">Ten panels, and all of them are built.</h2>
+      <p class="sec-lede">Lightbox is not trying to be an everything app. It is trying to be very good at turning a capture into the picture you saw when you pressed the shutter. Ten panels dock in the rail, and every one of them can be dragged to either side, collapsed, soloed or switched off.</p>
     </header>
 
-    <div class="grid-tools">
+    <ul class="rail reveal">
+      <li><b>Histogram</b><span>Live RGB overlay and clip indicators</span></li>
+      <li><b>Basic</b><span>White balance, tone, presence</span></li>
+      <li><b>Geometry</b><span>Crop, aspect, straighten, flip</span></li>
+      <li><b>Tone Curve</b><span>Point and parametric, composite and per channel</span></li>
+      <li><b>HSL</b><span>Eight hue bands, hue, saturation and luminance each</span></li>
+      <li><b>B&amp;W</b><span>Treatment toggle and an eight channel mixer</span></li>
+      <li><b>Color Grading</b><span>Four wheels, blending and balance</span></li>
+      <li><b>Creative Looks</b><span>Your own LUTs, installed and browsable</span></li>
+      <li><b>History</b><span>Every step, and named snapshots</span></li>
+      <li><b>Presets</b><span>Thirty-six bundled, plus everything you make</span></li>
+    </ul>
 
-      <article class="tool tool-wide reveal">
-        <div class="tool-demo">
-          <canvas id="curveDemo" width="640" height="360" aria-label="An interactive tone curve you can drag"></canvas>
-          <p class="tool-hint mono">Drag a point</p>
-        </div>
-        <div class="tool-text">
-          <h3>Tone curve</h3>
-          <p>A parametric curve for broad shape and a point curve for precision, on RGB or any single channel. Values are evaluated in the graph rather than baked, so a curve you draw today renders identically on a machine you have not bought yet.</p>
-        </div>
-      </article>
+    <p class="rail-note reveal"><b>One thing to know before you download.</b> The editor currently grades the finished JPEG your camera embedded in the raw file, and not yet on the sensor data behind it. Full raw decoding through LibRaw is built and bundled, and today only <code>lightbox-cli</code> reaches it. Wiring the sensor path into the editor is the next thing being built.</p>
 
-      <article class="tool reveal">
-        <div class="tool-demo">
-          <canvas id="hslDemo" width="440" height="300" aria-label="A diagram of eight hue bands, each pushed a different amount"></canvas>
-        </div>
-        <div class="tool-text">
-          <h3>HSL and colour grading</h3>
-          <p>Eight hue bands with hue, saturation and luminance each, worked in OkLCh so a saturation push does not drag the hue with it. Three grading wheels sit on top for shadows, midtones and highlights.</p>
-        </div>
-      </article>
-
-      <article class="tool reveal">
-        <div class="tool-demo">
-          <canvas id="wbDemo" width="440" height="300" aria-label="A white balance temperature ramp"></canvas>
-        </div>
-        <div class="tool-text">
-          <h3>White balance that solves</h3>
-          <p>Temperature and tint are solved against the camera's own colour matrix rather than nudged as raw multipliers, and the eyedropper neutralises from any pixel you click.</p>
-        </div>
-      </article>
-
-      <article class="tool reveal">
-        <div class="tool-demo tool-demo-list">
-          <ul class="chiplist">
-            <li>Exposure</li><li>Contrast</li><li>Highlights</li><li>Shadows</li>
-            <li>Whites</li><li>Blacks</li><li>Clarity</li><li>Texture</li>
-            <li>Dehaze</li><li>Vibrance</li><li>Saturation</li><li>B&amp;W mixer</li>
-          </ul>
-        </div>
-        <div class="tool-text">
-          <h3>Tone and presence</h3>
-          <p>Clarity and texture are guided-filter local contrast with halo guards rather than a blunt unsharp mask. Dehaze uses a dark-channel prior. The black and white mixer weights by hue band and can propose its own mix.</p>
-        </div>
-      </article>
-
-      <article class="tool reveal">
-        <div class="tool-demo">
-          <canvas id="cropDemo" width="440" height="300" aria-label="A crop frame that stays level while the image straightens"></canvas>
-        </div>
-        <div class="tool-text">
-          <h3>Crop and straighten</h3>
-          <p>Eight handles, aspect locks, flips, and a straighten angle that constrains the frame to stay inside the image while you rotate it.</p>
-        </div>
-      </article>
-
-      <article class="tool reveal">
-        <div class="tool-demo">
-          <canvas id="histDemo" width="440" height="300" aria-label="A histogram diagram with clipping indicators"></canvas>
-        </div>
-        <div class="tool-text">
-          <h3>Histogram on the GPU</h3>
-          <p>Computed by the same pass that renders the frame and read back without stalling it, with a clipping overlay you can toggle to see exactly which pixels you have thrown away.</p>
-        </div>
-      </article>
-
-      <article class="tool reveal">
-        <div class="tool-demo">
-          <canvas id="exportDemo" width="440" height="300" aria-label="Export settings, with a completed export bar"></canvas>
-        </div>
-        <div class="tool-text">
-          <h3>Export</h3>
-          <p>JPEG, PNG or TIFF, at eight or sixteen bits, resized on the long edge, converted to sRGB, Display P3 or Adobe RGB, with output sharpening. One image or the whole set.</p>
-        </div>
-      </article>
-
-    </div>
-
-    <div class="colour-foot reveal">
-      <p><b>Why it keeps up.</b> The interface and the render engine share one graphics device, so a finished frame never has to travel back through the processor to reach your screen. Move one slider and only the part of the picture that depends on it is worked out again.</p>
-      <p class="colour-caveat">Everything here is global. Masking and local adjustments are not built yet.</p>
-    </div>
   </div>
 </section>
 
@@ -233,61 +146,187 @@
     <header class="sec-head reveal">
       <p class="eyebrow">03 <span class="dot"></span> Looks</p>
       <h2 class="h2">Thirty-six looks, and every one of them opens.</h2>
-      <p class="sec-lede">A look in Lightbox is not a filter laid over your photograph. It is a set of slider positions. Apply one and every control moves to where that look put it, so you can see how it was built and carry on editing from there. Drag anything below and the picture answers immediately.</p>
-      <p class="sec-lede looks-caveat">The grading here runs in your browser, so it is an approximation. The application does the same arithmetic on your GPU, at full resolution, in floating point.</p>
+      <p class="sec-lede">A look in Lightbox is not a filter laid over your photograph. It is a set of slider positions. Apply one and every control moves to where that look put it, so you can see how it was built and carry on editing from there, which is the part a baked filter cannot give you.</p>
+      <p class="sec-lede looks-caveat">Every frame below was rendered by Lightbox itself, on the same photograph, and the numbers are read straight out of the preset files that ship with the app.</p>
     </header>
 
     <div class="looks reveal">
-      <div class="develop-demo">
-        <figure class="dd-stage" id="ddStage">
-          <canvas id="ddCanvas" class="dd-canvas" aria-hidden="true"></canvas>
-          <img id="ddBeforeImg" class="dd-before" src="assets/img/presets/original.webp" alt="The reference photograph, before and after the current develop settings" width="1240" height="825" loading="lazy" decoding="async">
-          <input type="range" id="ddWipeInput" class="dd-wipe-input" min="0" max="100" value="50" step="1" aria-label="Compare before and after" aria-valuetext="50 percent before">
-          <div class="dd-wipe-visual" aria-hidden="true">
-            <i class="dd-wipe-line" id="ddWipeLine"></i>
-            <i class="dd-wipe-grip" id="ddWipeGrip"></i>
-          </div>
-          <span class="dd-tag dd-tag-before mono" aria-hidden="true">Before</span>
-          <span class="dd-tag dd-tag-after mono" aria-hidden="true">After</span>
-          <p class="dd-hint mono" aria-hidden="true">Drag to compare</p>
-          <figcaption class="dd-badge">
-            <span class="mono" id="ddBadgeName">As shot</span>
-            <span class="mono dd-badge-meta" id="ddBadgeGroup">no grade applied</span>
+      <div class="lk-grid">
+        <figure class="lk">
+          <img src="assets/img/presets/original.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the As shot preset applied">
+          <figcaption>
+            <p class="lk-name">As shot<span class="lk-group">No grade applied</span></p>
+            <ul class="lk-vals"><li class="lk-none">No values. This is the file as it came off the card.</li></ul>
           </figcaption>
-          <p class="dd-nogl mono" id="ddNoGl" hidden>WebGL is not available in this browser. Showing the pre-rendered version of each look instead of a live edit.</p>
         </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/glasshouse.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Glasshouse preset applied">
+          <figcaption>
+            <p class="lk-name">Glasshouse<span class="lk-group">Tonal</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">-4</span></li><li><span>Highlights</span><span class="mono">+8</span></li><li><span>Shadows</span><span class="mono">+24</span></li><li><span>Whites</span><span class="mono">+22</span></li><li><span>Blacks</span><span class="mono">+4</span></li></ul>
+          </figcaption>
+        </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/super8.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Super 8 preset applied">
+          <figcaption>
+            <p class="lk-name">Super 8<span class="lk-group">Retro</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+18</span></li><li><span>Highlights</span><span class="mono">+32</span></li><li><span>Shadows</span><span class="mono">+10</span></li><li><span>Whites</span><span class="mono">-22</span></li><li><span>Blacks</span><span class="mono">+6</span></li><li><span>Vibrance</span><span class="mono">-4</span></li><li><span>Saturation</span><span class="mono">-8</span></li></ul>
+          </figcaption>
+        </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/sunday-chrome.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Sunday Chrome preset applied">
+          <figcaption>
+            <p class="lk-name">Sunday Chrome<span class="lk-group">Retro</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+12</span></li><li><span>Highlights</span><span class="mono">+26</span></li><li><span>Shadows</span><span class="mono">+16</span></li><li><span>Whites</span><span class="mono">-20</span></li><li><span>Blacks</span><span class="mono">+18</span></li><li><span>Vibrance</span><span class="mono">-8</span></li><li><span>Saturation</span><span class="mono">-6</span></li></ul>
+          </figcaption>
+        </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/noir-grain.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Noir Grain preset applied">
+          <figcaption>
+            <p class="lk-name">Noir Grain<span class="lk-group">Mono</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+46</span></li><li><span>Highlights</span><span class="mono">+28</span></li><li><span>Shadows</span><span class="mono">-24</span></li><li><span>Whites</span><span class="mono">-16</span></li><li><span>Blacks</span><span class="mono">-28</span></li><li><span>Saturation</span><span class="mono">-100</span></li></ul>
+          </figcaption>
+        </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/neon-rain.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Neon Rain preset applied">
+          <figcaption>
+            <p class="lk-name">Neon Rain<span class="lk-group">Neon</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+26</span></li><li><span>Highlights</span><span class="mono">+26</span></li><li><span>Shadows</span><span class="mono">-10</span></li><li><span>Whites</span><span class="mono">-16</span></li><li><span>Blacks</span><span class="mono">-24</span></li><li><span>Vibrance</span><span class="mono">+14</span></li><li><span>Saturation</span><span class="mono">-4</span></li></ul>
+          </figcaption>
+        </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/moss-slate.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Moss and Slate preset applied">
+          <figcaption>
+            <p class="lk-name">Moss and Slate<span class="lk-group">Verdant</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+16</span></li><li><span>Highlights</span><span class="mono">-26</span></li><li><span>Shadows</span><span class="mono">+12</span></li><li><span>Whites</span><span class="mono">-6</span></li><li><span>Blacks</span><span class="mono">-8</span></li><li><span>Vibrance</span><span class="mono">-6</span></li><li><span>Saturation</span><span class="mono">-10</span></li></ul>
+          </figcaption>
+        </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/concrete-brutal.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Concrete Brutal preset applied">
+          <figcaption>
+            <p class="lk-name">Concrete Brutal<span class="lk-group">Edge</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">+42</span></li><li><span>Highlights</span><span class="mono">+36</span></li><li><span>Shadows</span><span class="mono">-22</span></li><li><span>Whites</span><span class="mono">-16</span></li><li><span>Blacks</span><span class="mono">-32</span></li><li><span>Vibrance</span><span class="mono">-6</span></li><li><span>Saturation</span><span class="mono">-18</span></li></ul>
+          </figcaption>
+        </figure>
+        <figure class="lk">
+          <img src="assets/img/presets/fog-bank.webp" width="900" height="604" loading="lazy" decoding="async"
+               alt="The same photograph rendered by Lightbox with the Fog Bank preset applied">
+          <figcaption>
+            <p class="lk-name">Fog Bank<span class="lk-group">Atmosphere</span></p>
+            <ul class="lk-vals"><li><span>Contrast</span><span class="mono">-34</span></li><li><span>Highlights</span><span class="mono">-10</span></li><li><span>Shadows</span><span class="mono">+30</span></li><li><span>Whites</span><span class="mono">-26</span></li><li><span>Blacks</span><span class="mono">+34</span></li><li><span>Vibrance</span><span class="mono">-20</span></li><li><span>Saturation</span><span class="mono">-26</span></li></ul>
+          </figcaption>
+        </figure>
+      </div>
 
-        <div class="dd-panel">
-          <div class="panel-head">
-            <span>Develop</span>
-            <button type="button" class="dd-reset" id="ddReset">Reset</button>
-          </div>
+      <p class="lk-note">Nine of the thirty-six shown. Seven families ship: Atmosphere, Edge, Mono, Neon, Retro, Tonal and Verdant. You can install your own <code>.cube</code> or HaldCLUT files, save any edit as a preset, and import or export presets as XMP.</p>
 
-          <div class="dd-presets" role="tablist" aria-label="Preset grades" id="ddPresets">
-            <button class="look-chip is-on" role="tab" aria-selected="true" data-look="original"        data-img="original"        data-name="As shot"          data-group="No grade applied">As shot</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="glasshouse"      data-img="glasshouse"      data-name="Glasshouse"       data-group="Tonal">Glasshouse</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="super8"          data-img="super8"          data-name="Super 8"          data-group="Retro">Super 8</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="sunday-chrome"   data-img="sunday-chrome"   data-name="Sunday Chrome"    data-group="Retro">Sunday Chrome</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="noir-grain"      data-img="noir-grain"      data-name="Noir Grain"       data-group="Mono">Noir Grain</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="neon-rain"       data-img="neon-rain"       data-name="Neon Rain"        data-group="Neon">Neon Rain</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="moss-slate"      data-img="moss-slate"      data-name="Moss and Slate"   data-group="Verdant">Moss and Slate</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="concrete-brutal" data-img="concrete-brutal" data-name="Concrete Brutal"  data-group="Edge">Concrete Brutal</button>
-            <button class="look-chip" role="tab" aria-selected="false" data-look="fog-bank"        data-img="fog-bank"        data-name="Fog Bank"         data-group="Atmosphere">Fog Bank</button>
-          </div>
+    </div>
+  </div>
+</section>
 
-          <div class="dd-rail" id="ddRail">
-            <div class="dd-group" id="ddGroupLight">
-              <p class="dd-group-h mono">Light</p>
-            </div>
-            <div class="dd-group" id="ddGroupColour">
-              <p class="dd-group-h mono">Colour</p>
-            </div>
-          </div>
+<!-- ==================== COMMAND LINE ==================== -->
+<section class="section section-alt" id="cli">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow">04 <span class="dot"></span> The command line</p>
+      <h2 class="h2">The same engine, with no window on it.</h2>
+      <p class="sec-lede"><code>lightbox-cli</code> is the whole pipeline as a command. It loads a folder, sets values, applies a look, writes sidecars and exports the set, without opening the editor once. It ships inside the app and finds the raw decoder on its own, so there is nothing to install and nothing to configure.</p>
+    </header>
+
+    <div class="cli-grid">
+
+      <div class="cli-terms reveal">
+        <div class="code-card">
+          <div class="code-head"><span class="mono">Four commands, start to finish</span><button class="copy" data-copy="cli-basic">Copy</button></div>
+          <pre id="cli-basic" class="mono"><code># Load a folder. Nothing is copied and nothing is moved.
+lightbox-cli open ~/Pictures/shoot --recursive \
+    --store ~/Pictures/shoot/work.lbdata --json
+
+# Set tone on one frame
+lightbox-cli edit set --catalog ~/Pictures/shoot/work.lbdata \
+    --image 1 exposure=0.35 contrast=12
+
+# Write an XMP sidecar next to the original
+lightbox-cli xmp write --catalog ~/Pictures/shoot/work.lbdata --image 1
+
+# Export it
+lightbox-cli export --catalog ~/Pictures/shoot/work.lbdata --image 1 \
+    --out out.jpg --format jpeg --quality 92 --long-edge 2048 \
+    --color srgb --sharpen standard</code></pre>
+        </div>
+
+        <div class="code-card">
+          <div class="code-head"><span class="mono">One look across a whole shoot</span><button class="copy" data-copy="cli-batch">Copy</button></div>
+          <pre id="cli-batch" class="mono"><code>STORE=~/Pictures/shoot/work.lbdata
+
+# Load the folder and keep the id of every frame it found
+lightbox-cli open ~/Pictures/shoot --recursive --store "$STORE" --json \
+  | jq -r 'select(.image) | .image' &gt; ids.txt
+
+# Find a bundled look by name, then put it on all of them
+LOOK=$(lightbox-cli preset list --catalog "$STORE" --json \
+  | jq -r '.[] | select(.name == "Fog Bank") | .id')
+while read -r id; do
+  lightbox-cli preset apply --catalog "$STORE" --image "$id" --id "$LOOK"
+done &lt; ids.txt
+
+# Export the set in one pass
+lightbox-cli export --catalog "$STORE" --images "$(paste -sd, ids.txt)" \
+  --out-dir ./out --format jpeg --quality 92 --long-edge 2048</code></pre>
         </div>
       </div>
 
-      <p class="looks-foot">Seven families ship today: Atmosphere, Edge, Mono, Neon, Retro, Tonal and Verdant. You can also install your own <code>.cube</code> or HaldCLUT files, save any edit as a preset, and import or export presets as XMP.</p>
+      <aside class="cli-side reveal">
+        <div class="cli-where">
+          <h3 class="cli-h">It is already on your machine</h3>
+          <p>Installing Lightbox installs it. There is no second download and no separate build.</p>
+          <p class="cli-path mono">/Applications/Lightbox.app/Contents/MacOS/lightbox-cli</p>
+          <p class="cli-where-note">Put that directory on your <code>PATH</code>, or call it by its full path from a script.</p>
+        </div>
+
+        <div class="cli-what">
+          <h3 class="cli-h">What it drives</h3>
+          <ul class="ticks">
+            <li>Load files or folders, recursively, without copying anything</li>
+            <li>The tone and presence values, as <code>param=value</code> pairs</li>
+            <li>All 36 bundled looks, plus your own presets, by name or id</li>
+            <li>History, undo, redo and named snapshots</li>
+            <li>XMP sidecars, read and written</li>
+            <li>Export to JPEG, PNG or TIFF, one image or a list, with resize, depth, colour space and sharpening</li>
+          </ul>
+        </div>
+      </aside>
+
     </div>
+
+    <div class="cli-facts reveal">
+      <div class="cli-fact">
+        <p class="cli-num mono">--json</p>
+        <h3 class="cli-h">Built to be piped</h3>
+        <p>Every command that reports anything takes <code>--json</code> and prints one object per record, so <code>jq</code> reads it without any parsing on your side.</p>
+      </div>
+      <div class="cli-fact">
+        <p class="cli-num mono">0 1 2 3</p>
+        <h3 class="cli-h">Exit codes that mean something</h3>
+        <p>0 success, 1 failure, 2 usage error, 3 catalog corrupt or refused. A build script can tell a typo from a bad file without reading the output.</p>
+      </div>
+      <div class="cli-fact">
+        <p class="cli-num mono">4310 &times; 2870</p>
+        <h3 class="cli-h">This is where the sensor data is</h3>
+        <p>The editor window grades the finished JPEG your camera embedded in the raw file. On the repository's Fujifilm X100 fixture that preview is 2176 by 1448. <code>lightbox-cli</code> decodes the sensor instead, and gets 4310 by 2870. Today the command line is the only way to reach it.</p>
+      </div>
+    </div>
+
+    <p class="cli-commercial reveal">Building Lightbox into something you ship? Read the licence in <a href="https://github.com/thepixelabs/lightbox">the repository</a>, or write to <a href="mailto:licensing@pixelabs.net">licensing@pixelabs.net</a>.</p>
+
   </div>
 </section>
 
@@ -295,15 +334,17 @@
 <section class="section" id="your-work">
   <div class="wrap wrap-split">
     <div class="split-text reveal">
-      <p class="eyebrow">04 <span class="dot"></span> Your work</p>
-      <h2 class="h2">There is no save button.</h2>
-      <p class="sec-lede">Every move you make is written down the moment you make it. Pull the power cord in the middle of a session and the picture comes back exactly where you left it. That is not something we are asking you to take on trust: the test suite kills the program mid-edit, on purpose, over and over, and checks that nothing was lost.</p>
+      <p class="eyebrow">05 <span class="dot"></span> Your work</p>
+      <h2 class="h2">Your original is never touched.</h2>
+      <p class="sec-lede">Lightbox does not save over your photograph, because it never writes to it in the first place. Your edits are a list of values kept in a small file of their own, and the picture on screen is those values applied to the original as it is drawn. The file you imported is opened read-only and stays byte for byte as it came off the card.</p>
       <ul class="ticks">
-        <li>Undo as far back as you like, and it is still there tomorrow</li>
-        <li>Named snapshots, so you can keep two versions of a picture and jump between them</li>
-        <li>Your original file is opened read-only and never written to</li>
-        <li>XMP sidecars next to the photograph, if you want other software to read your edits</li>
+        <li><b>Want the original back?</b> Open the History panel and click the first entry, or press undo until you reach it. The photograph returns to exactly as shot, because that is the only version that was ever on disk.</li>
+        <li><b>Want a copy to send someone?</b> Export writes a new file, in JPEG, PNG or TIFF, at whatever size and quality you choose. It leaves the original alone.</li>
+        <li><b>Want two versions?</b> Named snapshots keep as many as you like on one photograph, and you can jump between them.</li>
+        <li>Undo goes as far back as you like, and it is still there tomorrow.</li>
+        <li>XMP sidecars sit next to the photograph, if you want other software to read your edits. They are a separate file too.</li>
       </ul>
+      <p class="sec-lede">Everything is written down the moment you make it, so there is nothing to lose by forgetting to save. Pull the power cord mid-session and the picture comes back where you left it. That is not a claim to take on trust: the test suite kills the program mid-edit, on purpose, over and over, and checks that nothing was lost.</p>
       <p class="sec-lede own-note">Your edits are values, not baked pixels. They sit in a small file on your own disk, and they can be written alongside the photograph as a sidecar. Nothing is held on a server, nothing expires, and there is no subscription that can switch the program off. The source is public, so the format and the arithmetic are both there to read.</p>
       <p class="sec-lede own-note">Lightbox does not send anything anywhere today. When it starts reporting anonymous usage figures, so we can see which controls people actually reach for, you will be asked on the first run and you will be able to say no. It will never include your files, your filenames, or anything from inside your photographs.</p>
     </div>
@@ -325,11 +366,12 @@
   </div>
 </section>
 
+
 <!-- ==================== STATUS ==================== -->
 <section class="section" id="status">
   <div class="wrap">
     <header class="sec-head reveal">
-      <p class="eyebrow">05 <span class="dot"></span> Honest status</p>
+      <p class="eyebrow">06 <span class="dot"></span> Honest status</p>
       <h2 class="h2">Where the project actually is.</h2>
       <p class="sec-lede">Lightbox is pre-1.0 and moving. Below is the whole picture: what you get if you build it today, what does not exist yet, and where it has and has not actually been run. Nothing in the middle column is described anywhere else on this page as though it works.</p>
     </header>
@@ -339,7 +381,7 @@
         <h3 class="status-h status-yes">Working today</h3>
         <ul class="status-list">
           <li>Drag and drop, open dialog and folder browsing</li>
-          <li>Raw files from Canon, Nikon, Sony, Fujifilm, Olympus, Pentax, Panasonic and DNG <span class="status-ext mono">CR2 CR3 NEF ARW RAF ORF PEF RW2 DNG</span></li>
+          <li>Raw files from Canon, Nikon, Sony, Fujifilm, Olympus, Pentax and DNG <span class="status-ext mono">CR2 CR3 NEF ARW RAF ORF PEF DNG</span></li>
           <li>JPEG, PNG and TIFF through the same pipeline</li>
           <li>White balance, exposure, contrast, highlights, shadows, whites and blacks</li>
           <li>Parametric and point tone curves, per channel</li>
@@ -368,65 +410,71 @@
           <li>Watermarking and metadata on export</li>
           <li>Signing in to cloud storage from inside Lightbox</li>
         </ul>
-        <p class="status-note-body">Masking and local adjustments are the next thing we want to build, and there is no date on them. When AI arrives it will run on your own machine and hand you sliders you can move, not a finished picture you cannot take apart. Cloud storage would point at your storage account, not ours.</p>
+        <p class="status-note-body">Masking and local adjustments are not built, and they are the next thing we want to build. There is no date on them. When AI arrives it will run on your own machine and hand you sliders you can move, not a finished picture you cannot take apart. Cloud storage would point at your storage account, not ours.</p>
       </div>
       <div class="status-col reveal">
-        <h3 class="status-h status-note">Before you build it</h3>
+        <h3 class="status-h status-note">Before you download it</h3>
         <ul class="status-list status-list-muted">
-          <li>There are no installers. You build Lightbox from source, and you will need Rust on your machine to do it.</li>
-          <li>Full raw decoding is a build flag. With it on, Lightbox reads the real sensor data. With it off, raw files still open, but through the small JPEG the camera tucked inside them, which is not enough to push white balance or pull a highlight back. Turning it on means installing LibRaw first.</li>
+          <li><b>The editor works on the preview your camera embedded, not yet on the sensor data.</b> Every raw file carries a finished JPEG inside it so the camera has something to put on its own screen, and that is what the editor currently grades. The canvas says so, in the badge under the image. Full sensor decoding is built and shipped, and today only <code>lightbox-cli</code> reaches it. Wiring it into the editor is the next thing we are building.</li>
           <li>macOS on Apple Silicon is the only platform anyone has really used. Every measurement and every crash drill in the repository was done there.</li>
-          <li>Windows and Linux compile and pass the entire test suite on every commit, and nobody has yet sat down and edited a photograph on either one. Treat them as untested rather than supported.</li>
-          <li>No camera profiles ship yet, so colour comes from the matrix your camera wrote into the file. That is a decent starting point and it is not a calibrated profile. Building real ones needs physical colour targets, and we have not done it.</li>
+          <li>No camera profiles ship yet. The editor grades the preview your camera embedded, which is already in a standard colour space, so a per-camera matrix has nothing to act on until sensor decoding is wired into the editor. Building real profiles needs physical colour targets, and we have not done it.</li>
         </ul>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ==================== BUILD ==================== -->
+<!-- ==================== GET IT ==================== -->
 <section class="section section-alt" id="get">
   <div class="wrap">
     <header class="sec-head reveal">
-      <p class="eyebrow">06 <span class="dot"></span> Get it</p>
-      <h2 class="h2">Four commands and a coffee.</h2>
-      <p class="sec-lede">There are no prebuilt binaries yet, so you build it yourself. The compiler version is pinned in the repository, which means rustup fetches the right one for you the first time you run this.</p>
+      <p class="eyebrow">07 <span class="dot"></span> Get it</p>
+      <h2 class="h2">Download it and drag it to Applications.</h2>
+      <p class="sec-lede">Apple Silicon Macs, macOS 11 and later. Raw decoding is built in, so there is nothing to install alongside it and nothing to configure. Building from source stays supported and is written up in the repository.</p>
     </header>
 
-    <div class="code-grid">
-      <div class="code-card reveal">
-        <div class="code-head"><span class="mono">Clone and build</span><button class="copy" data-copy="code1">Copy</button></div>
-        <pre id="code1" class="mono"><code>git clone https://github.com/thepixelabs/lightbox
+    <div class="get-grid">
+      <div class="get-primary reveal">
+        <a class="btn btn-primary btn-lg" href="https://github.com/thepixelabs/lightbox/releases/latest/download/Lightbox.dmg">Download Lightbox for macOS</a>
+        <p class="get-meta">Apple Silicon <span class="dot"></span> macOS 11+ <span class="dot"></span> <a href="https://github.com/thepixelabs/lightbox/releases/latest">All releases and checksums</a></p>
+
+        <div class="get-note">
+          <h3 class="get-note-h">macOS will say it is damaged. It is not.</h3>
+          <p>Lightbox is not signed with an Apple certificate yet, and macOS words that refusal badly. Drag Lightbox to Applications, then paste this into Terminal once:</p>
+          <div class="code-card">
+            <div class="code-head"><span class="mono">Open it the first time</span><button class="copy" data-copy="code-quarantine">Copy</button></div>
+            <pre id="code-quarantine" class="mono"><code>xattr -dr com.apple.quarantine /Applications/Lightbox.app</code></pre>
+          </div>
+          <p>It opens normally from then on. The same note is inside the disk image, next to the app, and every release publishes a SHA-256 fingerprint if you would rather check the download first.</p>
+        </div>
+      </div>
+
+      <div class="get-secondary reveal">
+        <h3 class="get-h">Build it yourself</h3>
+        <p>The compiler version is pinned in the repository, so rustup fetches the right one on the first run. LibRaw is only needed if you want the decoder in your own build.</p>
+        <div class="code-card">
+          <div class="code-head"><span class="mono">From source</span><button class="copy" data-copy="code1">Copy</button></div>
+          <pre id="code1" class="mono"><code>git clone https://github.com/thepixelabs/lightbox
 cd lightbox
-cargo xtask fixtures
-cargo build --release --workspace
-cargo run -p lightbox-shell</code></pre>
-      </div>
-      <div class="code-card reveal">
-        <div class="code-head"><span class="mono">Turn on full raw decoding</span><button class="copy" data-copy="code2">Copy</button></div>
-        <pre id="code2" class="mono"><code># macOS. Elsewhere, install LibRaw and set LIBRAW_DIR.
 brew install libraw
-cargo build --release -p lightbox-rawproxy --features libraw</code></pre>
-      </div>
-      <div class="code-card reveal">
-        <div class="code-head"><span class="mono">Make a real macOS app</span><button class="copy" data-copy="code3">Copy</button></div>
-        <pre id="code3" class="mono"><code>cargo xtask bundle-mac --install
-# builds Lightbox.app and puts it in /Applications</code></pre>
-      </div>
-      <div class="code-card reveal">
-        <div class="code-head"><span class="mono">Drive it from a script</span><button class="copy" data-copy="code4">Copy</button></div>
-        <pre id="code4" class="mono"><code>lightbox-cli open ~/Pictures/shoot --recursive
-lightbox-cli edit set --image 1 exposure=+0.35 temp=5600
-lightbox-cli export --image 1 --out out.jpg \
+cargo xtask fixtures
+cargo xtask bundle-mac --with-libraw --install</code></pre>
+        </div>
+        <p class="get-foot">That produces the same <code>Lightbox.app</code> the download gives you, in <code>/Applications</code>.</p>
+
+        <h3 class="get-h">Drive it from a script</h3>
+        <p><code>lightbox-cli</code> is the whole engine with no window on it, and it is the one place full sensor decoding is wired up today. It ships inside the app, at <code>/Applications/Lightbox.app/Contents/MacOS/lightbox-cli</code>, and finds the decoder without any setup.</p>
+        <div class="code-card">
+          <div class="code-head"><span class="mono">Headless</span><button class="copy" data-copy="code4">Copy</button></div>
+          <pre id="code4" class="mono"><code>lightbox-cli open ~/Pictures/shoot --recursive --store shoot.lbdata
+lightbox-cli edit set --catalog shoot.lbdata --image 1 exposure=+0.35 contrast=+12
+lightbox-cli export --catalog shoot.lbdata --image 1 --out out.jpg \
     --format jpeg --quality 92 --long-edge 2048</code></pre>
+        </div>
       </div>
     </div>
 
-    <div class="platforms reveal">
-      <div class="plat"><b>macOS</b><span class="pill pill-yes">Verified on Apple Silicon</span></div>
-      <div class="plat"><b>Linux</b><span class="pill pill-mid">Compiles and passes tests, never used</span></div>
-      <div class="plat"><b>Windows</b><span class="pill pill-mid">Compiles and passes tests, never used</span></div>
-    </div>
+    <p class="plat-note reveal">Lightbox is built for macOS. Windows and Linux compile and pass the full test suite on every commit, and nobody has sat down and edited a photograph on either one, so treat them as untested rather than supported. If you run Lightbox on one of them, we would genuinely like to hear how it went.</p>
   </div>
 </section>
 
@@ -435,7 +483,7 @@ lightbox-cli export --image 1 --out out.jpg \
   <div class="wrap">
     <div class="contrib">
       <div class="contrib-main reveal">
-        <p class="eyebrow">07 <span class="dot"></span> Contributing</p>
+        <p class="eyebrow">08 <span class="dot"></span> Contributing</p>
         <h2 class="h2">Pull requests are welcome.</h2>
         <p class="sec-lede">Every change has to pass five gates: it builds, the tests pass, clippy is clean with warnings denied, the formatting matches, and the dependency licences check out. That is the whole bar. Read <code>CONTRIBUTING.md</code> before you start on anything large, because the project keeps written specs and a log of where the code drifted from them, and matching that habit makes a change much easier to take.</p>
         <div class="hero-actions">
@@ -444,11 +492,9 @@ lightbox-cli export --image 1 --out out.jpg \
         </div>
       </div>
       <aside class="licence reveal">
-        <h3>Licence, plainly</h3>
-        <p><b>If you take photographs, this asks nothing of you.</b> Lightbox is free software under the GNU Affero General Public Licence v3. Use it for personal work, for study, and for paid client work. Change it if you like. Running it, modified or not, creates no obligation of any kind and nobody will ever ask you to account for how you use it.</p>
-        <p><b>If you want to build a product on it</b>, or offer it to your users as a hosted service, the AGPL asks you to release the source of that work under the same terms. Plenty of companies are glad to. If yours is not, PixeLabs sells a commercial licence that lifts the copyleft obligation and can carry warranties, indemnity and support.</p>
-        <p>Write to <a href="mailto:licensing@pixelabs.net">licensing@pixelabs.net</a> with your company, how Lightbox would fit in, and the scale you expect.</p>
-        <p class="licence-note">One addition to the standard licence: anything built on Lightbox and given to other people has to credit it in its about box. That is permitted under section 7(b) and is spelled out in <code>COPYING.additional-terms</code>.</p>
+        <h3>Licence</h3>
+        <p>Lightbox is free software under the AGPL-3.0-or-later, with one added attribution term. The exact text is in <code>LICENSE</code> and <code>COPYING.additional-terms</code> in the repository, and the README explains what it means in practice.</p>
+        <p class="licence-commercial">Commercial licences: <a href="mailto:licensing@pixelabs.net">licensing@pixelabs.net</a></p>
       </aside>
     </div>
   </div>
@@ -460,9 +506,8 @@ lightbox-cli export --image 1 --out out.jpg \
   <div class="wrap footer-inner">
     <div class="footer-brand">
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-        <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".45"/>
-        <path d="M16 3.4 A12.6 12.6 0 0 1 27.2 22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-        <circle cx="16" cy="16" r="4.6" fill="currentColor"/>
+        <path d="M10.15 6H6a3 3 0 0 0-3 3v14a3 3 0 0 0 3 3h7.65Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+        <path d="M14.35 6H26a3 3 0 0 1 3 3v14a3 3 0 0 1-3 3h-8.15Z" fill="currentColor" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
       </svg>
       <div>
         <b>Lightbox</b>
@@ -484,26 +529,7 @@ lightbox-cli export --image 1 --out out.jpg \
   </div>
 </footer>
 
-<!-- Cloudflare Web Analytics. Cookieless and collects no personal data, which
-     is why there is no consent banner; privacy.html says what it records.
-     Loaded only on the production host, so running the site locally or from a
-     fork reports nothing and stays free of third-party requests. Put the token
-     from Cloudflare > Web Analytics in CF_TOKEN once the domain is live. -->
-<script>
-(function () {
-  var TOKEN = 'CF_TOKEN';
-  var HOSTS = ['lightbox.pixelabs.net'];
-  if (HOSTS.indexOf(location.hostname) < 0 || TOKEN === 'CF_' + 'TOKEN') return;
-  var s = document.createElement('script');
-  s.defer = true;
-  s.src = 'https://static.cloudflareinsights.com/beacon.min.js';
-  s.setAttribute('data-cf-beacon', JSON.stringify({ token: TOKEN }));
-  document.head.appendChild(s);
-})();
-</script>
 
-<script src="js/develop.js" defer></script>
-<script src="js/scenes.js" defer></script>
 <script src="js/site.js" defer></script>
 </body>
 </html>

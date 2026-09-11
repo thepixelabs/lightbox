@@ -14,6 +14,10 @@ on:
       - 'web/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
+  # A published release changes what the download button points at, so the
+  # site is redeployed with it.
+  release:
+    types: [published]
 
 permissions:
   contents: read

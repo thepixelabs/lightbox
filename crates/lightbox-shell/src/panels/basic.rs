@@ -47,6 +47,7 @@ use lightbox_edit::{ParamDelta, ParamId, ParamValue, WbPreset, WhiteBalance};
 use lightbox_types::SourceKind;
 
 use crate::canvas::gizmo::{WbEyedropper, WB_EYEDROPPER};
+use crate::panels::bw::is_monochrome;
 use crate::panels::develop_ctx::{DevelopCtx, EditBinding};
 use crate::panels::host::{PanelDef, PanelId, SourceReq};
 use crate::panels::widgets::{param_slider, value_slider, SliderEvent, SliderSpec};
@@ -111,17 +112,48 @@ fn tone_section(ui: &mut egui::Ui, ctx: &mut DevelopCtx<'_>) {
 
 // ─── E10 Phase D (task D7): presence ────────────────────────────────────────
 //
-// Clarity/texture/dehaze, the same `-100..=100` house range as the tone
-// sliders above (`pct`), bound through the identical `param_slider` seam.
-// Vibrance/saturation (also `ParamGroup::Presence`, per
-// `lightbox_edit::params::group_of`'s deviations A-5 note) are a separate
-// slice, not built here (out of this phase agent's D2 scope, see
-// `docs/plan/epics/E10-deviations.md`).
+// Clarity/texture/dehaze plus vibrance/saturation, all `ParamGroup::Presence`,
+// all on the same `-100..=100` house range (`pct`) through the identical
+// `param_slider` seam.
+//
+// **Vibrance and saturation were the gap here and they are closed.** The node
+// (`lightbox_render::ng::nodes::global::vibrance_sat`), the shader
+// (`shaders/global_vibrance_sat.wgsl`) and the `ParamId`s all shipped with
+// Phase D, and `lightbox-cli edit set vibrance=…` has always reached them, but
+// the two rail sliders were left out of that phase agent's D2 scope. The
+// visible consequence was that a preset carrying a vibrance push moved your
+// picture somewhere you then could not adjust by hand, which is the worst
+// shape a gap like this can take.
 
 fn presence_section(ui: &mut egui::Ui, ctx: &mut DevelopCtx<'_>) {
     param_slider(ui, ctx, ParamId::Clarity, &pct("Clarity"));
     param_slider(ui, ctx, ParamId::Texture, &pct("Texture"));
     param_slider(ui, ctx, ParamId::Dehaze, &pct("Dehaze"));
+
+    // Vibrance and saturation are colour nodes, and `VibranceSatNode` elides
+    // itself under `Treatment::BlackAndWhite` (`vibrance_sat.rs`, D1's
+    // monochrome-elides-downstream-colour contract). Without this guard the
+    // two sliders would move and change nothing, which is the same defect
+    // these sliders were added to fix, only inverted: before, the value moved
+    // with no control; after, the control moves with no effect.
+    //
+    // `panels/hsl.rs` and `panels/grading.rs` disable themselves on the same
+    // condition. Only these two are wrapped: clarity, texture and dehaze are
+    // luminance work and genuinely do change a black and white render.
+    let mono = is_monochrome(current_treatment(ctx));
+    ui.add_enabled_ui(!mono, |ui| {
+        param_slider(ui, ctx, ParamId::Vibrance, &pct("Vibrance"));
+        param_slider(ui, ctx, ParamId::Saturation, &pct("Saturation"));
+    });
+}
+
+/// The active treatment, for the monochrome guard above. Mirrors the local
+/// helper in `panels/hsl.rs` and `panels/grading.rs`.
+fn current_treatment(ctx: &DevelopCtx<'_>) -> lightbox_edit::Treatment {
+    match ctx.edit.value(ParamId::Treatment) {
+        ParamValue::Treatment(t) => t,
+        _ => lightbox_edit::Treatment::Color,
+    }
 }
 
 // ─── E6: white balance ───────────────────────────────────────────────────────
@@ -471,7 +503,7 @@ mod tests {
     use std::collections::HashMap;
 
     use egui_kittest::{kittest::NodeT as _, kittest::Queryable, Harness};
-    use lightbox_edit::{HistoryStepMeta, SnapshotMeta};
+    use lightbox_edit::{HistoryStepMeta, SnapshotMeta, Treatment};
     use lightbox_types::SnapshotId;
 
     use super::*;
@@ -593,6 +625,51 @@ mod tests {
     /// same shape an undo/redo/preset-apply/history-restore takes against
     /// the real `SessionEditBinding`) and confirm the very next frame's
     /// render reflects it, with zero clicks or drags.
+    /// **The monochrome guard on vibrance and saturation.**
+    ///
+    /// `VibranceSatNode::is_identity` returns true under
+    /// `Treatment::BlackAndWhite`, so the node is elided from the graph
+    /// entirely (pinned on the engine side by
+    /// `lightbox-render/tests/e10_bw_mix.rs`, which asserts
+    /// `global.vibrance_sat` is absent even when the fields are non-zero).
+    ///
+    /// The rail therefore has to disable those two sliders on the same
+    /// condition, or they move and change nothing. This pins the predicate
+    /// the guard reads, in the same "unit test on the predicate, not a pixel
+    /// test" style `panels/bw.rs` uses.
+    #[test]
+    fn vibrance_guard_reads_the_treatment_the_node_elides_on() {
+        let mut binding = RecordingBinding::new();
+        let mut gizmos = GizmoLayer::default();
+
+        binding
+            .values
+            .insert(ParamId::Treatment, ParamValue::Treatment(Treatment::Color));
+        let ctx = DevelopCtx {
+            source_kind: SourceKind::Rendered,
+            edit: &mut binding,
+            gizmos: &mut gizmos,
+        };
+        assert!(
+            !is_monochrome(current_treatment(&ctx)),
+            "a colour treatment must leave the vibrance sliders enabled"
+        );
+
+        binding.values.insert(
+            ParamId::Treatment,
+            ParamValue::Treatment(Treatment::BlackAndWhite),
+        );
+        let ctx = DevelopCtx {
+            source_kind: SourceKind::Rendered,
+            edit: &mut binding,
+            gizmos: &mut gizmos,
+        };
+        assert!(
+            is_monochrome(current_treatment(&ctx)),
+            "black and white must disable them: the node is not in the graph"
+        );
+    }
+
     struct RecordingBinding {
         values: HashMap<ParamId, ParamValue>,
     }
@@ -607,6 +684,11 @@ mod tests {
                 ParamId::Shadows,
                 ParamId::Whites,
                 ParamId::Blacks,
+                ParamId::Clarity,
+                ParamId::Texture,
+                ParamId::Dehaze,
+                ParamId::Vibrance,
+                ParamId::Saturation,
             ] {
                 values.insert(p, ParamValue::F32(0.0));
             }
@@ -645,6 +727,8 @@ mod tests {
         fn can_redo(&self) -> bool {
             false
         }
+        fn reset_all(&mut self) {}
+
         fn undo(&mut self) {}
         fn redo(&mut self) {}
         fn history(&self) -> &[HistoryStepMeta] {

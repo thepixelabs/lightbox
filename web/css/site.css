@@ -219,7 +219,9 @@ a{ color:inherit; }
   color:var(--ink-4); margin:0 0 20px;
   display:flex; align-items:center; gap:10px; flex-wrap:wrap;
 }
-.eyebrow .dot{ width:3px; height:3px; border-radius:50%; background:var(--ink-4); display:inline-block; }
+.eyebrow .dot,
+.get-meta .dot{ width:3px; height:3px; border-radius:50%; background:var(--ink-4); display:inline-block; }
+.get-meta .dot{ margin:0 8px; vertical-align:middle; }
 
 .display{
   font-family:var(--display);
@@ -261,124 +263,174 @@ a{ color:inherit; }
 /* =========================================================================
    HERO
    ========================================================================= */
-.hero{ position:relative; }
-.hero-track{ height:340vh; }
-.hero-sticky{
-  position:sticky; top:0; height:100vh; height:100svh;
+/* Every colour in the hero comes from a custom property. The block declares
+   its own small set on .hero, each one derived from a site token, so a
+   palette change upstream flows straight through. */
+.hero{
+  --hero-frame:      var(--surface);
+  --hero-frame-line: var(--line-2);
+  --hero-rail:       var(--surface-2);
+  --hero-rail-line:  var(--line);
+  --hero-bar:        var(--line-2);
+  --hero-fill-a:     var(--accent-lo);
+  --hero-fill-b:     var(--accent-hi);
+  --hero-thumb:      var(--ink);
+  --hero-thumb-ring: var(--accent-glow);
+  --hero-shadow:     rgb(0 0 0 / .58);
+  --hero-glow:       var(--accent-glow);
+  --hero-focus:      var(--accent-hi);
+
+  position:relative;
+  padding-block:clamp(84px, 10.5vh, 120px) clamp(44px, 6vh, 72px);
   overflow:hidden;
-  display:grid; place-items:center;
 }
 
-.hero-stage{ position:absolute; inset:0; }
-.hero-canvas, .hero-fallback{
+/* one soft pool of light behind the frame */
+.hero::before{
+  content:""; position:absolute; z-index:0; pointer-events:none;
+  right:-12%; top:-16%; width:66%; aspect-ratio:1;
+  background:radial-gradient(circle at 50% 50%, var(--hero-glow), transparent 62%);
+  opacity:.75;
+}
+
+.hero-inner{
+  position:relative; z-index:1;
+  display:grid;
+  grid-template-columns:minmax(0,1.02fr) minmax(0,1fr);
+  gap:clamp(28px, 3.6vw, 60px);
+  align-items:center;
+}
+
+.hero .display{ font-size:clamp(2.1rem, 3.5vw, 3.05rem); }
+.hero-copy > *{ max-width:62ch; }
+.hero-copy .eyebrow{ max-width:none; }
+.hero-copy .lede{ color:var(--ink-2); }
+.hero-actions{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
+.hero-note{ font-size:13px; color:var(--ink-4); margin:0; max-width:56ch; }
+
+/* ---------- the frame ---------------------------------------------------- */
+.hero-demo{ min-width:0; }
+
+.hero-stage{
+  position:relative;
+  aspect-ratio:1600 / 1065;
+  border-radius:var(--r-lg);
+  overflow:hidden;
+  border:1px solid var(--hero-frame-line);
+  background:var(--hero-frame);
+  box-shadow:0 40px 90px -44px var(--hero-shadow);
+}
+.hero-flat, .hero-graded{
   position:absolute; inset:0;
   width:100%; height:100%;
-  object-fit:cover;
+  display:block; object-fit:cover;
 }
-.hero-canvas{ z-index:1; opacity:0; transition:opacity .7s var(--ease); }
-.hero-canvas.is-live{ opacity:1; }
-.hero-canvas.is-live + .hero-fallback{ opacity:0; }
-.hero-fallback{ z-index:0; transition:opacity .7s var(--ease); }
+.hero-flat{ z-index:0; }
 
-.hero-vignette{
-  position:absolute; inset:0; z-index:2; pointer-events:none;
-  background:
-    radial-gradient(120% 85% at 70% 40%, transparent 30%, rgba(4,5,6,.55) 78%, rgba(4,5,6,.86) 100%),
-    linear-gradient(to right, rgba(6,7,8,.94) 0%, rgba(6,7,8,.72) 34%, rgba(6,7,8,.14) 62%, rgba(6,7,8,.4) 100%),
-    linear-gradient(to top, rgba(6,7,8,.9) 0%, transparent 34%);
+/* The only animation in the hero: one cross-fade from the flat preview to
+   the developed frame, played once when the shader is ready. It is tied to
+   readiness, not to scroll position. */
+.hero-graded{
+  z-index:1; opacity:0;
+  transition:opacity .9s var(--ease);
 }
+.hero-graded.is-graded{ opacity:1; }
 
-.hero-copy{
-  position:relative; z-index:4;
-  width:100%; max-width:var(--wrap);
-  margin-inline:auto; padding-inline:var(--pad);
-  max-width:min(var(--wrap), 100%);
-}
-.hero-copy > *{ max-width:730px; }
-.hero-copy .lede{ color:#cbd3da; }
-.hero-actions{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
-.hero-note{ font-size:13px; color:var(--ink-4); margin:0; }
-
-/* floating develop panel */
-.hero-panel{
-  position:absolute; z-index:5;
-  right:clamp(20px,4vw,64px); top:50%;
-  transform:translateY(-50%) translateX(26px);
-  width:min(310px, 30vw);
-  background:linear-gradient(180deg, rgba(22,26,30,.9), rgba(13,16,19,.9));
-  border:1px solid var(--line-2);
+/* ---------- the two sliders ---------------------------------------------- */
+.hero-rail{
+  margin-top:14px;
+  padding:13px 16px 16px;
+  border:1px solid var(--hero-rail-line);
   border-radius:var(--r);
-  box-shadow:0 32px 80px -30px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.06) inset;
-  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
-  opacity:0; transition:opacity .8s var(--ease), transform .8s var(--ease-out);
-  overflow:hidden;
+  background:var(--hero-rail);
 }
-.hero-panel.is-in{ opacity:1; transform:translateY(-50%) translateX(0); }
-
-.panel-head{
-  display:flex; justify-content:space-between; align-items:center;
-  padding:10px 13px;
-  font-size:12px; font-weight:600; letter-spacing:.01em;
-  border-bottom:1px solid var(--line);
-  background:linear-gradient(180deg, rgba(255,255,255,.045), transparent);
-}
-.panel-pv{ color:var(--ink-4); }
-.panel-hist{ padding:10px 12px 4px; }
-.panel-hist canvas{
-  width:100%; height:auto; display:block;
-  background:#0a0c0e; border:1px solid var(--line); border-radius:5px;
-}
-.panel-body{ padding:6px 13px 14px; }
-
-.prow{ margin:9px 0 0; }
-.prow-top{
+.hero-rail-head{
   display:flex; justify-content:space-between; align-items:baseline;
-  font-size:11.5px; color:var(--ink-3); margin-bottom:4px;
+  gap:12px; margin:0 0 4px;
+  font-size:12.5px; font-weight:600;
 }
-.prow-val{ font-family:var(--mono); font-size:11px; color:var(--ink); font-variant-numeric:tabular-nums; }
-.ptrack{
-  position:relative; height:3px; border-radius:2px;
-  background:rgba(255,255,255,.08);
+.hero-rail-hint{ color:var(--ink-4); font-weight:400; }
+
+.hrow{
+  display:grid; grid-template-columns:1fr auto;
+  align-items:baseline; column-gap:12px;
+  margin-top:10px;
 }
-.pfill{
-  position:absolute; top:0; bottom:0; border-radius:2px;
-  background:linear-gradient(90deg, var(--accent-lo), var(--accent-hi));
+.hrow-label{ font-size:12.5px; color:var(--ink-2); }
+.hrow-val{ font-size:11.5px; color:var(--ink); font-variant-numeric:tabular-nums; }
+
+/* The unfilled bar is painted by CSS, so the row is correct on the very
+   first paint, before any script has run. */
+.hrow-track{
+  grid-column:1 / -1;
+  position:relative; height:22px; margin-top:5px;
 }
-.pknob{
-  position:absolute; top:50%; width:11px; height:11px; border-radius:50%;
-  transform:translate(-50%,-50%);
-  background:linear-gradient(180deg,#dfe6ec,#9aa7b2);
-  box-shadow:0 0 0 1px rgba(0,0,0,.55), 0 0 12px -2px var(--accent-glow);
+.hrow-track::before{
+  content:""; position:absolute; left:0; right:0; top:50%;
+  height:4px; margin-top:-2px; border-radius:999px;
+  background:var(--hero-bar);
+}
+/* The accent fill is decoration that script positions, from the centre out.
+   Its default is a zero-width fill at the centre, which is exactly right
+   before script runs. The 15px terms are the thumb width, so the fill ends
+   under the thumb rather than a few pixels past it. */
+.hrow-fill{
+  position:absolute; top:50%; height:4px; margin-top:-2px; border-radius:999px;
+  left:calc(7.5px + (100% - 15px) * var(--a, .5));
+  width:calc((100% - 15px) * var(--w, 0));
+  background:linear-gradient(90deg, var(--hero-fill-a), var(--hero-fill-b));
 }
 
-.scroll-cue{
-  position:absolute; bottom:26px; left:50%; transform:translateX(-50%);
-  z-index:5; display:flex; flex-direction:column; align-items:center; gap:10px;
-  color:var(--ink-4); transition:opacity .5s var(--ease);
+.hrow-input{
+  -webkit-appearance:none; appearance:none;
+  position:relative; z-index:2;
+  display:block; width:100%; height:22px; margin:0; padding:0;
+  background:transparent; cursor:pointer;
 }
-.cue-line{
-  display:block; width:1px; height:38px;
-  background:linear-gradient(to bottom, var(--ink-4), transparent);
-  /* Pulses a few times to draw the eye, then holds as a plain static line.
-     It also fades out entirely once you actually scroll (see site.js), so
-     this only ever plays for a reader who has not moved yet. */
-  animation:cue 2.2s var(--ease) 3;
-  animation-fill-mode:forwards;
-  transform-origin:top;
+.hrow-input::-webkit-slider-runnable-track{ height:22px; border:0; background:transparent; }
+.hrow-input::-moz-range-track{ height:22px; border:0; background:transparent; }
+.hrow-input::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none;
+  width:15px; height:15px; margin-top:3.5px;
+  border:0; border-radius:50%;
+  background:var(--hero-thumb);
+  box-shadow:0 0 0 1px var(--hero-shadow), 0 0 12px -2px var(--hero-glow);
 }
-@keyframes cue{
-  0%{ transform:scaleY(0); opacity:0 }
-  35%{ transform:scaleY(1); opacity:1 }
-  100%{ transform:scaleY(1); opacity:.6 }
+.hrow-input::-moz-range-thumb{
+  width:15px; height:15px; border:0; border-radius:50%;
+  background:var(--hero-thumb);
+  box-shadow:0 0 0 1px var(--hero-shadow), 0 0 12px -2px var(--hero-glow);
+}
+.hrow-input:focus{ outline:none; }
+.hrow-input:focus-visible{
+  outline:2px solid var(--hero-focus);
+  outline-offset:3px; border-radius:999px;
+}
+.hrow-input:focus-visible::-webkit-slider-thumb{
+  box-shadow:0 0 0 4px var(--hero-thumb-ring), 0 0 0 1px var(--hero-shadow);
+}
+.hrow-input:focus-visible::-moz-range-thumb{
+  box-shadow:0 0 0 4px var(--hero-thumb-ring), 0 0 0 1px var(--hero-shadow);
 }
 
-.hero-credit{
-  position:relative; z-index:6;
-  text-align:center; color:var(--ink-4);
-  padding:20px var(--pad) 0; margin:0;
-  font-size:11px;
+.hero-reset{
+  margin-top:14px;
+  font:inherit; font-size:12px; line-height:1.2;
+  color:var(--ink-3); background:transparent;
+  border:1px solid var(--hero-rail-line); border-radius:6px;
+  padding:6px 12px; cursor:pointer;
+  transition:color .2s var(--ease), border-color .2s var(--ease);
 }
-.hero-credit .sep{ opacity:.4; margin-inline:7px; }
+.hero-reset:hover{ color:var(--ink); border-color:var(--hero-frame-line); }
+.hero-reset:focus-visible{ outline:2px solid var(--hero-focus); outline-offset:2px; }
+
+.hero-nogl{ margin:12px 0 0; font-size:12px; color:var(--ink-4); }
+.hero-caveat{
+  margin:12px 0 0;
+  font-size:12.5px; line-height:1.6; color:var(--ink-4);
+  max-width:62ch;
+}
+.hero-caveat code{ font-family:var(--mono); font-size:.92em; }
 
 /* =========================================================================
    ENTRY
@@ -620,6 +672,15 @@ a{ color:inherit; }
   border:1px solid var(--line); border-radius:var(--r-lg);
   overflow:hidden;
 }
+/* Was declared in the hero block, which is gone. The develop demo is its
+   only consumer now, so it lives here. */
+.panel-head{
+  display:flex; justify-content:space-between; align-items:center;
+  padding:10px 13px;
+  font-size:12px; font-weight:600; letter-spacing:.01em;
+  border-bottom:1px solid var(--line);
+  background:linear-gradient(180deg, rgba(255,255,255,.045), transparent);
+}
 .dd-panel .panel-head{ padding:11px 15px; }
 .dd-reset{
   font-family:var(--mono); font-size:11px; letter-spacing:.02em;
@@ -825,19 +886,6 @@ a{ color:inherit; }
 }
 .code-card code{ font-family:var(--mono); }
 
-.platforms{ display:flex; gap:14px; flex-wrap:wrap; }
-.plat{
-  display:flex; align-items:center; gap:12px;
-  padding:13px 18px; border-radius:var(--r);
-  border:1px solid var(--line); background:var(--surface);
-  font-family:var(--display); font-weight:600; letter-spacing:-.015em;
-}
-.pill{
-  font-family:var(--mono); font-size:10.5px; font-weight:400;
-  padding:4px 10px; border-radius:100px; letter-spacing:.02em;
-}
-.pill-yes{ background:rgba(111,191,138,.14); color:#79c793; border:1px solid rgba(111,191,138,.28); }
-.pill-mid{ background:rgba(255,255,255,.05); color:var(--ink-3); border:1px solid var(--line-2); }
 
 /* =========================================================================
    CONTRIBUTE
@@ -955,19 +1003,9 @@ a{ color:inherit; }
   .nav-brand{ margin-right:auto; }
   .entry-demo, .wrap-split, .privacy, .contrib, .develop-demo{ grid-template-columns:1fr; }
   .code-grid{ grid-template-columns:1fr; }
-  .hero-track{ height:300vh; }
-  .hero-panel{
-    right:auto; left:var(--pad); top:auto; bottom:96px;
-    transform:translateX(0) translateY(20px);
-    width:min(280px, calc(100% - var(--pad)*2));
-  }
-  .hero-panel.is-in{ transform:none; }
+  .hero-inner{ grid-template-columns:1fr; gap:clamp(28px,4vw,40px); }
+  .hero .display{ font-size:clamp(2.2rem, 6.4vw, 3.2rem); }
   .hero-copy > *{ max-width:none; }
-  .hero-vignette{
-    background:
-      linear-gradient(to top, rgba(6,7,8,.96) 8%, rgba(6,7,8,.72) 42%, rgba(6,7,8,.35) 100%),
-      radial-gradient(120% 80% at 50% 30%, transparent 20%, rgba(4,5,6,.6) 90%);
-  }
 }
 
 @media (max-width:680px){
@@ -977,9 +1015,8 @@ a{ color:inherit; }
   .eyebrow{ font-size:10px; letter-spacing:.12em; gap:7px; }
   .grid-tools{ grid-template-columns:1fr; }
   .tool, .tool-wide{ grid-column:span 1; }
-  .hero-panel{ display:none; }
-  .hero-sticky{ align-items:end; }
-  .hero-copy{ padding-bottom:96px; }
+  .hero{ padding-block:72px 48px; }
+  .hero-rail{ padding:12px 13px 15px; }
   .nav-cta .btn-ghost{ display:none; }
 }
 /* =========================================================================
@@ -993,12 +1030,10 @@ a{ color:inherit; }
     transition-duration:.001ms !important;
   }
   .reveal{ opacity:1; transform:none; }
-  .hero-track{ height:auto; }
-  .hero-sticky{ position:relative; height:auto; min-height:88vh; padding-block:120px 60px; }
-  /* Show the finished develop state at rest, but keep the panel docked to the
-     right so it does not land on top of the copy. */
-  .hero-panel{ opacity:1; transform:translateY(-50%); }
-  .hero-copy{ position:relative; }
+  /* The hero cross-fade does not play. The developed frame is simply there
+     from the start, and the two sliders work exactly as they do with motion
+     allowed, so nothing about the section stops making sense. */
+  .hero-graded{ transition:none !important; }
   .grain{ display:none; }
   .shot-over{ opacity:0; }
   .cap-after{ opacity:1; }
@@ -1021,3 +1056,1434 @@ a{ color:inherit; }
   font-size:10.5px !important; color:var(--ink-4);
   letter-spacing:.06em;
 }
+
+/* ---------------------------------------------------------------------------
+   GET IT
+   The download is the primary action on the page, so it gets the left column
+   at full width and building from source sits beside it rather than under it.
+   The quarantine note is deliberately loud: it is the first thing that will
+   happen to anyone who downloads an unsigned app, and burying it means they
+   meet the error with no explanation.
+   --------------------------------------------------------------------------- */
+.get-grid{
+  display:grid;
+  grid-template-columns:1.05fr .95fr;
+  gap:34px;
+  align-items:start;
+}
+/* A grid item defaults to min-width:auto, so the widest unbreakable thing
+   inside it, here the `xattr` line in a code block, sets the column's
+   floor and pushes the whole page sideways on a phone. min-width:0 lets the
+   column shrink and hands the overflow to the pre's own scroller, which
+   already has overflow-x:auto. */
+.get-primary,
+.get-secondary,
+.get-primary .code-card,
+.get-secondary .code-card{ min-width:0; }
+.get-primary .btn-lg{ width:100%; text-align:center; }
+.get-meta{
+  margin:12px 0 0;
+  font-size:13px;
+  color:var(--ink-3);
+}
+.get-meta a{ color:var(--ink-2); }
+.get-meta a:hover{ color:var(--ink); }
+
+.get-note{
+  margin-top:26px;
+  padding:20px 22px;
+  border:1px solid var(--line-2);
+  border-radius:14px;
+  background:var(--surface);
+}
+.get-note-h{
+  margin:0 0 10px;
+  font-family:var(--display);
+  font-size:17px;
+  font-weight:600;
+  letter-spacing:-.01em;
+  color:var(--ink);
+}
+.get-note p{
+  margin:0 0 12px;
+  font-size:14.5px;
+  line-height:1.62;
+  color:var(--ink-2);
+}
+.get-note p:last-child{ margin-bottom:0; }
+.get-note .code-card{ margin:0 0 12px; }
+
+.get-h{
+  margin:0 0 8px;
+  font-family:var(--display);
+  font-size:17px;
+  font-weight:600;
+  letter-spacing:-.01em;
+  color:var(--ink);
+}
+.get-secondary .get-h + p{
+  margin:0 0 14px;
+  font-size:14.5px;
+  line-height:1.62;
+  color:var(--ink-2);
+}
+.get-secondary .code-card{ margin-bottom:22px; }
+.get-foot{
+  margin:-12px 0 26px;
+  font-size:13.5px;
+  line-height:1.6;
+  color:var(--ink-3);
+}
+.plat-note{
+  margin:34px 0 0;
+  padding-top:22px;
+  border-top:1px solid var(--line);
+  max-width:74ch;
+  font-size:14.5px;
+  line-height:1.65;
+  color:var(--ink-3);
+}
+
+@media (max-width:900px){
+  .get-grid{ grid-template-columns:1fr; gap:28px; }
+}
+
+/* A claim the page makes about a gap in the product. Quieter than body copy,
+   but not hidden: the point is that a visitor learns the limit here rather
+   than after downloading. */
+.tool-caveat{
+  margin-top:12px;
+  padding-top:12px;
+  border-top:1px solid var(--line);
+  font-size:13.5px;
+  line-height:1.6;
+  color:var(--ink-3);
+}
+/* =========================================================================
+   LANE A: the colour and type system. Append after site.css. It overrides
+   by source order and adds nothing to the markup.
+
+   What changed and why. site.css declared three spectral accents and one
+   brand accent at the top and then spent them in a single rule. That, not
+   darkness, is why the page read as grey. Light is now the default ground,
+   every legacy token is redefined in place so existing rules inherit sane
+   values on the first paint, and section 3 writes the rules that actually
+   put colour on the page: keyed section eyebrows, tinted alternating
+   sections, accent links and inline code, the three status colours carried
+   on the status columns and the quarantine callout, and a primary button
+   whose label is readable.
+
+   Surfaces that represent the application itself stay dark in both modes on
+   a separate instrument token set: the demo canvases, the develop rail, the
+   code plates, the history card, anything over a photograph. The product is
+   a dark editor, and this keeps scenes.js and site.js correct untouched.
+
+   Histograms keep true RGB. Typefaces are untouched; only weight and rhythm
+   move.
+   ========================================================================= */
+
+
+/* =========================================================================
+   1. TOKENS. Light is the default.
+   Every text token is annotated with its measured contrast ratio against
+   the background it is designed to sit on. WCAG AA is 4.5:1 for body copy.
+   Anything below that is labelled NON-TEXT and is never used for a string.
+   ========================================================================= */
+:root{
+  color-scheme: light dark;
+
+  /* ---- ground and surfaces ------------------------------------------
+     A warm neutral paper rather than pure white. Pure white next to a
+     photograph reads as a blown highlight; paper reads as a light table. */
+  --bg:        #faf9f7;   /* page ground */
+  --bg-2:      #f2f0ed;   /* alternating sections, footer */
+  --surface:   #ffffff;   /* cards lifted off the ground */
+  --surface-2: #f6f4f1;   /* recessed wells inside cards */
+  --surface-3: #edeae6;   /* pressed and hover states on the ground */
+
+  /* ---- lines --------------------------------------------------------- */
+  --line:      rgba(20,23,28,.10);   /* hairline, NON-TEXT */
+  --line-2:    rgba(20,23,28,.18);   /* stated border, NON-TEXT */
+  --line-3:    rgba(20,23,28,.30);   /* hover border, NON-TEXT */
+
+  /* ---- ink, four levels ---------------------------------------------
+     Measured against --bg #faf9f7. Levels 1 to 4 all clear AA, so any of
+     them may carry body copy. Decoration has its own token below so that
+     dimming a rule never means dimming a sentence. */
+  --ink:       #14171c;   /* 17.07:1 AAA. headings, emphasis */
+  --ink-2:     #363c44;   /* 10.58:1 AAA. body copy, ledes */
+  --ink-3:     #4e555e;   /*  7.17:1 AAA. secondary copy, card body */
+  --ink-4:     #656c75;   /*  5.05:1 AA.  fine print, captions, caveats */
+  --ink-faint: #9aa1aa;   /*  2.48:1 NON-TEXT ONLY. rules, spines, dots */
+  --ink-mute:  #7b838d;   /*  3.65:1 NON-TEXT ONLY. meaningful indicators,
+                              clears the 3:1 non-text minimum */
+
+  /* ---- brand accent ---------------------------------------------------
+     The shipped app accent #5583a8 sits at 3.75:1 on paper, which is below
+     AA, so it could never carry a link. Same hue family, more chroma and
+     enough depth to be a text colour as well as a fill. */
+  --accent:        #1266b0;  /* 5.62:1 on --bg AA. fills, primary button */
+  --accent-hover:  #0f5b9e;  /* 6.44:1 on --bg AA */
+  --accent-active: #0b4a83;  /* 8.05:1 on --bg AAA */
+  --accent-hi:     #0d5490;  /* 7.43:1 on --bg AAA. links, strong accent text */
+  --accent-lo:     #6aa8dd;  /* NON-TEXT. light end of gradient fills */
+  --accent-on:     #ffffff;  /* 5.91:1 on --accent AA. text on an accent fill */
+  --accent-wash:   #e9f1fa;  /* NON-TEXT ground. --accent-hi on it is 6.86:1 */
+  --accent-line:   rgba(18,102,176,.30);
+  --accent-glow:   rgba(18,102,176,.26);
+
+  /* ---- spectral accents, the grading language -------------------------
+     Three, drawn at ink weight so they can key a section heading and still
+     be read. The bright variants are for the instrument surfaces only. */
+  --sp-warm:     #c2410c;  /* 4.92:1 on --bg AA */
+  --sp-warm-ink: #9a3609;  /* 6.87:1 on --bg AA */
+  --sp-warm-wash:#fdefe6;  /* NON-TEXT ground. --sp-warm-ink on it is 6.42:1 */
+  --sp-mag:      #b02a63;  /* 5.94:1 on --bg AA */
+  --sp-mag-ink:  #8f2050;  /* 8.01:1 on --bg AAA */
+  --sp-mag-wash: #fceef4;  /* NON-TEXT ground. --sp-mag-ink on it is 7.50:1 */
+  --sp-cool:     #0f766e;  /* 5.20:1 on --bg AA */
+  --sp-cool-ink: #0b5d57;  /* 7.34:1 on --bg AAA */
+  --sp-cool-wash:#e6f4f2;  /* NON-TEXT ground. --sp-cool-ink on it is 6.84:1 */
+
+  /* ---- status --------------------------------------------------------- */
+  --ok:        #15703f;   /* 5.42:1 on --bg AA,  5.71:1 on --surface AA */
+  --ok-wash:   #e6f3ea;
+  --warn:      #8f5407;   /* 5.80:1 on --bg AA,  6.11:1 on --surface AA */
+  --warn-wash: #fdf4e4;   /* NON-TEXT ground. --warn on it is 5.59:1 */
+  --err:       #b4272a;   /* 6.11:1 on --bg AA,  6.43:1 on --surface AA */
+  --err-wash:  #fdecec;
+
+  /* ---- instrument surfaces -------------------------------------------
+     The application's own chrome: demo canvases, the develop rail, code
+     plates, the history card, anything over a photograph. Dark in both
+     modes on purpose. scenes.js and site.js draw light strokes onto these
+     and are not touched by this file. */
+  --inst-bg:     #0f1216;
+  --inst-bg-2:   #14181d;
+  --inst-bg-3:   #0a0c0f;   /* deepest well: image stages, histogram plate */
+  --inst-line:   rgba(255,255,255,.09);
+  --inst-line-2: rgba(255,255,255,.17);
+  --inst-ink:    #edf0f3;   /* 16.42:1 on --inst-bg AAA */
+  --inst-ink-2:  #b9c1c9;   /* 10.31:1 on --inst-bg AAA */
+  --inst-ink-3:  #98a1aa;   /*  7.17:1 on --inst-bg AAA */
+  --inst-ink-4:  #7d8791;   /*  5.14:1 on --inst-bg AA */
+  --inst-accent: #6ba7dc;   /*  7.32:1 on --inst-bg AAA */
+  --inst-accent-lo: #2c5f88; /* NON-TEXT. dark end of rail fills */
+  --inst-on-accent: #0f1216;/*  7.32:1 on --inst-accent AAA */
+  --inst-warm:   #f2b46a;   /* 10.29:1 on --inst-bg AAA */
+  --inst-mag:    #e58ab0;   /*  7.68:1 on --inst-bg AAA */
+  --inst-cool:   #63c3dc;   /*  9.27:1 on --inst-bg AAA */
+  --inst-ok:     #5fbf8a;   /*  8.32:1 on --inst-bg AAA */
+
+  /* ---- elevation. Cool tinted, never pure black on paper. ------------- */
+  --shadow-1: 0 1px 2px rgba(18,26,38,.05), 0 2px 6px -2px rgba(18,26,38,.07);
+  --shadow-2: 0 1px 2px rgba(18,26,38,.05), 0 14px 30px -14px rgba(18,26,38,.18);
+  --shadow-3: 0 2px 4px rgba(18,26,38,.06), 0 34px 70px -30px rgba(18,26,38,.30);
+
+  /* ---- focus ---------------------------------------------------------- */
+  --ring: var(--accent-active);   /* 8.05:1 against --bg, AAA at every surface */
+
+  /* ---- the per section key, defaulted to brand ------------------------ */
+  --key:      var(--accent);
+  --key-ink:  var(--accent-hi);
+  --key-wash: var(--accent-wash);
+}
+
+/* An explicit choice always wins over the system preference. */
+:root[data-theme="light"]{ color-scheme: light; }
+:root[data-theme="dark"]{  color-scheme: dark;  }
+
+
+/* =========================================================================
+   2. DARK MODE. Tokens only. No rule below this comment.
+   The guard means a page carrying data-theme="light" keeps the light set
+   even on a machine set to dark.
+   ========================================================================= */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:        #0d1013;
+    --bg-2:      #12161a;
+    --surface:   #171c21;
+    --surface-2: #1d2329;
+    --surface-3: #232a31;
+
+    --line:      rgba(255,255,255,.085);
+    --line-2:    rgba(255,255,255,.16);
+    --line-3:    rgba(255,255,255,.28);
+
+    --ink:       #eef1f4;   /* 16.83:1 on --bg AAA */
+    --ink-2:     #c2cad2;   /* 11.51:1 on --bg AAA */
+    --ink-3:     #a2abb4;   /*  8.20:1 on --bg AAA */
+    --ink-4:     #8a939c;   /*  6.12:1 on --bg AA  */
+    --ink-faint: #3f464e;   /* NON-TEXT ONLY */
+    --ink-mute:  #5a626a;   /* NON-TEXT ONLY, 3.08:1 clears the 3:1 minimum */
+
+    --accent:        #2f7cc0;  /* fill. --accent-on white on it is 4.55:1 AA */
+    --accent-hover:  #3f8dd2;
+    --accent-active: #256aa8;
+    --accent-hi:     #63a6e0;  /* 7.32:1 on --bg AAA. links */
+    --accent-lo:     #2c5f88;  /* NON-TEXT */
+    --accent-on:     #ffffff;
+    --accent-wash:   #14222e;
+    --accent-line:   rgba(99,166,224,.34);
+    --accent-glow:   rgba(99,166,224,.30);
+
+    --sp-warm:      #f0a64c;   /* 9.33:1 on --bg AAA */
+    --sp-warm-ink:  #f5bd77;
+    --sp-warm-wash: #2a1f10;
+    --sp-mag:       #e77ba8;   /* 7.08:1 on --bg AAA */
+    --sp-mag-ink:   #ee9dc0;
+    --sp-mag-wash:  #2a1520;
+    --sp-cool:      #4fbfd8;   /* 8.88:1 on --bg AAA */
+    --sp-cool-ink:  #7ad2e5;
+    --sp-cool-wash: #0f2429;
+
+    --ok:        #54c58a;   /* 8.84:1 on --bg AAA */
+    --ok-wash:   #10241a;
+    --warn:      #e0a344;   /* 8.62:1 on --bg AAA */
+    --warn-wash: #241a0c;
+    --err:       #f0736f;   /* 6.71:1 on --bg AA */
+    --err-wash:  #2a1414;
+
+    /* Instrument plates lift in dark mode so they still read as plates
+       rather than dissolving into the page, and the deepest well drops
+       below the page ground so a demo screen still reads as a screen. */
+    --inst-bg:   #191f25;   /* --inst-ink 14.52:1 AAA, --inst-ink-4 4.55:1 AA */
+    --inst-bg-2: #1f262d;
+    --inst-bg-3: #0a0d10;
+
+    --shadow-1: 0 1px 2px rgba(0,0,0,.40), 0 2px 8px -2px rgba(0,0,0,.45);
+    --shadow-2: 0 1px 2px rgba(0,0,0,.45), 0 18px 36px -16px rgba(0,0,0,.70);
+    --shadow-3: 0 2px 6px rgba(0,0,0,.50), 0 40px 80px -32px rgba(0,0,0,.85);
+
+    --ring: var(--accent-hi);
+  }
+}
+
+/* The same set, applied when the reader has explicitly asked for dark. */
+:root[data-theme="dark"]{
+  --bg:#0d1013; --bg-2:#12161a; --surface:#171c21; --surface-2:#1d2329; --surface-3:#232a31;
+  --line:rgba(255,255,255,.085); --line-2:rgba(255,255,255,.16); --line-3:rgba(255,255,255,.28);
+  --ink:#eef1f4; --ink-2:#c2cad2; --ink-3:#a2abb4; --ink-4:#8a939c;
+  --ink-faint:#3f464e; --ink-mute:#5a626a;
+  --accent:#2f7cc0; --accent-hover:#3f8dd2; --accent-active:#256aa8; --accent-hi:#63a6e0;
+  --accent-lo:#2c5f88; --accent-on:#ffffff; --accent-wash:#14222e;
+  --accent-line:rgba(99,166,224,.34); --accent-glow:rgba(99,166,224,.30);
+  --sp-warm:#f0a64c; --sp-warm-ink:#f5bd77; --sp-warm-wash:#2a1f10;
+  --sp-mag:#e77ba8;  --sp-mag-ink:#ee9dc0;  --sp-mag-wash:#2a1520;
+  --sp-cool:#4fbfd8; --sp-cool-ink:#7ad2e5; --sp-cool-wash:#0f2429;
+  --ok:#54c58a; --ok-wash:#10241a; --warn:#e0a344; --warn-wash:#241a0c;
+  --err:#f0736f; --err-wash:#2a1414;
+  --inst-bg:#191f25; --inst-bg-2:#1f262d; --inst-bg-3:#0a0d10;
+  --shadow-1:0 1px 2px rgba(0,0,0,.40), 0 2px 8px -2px rgba(0,0,0,.45);
+  --shadow-2:0 1px 2px rgba(0,0,0,.45), 0 18px 36px -16px rgba(0,0,0,.70);
+  --shadow-3:0 2px 6px rgba(0,0,0,.50), 0 40px 80px -32px rgba(0,0,0,.85);
+  --ring:var(--accent-hi);
+}
+
+
+/* =========================================================================
+   3. THE RULES THAT SPEND THE TOKENS.
+   Written against the class names already in web/css/site.css.
+   ========================================================================= */
+
+/* ---- 3.1 page ground ---------------------------------------------------
+   .section-alt was a two step darker grey. It becomes a distinctly cooler,
+   deeper paper so the alternation is legible as a change of material and
+   not as a rendering artefact. */
+body{ background:var(--bg); color:var(--ink-2); }
+.section-alt{ background:var(--bg-2); border-block:1px solid var(--line); isolation:isolate; }
+.section-alt::after{
+  content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--key) 9%, transparent) 0%, transparent 40%),
+    radial-gradient(70% 46% at 88% 4%, color-mix(in srgb, var(--key) 9%, transparent), transparent 72%);
+}
+.section-alt > .wrap{ position:relative; z-index:1; }
+
+.section:not(.section-alt){ isolation:isolate; }
+.section:not(.section-alt)::after{
+  content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+  background:radial-gradient(64% 42% at 82% 2%, color-mix(in srgb, var(--key) 8%, transparent), transparent 70%);
+}
+.section:not(.section-alt) > .wrap{ position:relative; z-index:1; }
+
+/* The grain layer multiplied a dark noise tile over the page. On paper it
+   just adds mud, so it is pulled back and made to sit in the highlights. */
+.grain{ opacity:.016; mix-blend-mode:multiply; }
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]) .grain{ opacity:.028; mix-blend-mode:normal; }
+}
+
+/* ---- 3.2 the section key ----------------------------------------------
+   Seven sections, four keys, assigned by meaning rather than rotation. The
+   two sections whose subject is colour take the warm and magenta keys, the
+   section about keeping your work takes the cool one, and every section
+   that asks the reader to do something keeps the brand accent. */
+.section{ --key:var(--accent); --key-ink:var(--accent-hi); --key-wash:var(--accent-wash); }
+#colour   { --key:var(--sp-warm); --key-ink:var(--sp-warm-ink); --key-wash:var(--sp-warm-wash); }
+#looks    { --key:var(--sp-mag);  --key-ink:var(--sp-mag-ink);  --key-wash:var(--sp-mag-wash);  }
+#your-work{ --key:var(--sp-cool); --key-ink:var(--sp-cool-ink); --key-wash:var(--sp-cool-wash); }
+#contribute{ --key:var(--sp-cool); --key-ink:var(--sp-cool-ink); --key-wash:var(--sp-cool-wash); }
+
+/* The eyebrow was --ink-4 mono, the dimmest text on the page. It carries
+   the section number, so it becomes the section's colour and gains a short
+   rule in front of it. This is the single largest colour change: it puts a
+   keyed mark at the top of every section. */
+.eyebrow{
+  color:var(--key-ink);
+  font-weight:600;
+  letter-spacing:.15em;
+  margin-bottom:22px;
+}
+.eyebrow::before{
+  content:""; flex:none;
+  width:22px; height:2px; border-radius:1px;
+  background:var(--key);
+}
+.eyebrow .dot{ background:currentColor; opacity:.45; }
+.get-meta .dot{ background:currentColor; opacity:.5; }
+
+/* Headings sit at full ink. Colour arrives around them, not inside them. */
+.h2{ color:var(--ink); }
+.lede, .sec-lede{ color:var(--ink-2); }
+.sec-head{ border-bottom:0; }
+
+/* ---- 3.3 nav ----------------------------------------------------------
+   The bar was a black gradient that only made sense over a black page. It
+   is now light glass from the first pixel, which also means the brand and
+   the links keep their contrast whether the hero behind them is a bright
+   frame or a dark one. */
+.nav{
+  background:color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter:blur(18px) saturate(1.25);
+  -webkit-backdrop-filter:blur(18px) saturate(1.25);
+  border-bottom:1px solid transparent;
+}
+.nav::before{ background:none; }
+.nav.is-stuck{
+  background:color-mix(in srgb, var(--bg) 88%, transparent);
+  border-bottom-color:var(--line-2);
+  box-shadow:var(--shadow-1);
+}
+.nav-brand{ color:var(--ink); }
+.brand-mark{ color:var(--accent); }
+.nav-brand:hover .brand-mark{ color:var(--accent-hover); }
+.nav-links{ color:var(--ink-3); }
+.nav-links a:hover{ color:var(--accent-hi); }
+.nav-links a::after{ background:var(--accent); height:2px; }
+
+/* ---- 3.4 buttons ------------------------------------------------------
+   .btn-primary painted near black text on the accent. At the depth the
+   accent now needs to be a link colour, white is the only readable label,
+   measured at 5.91:1. */
+.btn-primary{
+  background:var(--accent);
+  color:var(--accent-on);
+  border-color:var(--accent-hover);
+  box-shadow:0 1px 0 rgba(255,255,255,.20) inset, 0 8px 20px -12px var(--accent-glow);
+}
+.btn-primary:hover{
+  background:var(--accent-hover);
+  border-color:var(--accent-active);
+  box-shadow:0 1px 0 rgba(255,255,255,.22) inset, 0 14px 28px -14px var(--accent-glow);
+}
+.btn-primary:active{ background:var(--accent-active); }
+.btn-ghost{
+  background:var(--surface);
+  border-color:var(--line-2);
+  color:var(--ink-2);
+  box-shadow:var(--shadow-1);
+}
+.btn-ghost:hover{
+  background:var(--surface);
+  border-color:var(--accent-line);
+  color:var(--accent-hi);
+}
+.skip{ background:var(--accent); color:var(--accent-on); }
+:focus-visible{ outline:2px solid var(--ring); outline-offset:3px; }
+
+/* ---- 3.5 links in prose ------------------------------------------------
+   Every anchor outside the nav and the buttons was inheriting body ink and
+   was invisible as a link. */
+.licence a, .get-meta a, .footer-brand a{
+  color:var(--accent-hi);
+  text-decoration:none;
+  border-bottom:1px solid var(--accent-line);
+}
+.licence a:hover, .get-meta a:hover, .footer-brand a:hover{
+  color:var(--accent-active);
+  border-bottom-color:var(--accent-active);
+}
+.footer-links a{ color:var(--ink-3); }
+.footer-links a:hover{ color:var(--accent-hi); }
+
+/* Inline code was white on white once the ground flipped. It becomes a
+   keyed wash, which also means the code in a section inherits that
+   section's colour. */
+.looks-foot code, .sec-lede code, .status-list code, .get-foot code, .get-secondary p code{
+  background:var(--key-wash);
+  color:var(--key-ink);
+  border:1px solid color-mix(in srgb, var(--key) 22%, transparent);
+  padding:1px 6px; border-radius:5px;
+}
+
+/* ---- 3.6 entry steps --------------------------------------------------- */
+.entry-steps li::before{
+  color:var(--key);
+  font-weight:600;
+  font-size:11.5px;
+}
+.entry-steps b{ color:var(--ink); }
+.entry-steps span{ color:var(--ink-3); }
+.entry-steps li{ border-top-color:var(--line); }
+.entry-steps li:last-child{ border-bottom-color:var(--line); }
+
+/* ---- 3.7 tool cards ----------------------------------------------------
+   White cards on paper with a dark screen at the top. The screen is where
+   scenes.js draws, so it keeps the instrument palette and the canvas work
+   is untouched. The hover state is the only place the section key touches
+   a border, which keeps it an accent rather than a theme. */
+.tool{
+  background:var(--surface);
+  border-color:var(--line);
+  box-shadow:var(--shadow-1);
+}
+.tool:hover{
+  border-color:color-mix(in srgb, var(--key) 34%, var(--line-2));
+  box-shadow:var(--shadow-2);
+}
+.tool-demo{
+  background:
+    radial-gradient(92% 130% at 50% 0%, color-mix(in srgb, var(--key) 30%, transparent), transparent 68%),
+    var(--inst-bg-3);
+  border-bottom:1px solid var(--line);
+}
+.tool-hint{ color:var(--inst-ink-4); }
+.tool-text h3{ color:var(--ink); }
+.tool-text p{ color:var(--ink-3); }
+
+/* The parameter chips sit on an instrument plate, so they take instrument
+   ink and an accent hairline rather than the page tokens. */
+.tool-demo-list{
+  background:linear-gradient(180deg, var(--inst-bg-2), var(--inst-bg));
+}
+.chiplist li{
+  color:var(--inst-ink-2);
+  border-color:color-mix(in srgb, var(--key) 40%, var(--inst-line-2));
+  background:color-mix(in srgb, var(--key) 12%, transparent);
+}
+
+.colour-foot{ border-top-color:var(--line); }
+.colour-foot p{ color:var(--ink-3); }
+.colour-foot b{ color:var(--ink); }
+.colour-caveat{ color:var(--ink-4) !important; }
+
+/* ---- 3.8 the develop demo and its rail --------------------------------
+   Stage and rail are one instrument. Everything inside them runs on the
+   instrument tokens so the pair reads as a screenshot of the application
+   sitting on the page, which is what it is. */
+.dd-stage{ background:var(--inst-bg-3); border-color:var(--inst-line-2); box-shadow:var(--shadow-3); }
+.dd-panel{
+  background:linear-gradient(180deg, var(--inst-bg-2), var(--inst-bg));
+  border-color:var(--inst-line-2);
+  box-shadow:var(--shadow-2);
+}
+.dd-panel .panel-head{ border-bottom-color:var(--inst-line); color:var(--inst-ink); }
+.dd-presets{ border-bottom-color:var(--inst-line); }
+.dd-group + .dd-group{ border-left-color:var(--inst-line); }
+@media (max-width:1180px){ .dd-group + .dd-group{ border-top-color:var(--inst-line); } }
+.dd-group-h{ color:var(--inst-ink-4); }
+.drow-top{ color:var(--inst-ink-2); }
+.drow-val{ color:var(--inst-ink); }
+.dtrack{ background:rgba(255,255,255,.10); }
+.dfill{ background:linear-gradient(90deg, var(--inst-accent-lo), var(--inst-accent)); }
+.dknob{ box-shadow:0 0 0 1px rgba(0,0,0,.55), 0 0 12px -2px rgba(107,167,220,.55); }
+.dd-reset{ color:var(--inst-ink-2); border-color:var(--inst-line-2); background:rgba(255,255,255,.05); }
+.dd-reset:hover{ color:var(--inst-on-accent); background:var(--inst-accent); border-color:var(--inst-accent); }
+.dd-tag{ color:var(--inst-ink-3); border-color:var(--inst-line); }
+.dd-badge{ border-color:var(--inst-line); }
+.dd-badge span:first-child{ color:var(--inst-ink); }
+.dd-badge-meta{ color:var(--inst-ink-4); }
+.dd-nogl{ color:var(--inst-ink-2); border-color:var(--inst-line-2); }
+.dd-wipe-input:focus-visible ~ .dd-wipe-visual .dd-wipe-grip{ outline-color:var(--inst-accent); }
+
+/* Preset chips. Off is quiet instrument ink, on is a filled accent. This
+   is the one control on the page with a genuine selected state, so it gets
+   the strongest colour in the rail. */
+.look-chip{ color:var(--inst-ink-3); border-color:var(--inst-line-2); background:rgba(255,255,255,.04); }
+.look-chip:hover{ color:var(--inst-ink); border-color:var(--inst-line-2); background:rgba(255,255,255,.09); }
+.look-chip.is-on{
+  background:var(--inst-accent);
+  border-color:var(--inst-accent);
+  color:var(--inst-on-accent);
+  box-shadow:0 6px 18px -10px rgba(107,167,220,.8);
+}
+.looks-foot{ color:var(--ink-4); }
+.looks-caveat{ color:var(--ink-4) !important; }
+
+/* ---- 3.9 your work ----------------------------------------------------- */
+.ticks li{ color:var(--ink-2); border-top-color:var(--line); }
+.ticks li::before{
+  background:var(--key);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--key) 14%, transparent);
+}
+.own-note{ color:var(--ink-3); }
+
+/* The history card is application chrome, so it is an instrument plate.
+   The snapshot rows take the instrument accent, which is what makes the
+   list read as a timeline with two marked points rather than eight
+   identical lines. */
+.hist-card{
+  background:linear-gradient(180deg, var(--inst-bg-2), var(--inst-bg));
+  border-color:var(--inst-line-2);
+  box-shadow:var(--shadow-2);
+}
+.hist-head{ color:var(--inst-ink); border-bottom-color:var(--inst-line); }
+.hist-file{ color:var(--inst-ink-4); }
+.hist-list li{ color:var(--inst-ink-2); }
+.hist-list li .mono{ color:var(--inst-ink-4); }
+.hist-list li::before{ background:var(--inst-line-2); }
+.hist-dot{ background:rgba(255,255,255,.22); box-shadow:0 0 0 3px var(--inst-bg-2); }
+.hist-snap{ color:var(--inst-ink) !important; }
+.hist-snap .hist-dot{ background:var(--inst-accent); box-shadow:0 0 0 3px var(--inst-bg-2), 0 0 12px -1px rgba(107,167,220,.7); }
+.hist-snap .mono{ color:var(--inst-accent) !important; }
+.hist-open{ color:var(--inst-ink-4) !important; }
+
+/* ---- 3.10 status ------------------------------------------------------
+   Three columns that mean yes, not yet, and read this first. They now say
+   so in colour: each column takes a two pixel rule in its own status
+   colour and the square marker matches it. This is the page's most useful
+   use of colour, because the whole section is a claim about honesty. */
+.status-col{
+  background:var(--surface);
+  border-color:var(--line);
+  border-top:2px solid var(--ink-mute);
+  box-shadow:var(--shadow-1);
+}
+.status-col:has(.status-yes){  border-top-color:var(--ok); }
+.status-col:has(.status-soon){ border-top-color:var(--ink-mute); }
+.status-col:has(.status-note){ border-top-color:var(--warn); }
+.status-h{ border-bottom-color:var(--line); }
+.status-yes{  color:var(--ok);   }  /* 5.71:1 on --surface AA */
+.status-soon{ color:var(--ink-3); }  /* 7.54:1 on --surface AAA */
+.status-note{ color:var(--warn); }  /* 6.11:1 on --surface AA */
+.status-yes::before{  background:var(--ok);        box-shadow:0 0 0 3px var(--ok-wash); }
+.status-soon::before{ background:var(--ink-mute);  box-shadow:none; }
+.status-note::before{ background:var(--warn);      box-shadow:0 0 0 3px var(--warn-wash); }
+.status-list li{ color:var(--ink-2); }
+.status-list li::before{ background:var(--ink-faint); }
+.status-list-muted li{ color:var(--ink-3); }
+.status-list b{ color:var(--ink); }
+.status-ext{ color:var(--ink-4); }
+.status-note-body{ color:var(--ink-4); border-top-color:var(--line); }
+
+/* ---- 3.11 code plates --------------------------------------------------
+   A terminal on a light page is still a terminal. These stay dark, which
+   also keeps the copy button legible and gives the download section the
+   contrast it needs to feel like the end of the page. */
+.code-card{ background:var(--inst-bg); border-color:var(--inst-line-2); box-shadow:var(--shadow-1); }
+.code-head{ border-bottom-color:var(--inst-line); }
+.code-head span{ color:var(--inst-ink-3); }
+.code-card pre{ color:var(--inst-ink-2); }
+.copy{ color:var(--inst-ink-3); background:rgba(255,255,255,.06); border-color:var(--inst-line-2); }
+.copy:hover{ color:var(--inst-on-accent); background:var(--inst-accent); border-color:var(--inst-accent); }
+.copy.is-done{ color:var(--inst-ok); border-color:rgba(95,191,138,.5); background:rgba(95,191,138,.12); }
+
+/* ---- 3.12 get it -------------------------------------------------------
+   The quarantine note is the one thing on this page that warns the reader
+   about something that will actually happen to them. It stops being a grey
+   box and becomes a warning, in the warning colour, with the rule on the
+   leading edge so it reads in right to left as well. */
+.get-note{
+  background:var(--warn-wash);
+  border:1px solid color-mix(in srgb, var(--warn) 26%, transparent);
+  border-inline-start:3px solid var(--warn);
+  border-radius:12px;
+}
+.get-note-h{ color:var(--warn); }
+.get-note p{ color:var(--ink-2); }
+.get-h{ color:var(--ink); }
+.get-secondary .get-h + p{ color:var(--ink-2); }
+.get-meta{ color:var(--ink-3); }
+.get-foot{ color:var(--ink-4); }
+.plat-note{ color:var(--ink-3); border-top-color:var(--line); }
+
+/* ---- 3.13 contribute and licence ---------------------------------------
+   The licence card carries the commercial ask, so it takes the brand
+   accent on its leading edge and an accent wash in the corner. */
+.licence{
+  background:
+    radial-gradient(120% 100% at 100% 0%, var(--accent-wash), transparent 62%),
+    var(--surface);
+  border-color:var(--line);
+  border-inline-start:3px solid var(--accent);
+  box-shadow:var(--shadow-1);
+}
+.licence h3{ color:var(--ink); }
+.licence p{ color:var(--ink-3); }
+.licence b{ color:var(--ink); }
+.licence-note{ color:var(--ink-4) !important; }
+
+/* ---- 3.14 shots and drop token ----------------------------------------
+   The screenshots are photographs of a dark application, so their captions
+   and the dropped file token stay on instrument ink. */
+.shot{ background:var(--surface); border-color:var(--line-2); box-shadow:var(--shadow-3); }
+.shot figcaption{ color:var(--inst-ink-2); border-color:var(--inst-line); }
+.drop-token{ color:var(--inst-ink-2); border-color:var(--inst-line-2); box-shadow:var(--shadow-2); }
+
+/* ---- 3.15 hero, colour only -------------------------------------------
+   Rewritten at integration. The version this replaces was correct for the
+   hero that existed when it was written: copy laid over a photograph behind
+   a 94 percent black vignette, so every string had to be instrument ink to
+   stay legible. That hero is gone. The copy now sits in its own column on
+   the page ground, so instrument ink made the headline near invisible, pale
+   grey on pale paper, and the ghost button became a grey slab.
+
+   The secondary action is the contract the colour lane wrote down and this
+   is it being honoured: with the vignette removed, a scrim over an arbitrary
+   photograph cannot guarantee contrast, so the button takes a solid surface
+   fill and a real border instead.
+
+   The warm gradient on the emphasised line stays. It is keyed to the
+   sandstone in the photograph beside it and it is the one piece of colour
+   the page leads with. */
+.hero-copy .display{ color:var(--ink); }
+.hero-copy .display em{
+  background:linear-gradient(94deg, #c9761f 0%, #c2542a 52%, #a8432f 100%);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.hero-copy .eyebrow{ color:var(--ink-3); }
+.hero-copy .eyebrow::before{ background:#c9761f; }
+.hero-copy .lede{ color:var(--ink-2); }
+.hero-note{ color:var(--ink-3); }
+.hero-copy .btn-ghost{
+  background:var(--surface);
+  border-color:var(--line-2);
+  color:var(--ink);
+  box-shadow:var(--shadow-1);
+  backdrop-filter:none; -webkit-backdrop-filter:none;
+}
+.hero-copy .btn-ghost:hover{
+  background:var(--surface-2);
+  border-color:var(--accent);
+  color:var(--accent);
+}
+/* Still live: the develop demo owns .panel-head now, and that is an
+   instrument surface, so it keeps instrument ink. The rest of the old hero
+   panel rules went with the panel. */
+.panel-head{ color:var(--inst-ink); border-bottom-color:var(--inst-line); }
+
+/* ---- 3.16 footer ------------------------------------------------------- */
+.footer{ background:var(--bg-2); border-top-color:var(--line); }
+.footer-brand b{ color:var(--ink); }
+.footer-brand span{ color:var(--ink-4); }
+.footer-fine{ color:var(--ink-4); border-top-color:var(--line); }
+
+/* =========================================================================
+   4. DATA VISUALISATION IS EXEMPT.
+   #heroHist and the histogram, curve and channel demos in scenes.js and
+   site.js draw true red, green and blue. Nothing above recolours them, and
+   nothing should. A histogram tinted to match a brand is a false statement
+   about the pixels, in a product whose entire pitch is that it does not
+   make false statements about pixels. The only thing this file changes
+   under those canvases is the plate they sit on.
+   ========================================================================= */
+
+
+/* =========================================================================
+   5. TWO THINGS THIS FILE CANNOT REACH, FOR WHOEVER INTEGRATES IT.
+   web/index.html carries two document level colour declarations that still
+   say the page is dark:
+
+     <meta name="theme-color"  content="#08090a">
+     <meta name="color-scheme" content="dark">
+
+   Change them to content="#faf9f7" and content="light dark". The CSS
+   color-scheme property on :root already overrides the second one, so
+   nothing renders wrong if they stay, but the meta tags decide the tint of
+   the mobile browser chrome around the page and they should agree with it.
+   A dark chrome bar above a paper page is the kind of seam a reader
+   notices without being able to say why.
+
+   Nothing in this file touches web/js/scenes.js or web/js/site.js. Both
+   draw light strokes onto instrument surfaces, which is why those surfaces
+   are dark in both modes rather than flipping with the page.
+   ========================================================================= */
+
+/* The landing page names the licence and stops. What it used to do was
+   explain copyright law in three paragraphs, which is a README job. */
+.licence-commercial{
+  margin:16px 0 0; padding-top:14px;
+  border-top:1px solid var(--line);
+  font-size:14.5px; color:var(--ink-3);
+}
+.licence-commercial a{ color:var(--ink-2); text-decoration:underline; text-underline-offset:3px; }
+.licence-commercial a:hover{ color:var(--accent-hi); }
+
+/* =========================================================================
+   COMMAND LINE
+   The commercial funnel starts here, so it gets a full-width beat rather
+   than a column inside "Get it". Colour comes only from the tokens.
+   ========================================================================= */
+.cli-grid{
+  display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);
+  gap:clamp(24px,3.2vw,48px); align-items:start;
+}
+
+.cli-terms{ display:grid; gap:clamp(16px,2vw,24px); min-width:0; }
+.cli-terms .code-card{ min-width:0; }
+
+.cli-side{ display:grid; gap:clamp(26px,3vw,38px); min-width:0; }
+
+.cli-h{
+  font-family:var(--display); font-weight:650;
+  font-size:16.5px; letter-spacing:-.015em;
+  margin:0 0 8px; color:var(--ink);
+}
+
+.cli-where p,
+.cli-fact p{
+  margin:0 0 10px; color:var(--ink-3);
+  font-size:14.5px; line-height:1.65;
+}
+.cli-where p:last-child,
+.cli-fact p:last-child{ margin-bottom:0; }
+
+.cli-path{
+  display:block; margin:14px 0; padding:11px 13px;
+  border:1px solid var(--line); border-radius:var(--r);
+  background:#090b0d; color:var(--ink-2);
+  font-size:11.6px; line-height:1.5;
+  overflow-x:auto; white-space:nowrap;
+  -webkit-overflow-scrolling:touch;
+}
+.cli-where-note{ font-size:13.6px; }
+
+.cli-what .ticks{ margin-top:0; }
+.cli-what .ticks li:first-child{ border-top:none; padding-top:0; }
+.cli-what .ticks li:first-child::before{ top:8px; }
+
+.cli-facts{
+  display:grid; grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:clamp(20px,2.6vw,40px);
+  margin-top:clamp(38px,4.5vw,64px);
+  padding-top:clamp(28px,3.4vw,44px);
+  border-top:1px solid var(--line);
+}
+.cli-num{
+  margin:0 0 12px;
+  font-size:13px; letter-spacing:.06em;
+  color:var(--accent-hi);
+}
+
+.cli-commercial{
+  margin:clamp(30px,3.6vw,48px) 0 0;
+  padding-top:22px;
+  border-top:1px solid var(--line);
+  max-width:74ch;
+  font-size:14.5px; line-height:1.65;
+  color:var(--ink-3);
+}
+.cli-commercial a{ color:var(--ink-2); text-decoration:underline; text-underline-offset:3px; }
+.cli-commercial a:hover{ color:var(--accent-hi); }
+
+/* The command line block is the one place on the page where a line of code
+   genuinely cannot wrap, so let it scroll inside its own card. */
+#cli .code-card pre{ overflow-x:auto; }
+
+@media (max-width:900px){
+  .cli-grid{ grid-template-columns:1fr; gap:34px; }
+  .cli-facts{ grid-template-columns:1fr; gap:26px; }
+  .cli-fact{ padding-top:22px; border-top:1px solid var(--line); }
+  .cli-fact:first-child{ padding-top:0; border-top:none; }
+}
+
+@media (max-width:680px){
+  #cli .code-card pre{ font-size:11.4px; }
+  .cli-path{ font-size:10.8px; }
+}
+
+/* =========================================================================
+   Develop surface + gaps (sections #colour and #not-built)
+   Colour comes exclusively from the tokens aliased here. Retune the block
+   below and the whole section follows. No literal colours anywhere.
+   ========================================================================= */
+
+#colour,
+#not-built{
+  --fs-card:        var(--surface);
+  --fs-card-open:   var(--surface-2);
+  --fs-edge:        var(--line);
+  --fs-edge-strong: var(--line-2);
+  --fs-ink:         var(--ink);
+  --fs-ink-2:       var(--ink-2);
+  --fs-ink-3:       var(--ink-3);
+  --fs-ink-4:       var(--ink-4);
+  --fs-accent:      var(--accent);
+  --fs-accent-hi:   var(--accent-hi);
+  --fs-accent-glow: var(--accent-glow);
+
+  /* badge families, one per demo kind */
+  --fs-badge-still:   var(--accent-hi);
+  --fs-badge-live:    var(--sp-warm);
+  --fs-badge-diagram: var(--ink-3);
+  --fs-badge-none:    var(--ink-4);
+
+  /* gap states */
+  --fs-state-empty:   var(--ink-4);
+  --fs-state-specced: var(--ink-3);
+  --fs-state-partial: var(--sp-warm);
+  --fs-state-blocked: var(--sp-mag);
+  --fs-state-none:    var(--ink-4);
+}
+
+/* ---------- legend ---------- */
+.fs-legend{
+  list-style:none; margin:0 0 clamp(24px,4vw,40px); padding:0;
+  display:grid; gap:8px 24px;
+  grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  font-size:.86rem; color:var(--fs-ink-3);
+}
+.fs-legend li{ display:flex; align-items:baseline; gap:10px; }
+
+/* ---------- badge ---------- */
+.fs-badge{
+  --_c:var(--fs-badge-none);
+  flex:none;
+  display:inline-block;
+  font-family:var(--mono);
+  font-size:.66rem; letter-spacing:.07em; text-transform:uppercase;
+  line-height:1; padding:5px 8px;
+  border:1px solid currentColor; border-radius:calc(var(--r) / 2);
+  color:var(--_c);
+  white-space:nowrap;
+}
+.fs-badge[data-demo="still"]  { --_c:var(--fs-badge-still); }
+.fs-badge[data-demo="live"]   { --_c:var(--fs-badge-live); }
+.fs-badge[data-demo="diagram"]{ --_c:var(--fs-badge-diagram); }
+.fs-badge[data-demo="none"]   { --_c:var(--fs-badge-none); }
+
+.fs-badge-float{
+  position:absolute; top:12px; right:12px; z-index:2;
+  background:var(--fs-card);
+}
+
+/* ---------- the one real screenshot ---------- */
+.fs-stage{
+  position:relative; margin:0 0 clamp(20px,3vw,32px);
+  border:1px solid var(--fs-edge); border-radius:var(--r-lg);
+  overflow:hidden; background:var(--fs-card);
+}
+.fs-stage img{ display:block; width:100%; height:auto; }
+.fs-stage figcaption{
+  padding:10px 14px; font-size:.76rem; color:var(--fs-ink-3);
+  border-top:1px solid var(--fs-edge);
+}
+
+.fs-raw-note{
+  margin:0 0 clamp(28px,4vw,44px); padding:16px 18px;
+  border:1px solid var(--fs-edge); border-left:2px solid var(--fs-accent);
+  border-radius:var(--r);
+  background:var(--fs-card);
+  color:var(--fs-ink-2); font-size:.94rem; line-height:1.62;
+}
+.fs-raw-note b{ color:var(--fs-ink); }
+
+/* ---------- accordion grid ---------- */
+.fs-groups{
+  display:grid; gap:10px;
+  grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+  align-items:start;
+}
+/* A group that is open takes the full row, so its contents are not squeezed
+   into one narrow column while every neighbour sits collapsed. */
+.fs-group[open]{ grid-column:1 / -1; }
+
+.fs-group{
+  border:1px solid var(--fs-edge); border-radius:var(--r);
+  background:var(--fs-card);
+  transition:border-color .18s var(--ease), background .18s var(--ease);
+}
+.fs-group[open]{ background:var(--fs-card-open); border-color:var(--fs-edge-strong); }
+.fs-group:hover{ border-color:var(--fs-edge-strong); }
+
+.fs-group > summary{
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:14px 16px; cursor:pointer; list-style:none;
+  border-radius:var(--r);
+}
+.fs-group > summary::-webkit-details-marker{ display:none; }
+.fs-group > summary:focus-visible{
+  outline:2px solid var(--fs-accent); outline-offset:2px;
+}
+/* Disclosure triangle, drawn rather than shipped as an asset. */
+.fs-group > summary::before{
+  content:""; flex:none; width:0; height:0;
+  border-left:5px solid currentColor;
+  border-top:4px solid transparent; border-bottom:4px solid transparent;
+  color:var(--fs-ink-4);
+  transition:transform .18s var(--ease), color .18s var(--ease);
+}
+.fs-group[open] > summary::before{ transform:rotate(90deg); color:var(--fs-accent); }
+
+.fs-name{ font-weight:600; color:var(--fs-ink); }
+.fs-sub{ flex:1 1 auto; font-size:.84rem; color:var(--fs-ink-3); }
+.fs-group-aside .fs-name{ color:var(--fs-ink-2); }
+
+.fs-body{
+  padding:2px 16px 18px;
+  border-top:1px solid var(--fs-edge);
+  margin-top:2px;
+}
+.fs-sub-h{
+  margin:18px 0 8px; font-size:.72rem; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--fs-ink-4); font-weight:600;
+}
+.fs-sub-h:first-child{ margin-top:14px; }
+
+/* ---------- control list ---------- */
+.fs-controls{ margin:0; display:grid; gap:1px; background:var(--fs-edge); }
+.fs-controls > div{
+  display:flex; align-items:baseline; justify-content:space-between;
+  gap:16px; flex-wrap:wrap;
+  padding:9px 2px; background:var(--fs-card-open);
+}
+.fs-controls dt{ color:var(--fs-ink); font-size:.92rem; }
+.fs-controls dd{ margin:0; color:var(--fs-ink-3); font-size:.8rem; text-align:right; }
+
+.fs-tag{
+  display:inline-block; margin-left:7px; padding:2px 6px;
+  font-family:var(--mono); font-size:.62rem; letter-spacing:.05em;
+  text-transform:uppercase; line-height:1;
+  color:var(--fs-ink-4); border:1px solid var(--fs-edge-strong);
+  border-radius:calc(var(--r) / 2.5);
+}
+
+.fs-note{
+  margin:12px 0 0; font-size:.87rem; line-height:1.62; color:var(--fs-ink-2);
+}
+.fs-caveat{
+  margin:14px 0 0; padding:11px 13px;
+  border:1px solid var(--fs-edge); border-left:2px solid var(--fs-state-partial);
+  border-radius:calc(var(--r) / 1.6);
+  font-size:.86rem; line-height:1.6; color:var(--fs-ink-2);
+}
+.fs-caveat b{ color:var(--fs-ink); }
+
+/* ---------- chip rows ---------- */
+.fs-chips, .fs-families{
+  list-style:none; margin:0 0 14px; padding:0;
+  display:flex; flex-wrap:wrap; gap:6px;
+}
+.fs-chips li, .fs-families li{
+  display:inline-flex; align-items:center; gap:7px;
+  padding:5px 10px; border:1px solid var(--fs-edge-strong);
+  border-radius:calc(var(--r) / 1.6);
+  font-size:.8rem; color:var(--fs-ink-2);
+}
+.fs-count{
+  font-family:var(--mono); font-size:.68rem; color:var(--fs-ink-4);
+}
+
+.fs-foot{
+  margin:clamp(26px,4vw,40px) 0 0; max-width:66ch;
+  font-size:.95rem; line-height:1.65; color:var(--fs-ink-2);
+}
+.fs-foot b{ color:var(--fs-ink); }
+
+/* ---------- gaps ---------- */
+.fs-gaps{
+  display:grid; gap:10px;
+  grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+}
+.fs-gap{
+  --_s:var(--fs-state-specced);
+  padding:16px 18px;
+  border:1px solid var(--fs-edge); border-top:2px solid var(--_s);
+  border-radius:var(--r);
+  background:var(--fs-card);
+}
+.fs-gap[data-state="empty"]  { --_s:var(--fs-state-empty); }
+.fs-gap[data-state="specced"]{ --_s:var(--fs-state-specced); }
+.fs-gap[data-state="partial"]{ --_s:var(--fs-state-partial); }
+.fs-gap[data-state="blocked"]{ --_s:var(--fs-state-blocked); }
+.fs-gap[data-state="none"]   { --_s:var(--fs-state-none); }
+
+.fs-gap h3{
+  margin:0 0 4px; font-family:var(--display);
+  font-size:1.02rem; font-weight:600; color:var(--fs-ink);
+}
+.fs-gap-state{
+  margin:0 0 10px; font-size:.7rem; letter-spacing:.05em;
+  text-transform:uppercase; color:var(--_s);
+}
+.fs-gap p:last-child{
+  margin:0; font-size:.88rem; line-height:1.62; color:var(--fs-ink-3);
+}
+.fs-gaps-foot{
+  margin:clamp(22px,3vw,32px) 0 0;
+  font-size:.85rem; color:var(--fs-ink-4);
+}
+
+/* ---------- narrow ---------- */
+@media (max-width:640px){
+  .fs-groups, .fs-gaps{ grid-template-columns:1fr; }
+  .fs-controls > div{ flex-direction:column; gap:2px; }
+  .fs-controls dd{ text-align:left; }
+  .fs-badge-float{ top:8px; right:8px; }
+}
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion:reduce){
+  .fs-group,
+  .fs-group > summary::before{ transition:none; }
+}
+
+/* =========================================================================
+   VIEWPORT SCALE, and the static blocks that replaced the live demos.
+
+   The page used to lay out inside a fixed 1220px column with a fixed 16px
+   body size. On a laptop that is about right. On a widescreen display it is
+   the same 1220px column with several hundred pixels of empty margin on each
+   side and text that has visibly shrunk relative to everything around it,
+   which is what "it does not adhere to the viewport" describes.
+
+   Both now scale with the viewport instead of stepping at breakpoints. The
+   root font size drives every rem in the stylesheet, so the headings, the
+   ledes and the body copy grow together and keep their proportions. Both
+   are clamped at the top so a very large display does not get comic type.
+   ========================================================================= */
+:root{
+  --wrap: clamp(1080px, 86vw, 1680px);
+  --pad:  clamp(20px, 4vw, 72px);
+}
+/* 16px at a 1440 laptop, about 17px at 1920, about 18.4px at 2560, capped
+   at 19px so a 4K panel does not get billboard type. Measured, not guessed:
+   0.22vw + 12.8px evaluates to 15.97, 17.02 and 18.43 at those widths. */
+html{ font-size:clamp(16px, 0.22vw + 12.8px, 19px); }
+body{ font-size:1rem; }
+
+@media (max-width:1080px){
+  :root{ --wrap:100%; }
+}
+
+/* ---- hero: one product shot ------------------------------------------
+   This carried a WebGL canvas and two sliders, then a before and after pair.
+   The sliders drove a browser shader rather than Lightbox, and the pair put
+   a worse photograph next to a better one, which argued against the product.
+   One screenshot of the running application says more than either. */
+.hero-demo{ margin:0; }
+.hero-demo img{
+  display:block; width:100%; height:auto;
+  border-radius:var(--r-lg);
+  box-shadow:var(--shadow-3);
+}
+
+/* ---- looks: a static grid of real renders ------------------------------ */
+.lk-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap:clamp(14px, 1.6vw, 26px);
+}
+.lk{
+  margin:0;
+  border:1px solid var(--line);
+  border-radius:var(--r-lg);
+  overflow:hidden;
+  background:var(--surface);
+  box-shadow:var(--shadow-1);
+  display:flex; flex-direction:column;
+}
+.lk img{ display:block; width:100%; height:auto; }
+.lk figcaption{ padding:14px 16px 16px; display:flex; flex-direction:column; gap:10px; }
+.lk-name{
+  margin:0; font-family:var(--display); font-weight:650;
+  font-size:1rem; letter-spacing:-.012em; color:var(--ink);
+  display:flex; justify-content:space-between; align-items:baseline; gap:10px;
+}
+.lk-group{
+  font-family:var(--mono); font-size:10px; letter-spacing:.06em;
+  text-transform:uppercase; color:var(--ink-3); font-weight:400;
+}
+.lk-vals{
+  list-style:none; margin:0; padding:0;
+  display:grid; grid-template-columns:1fr 1fr; gap:2px 16px;
+}
+.lk-vals li{
+  display:flex; justify-content:space-between; gap:8px;
+  font-size:12px; line-height:1.75; color:var(--ink-3);
+  border-bottom:1px solid var(--line);
+}
+.lk-vals li:last-child:nth-child(odd){ grid-column:1 / -1; }
+.lk-vals .mono{ color:var(--ink-2); }
+.lk-none{
+  grid-column:1 / -1; border-bottom:0;
+  font-size:12px; color:var(--ink-4); display:block;
+}
+.lk-note{
+  margin:clamp(20px,2.4vw,32px) 0 0;
+  max-width:78ch; font-size:.9rem; line-height:1.65; color:var(--ink-3);
+}
+
+/* A grid item's default min-width is auto, so the widest unbreakable thing
+   inside it sets the column's floor. Here that is the install path,
+   /Applications/Lightbox.app/Contents/MacOS/lightbox-cli, which is about
+   500px of monospace and was dragging the whole document 143px wider than a
+   phone screen. The path already has its own scroller; this just stops it
+   dictating the column width. Same fix as the download section needed. */
+.cli-grid > *,
+.cli-terms,
+.cli-where,
+.cli-what,
+.cli-grid .code-card{ min-width:0; }
+.cli-path{ max-width:100%; }
+
+/* Inline code in prose must be allowed to break. A path like
+   /Applications/Lightbox.app/Contents/MacOS/lightbox-cli is one unbreakable
+   452px token, and inside a paragraph on a 390px phone it pushed the whole
+   document sideways. Code inside <pre> is deliberately excluded: those blocks
+   scroll horizontally on purpose, because a shell command broken across lines
+   at an arbitrary point is worse than one you scroll. */
+:not(pre) > code{
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+pre{ max-width:100%; }
+
+/* Section rhythm. The page was running clamp(84px, 11vw, 160px) top and
+   bottom, so at a 1440 laptop every section boundary cost 316px of empty
+   page and the hero added its own padding on top of that. Tightened to
+   about 100px a side at that width, which still separates the sections
+   without making the reader scroll through nothing. */
+.section{ padding:clamp(56px, 6.5vw, 104px) 0; }
+.hero{ padding-block:clamp(48px, 5vw, 76px) clamp(36px, 4vw, 60px); }
+
+/* ---- the develop rail, rebuilt ----------------------------------------- */
+/* Ten rows, two columns, one rule per row. Grid rows are equal height, so
+   the rules line up straight across the gutter. */
+.rail{
+  list-style:none; margin:0; padding:0;
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0,1fr));
+  column-gap:var(--gap-split);
+}
+.rail li{
+  display:grid;
+  grid-template-columns:minmax(0,11rem) minmax(0,1fr);
+  column-gap:var(--gap-grid);
+  align-items:baseline;
+  padding-block:15px;
+  border-top:1px solid var(--line);
+}
+/* The last row of each column closes the list. */
+.rail li:nth-last-child(-n+2){ border-bottom:1px solid var(--line); }
+.rail b{
+  font-family:var(--display); font-weight:650; letter-spacing:-.012em;
+  color:var(--ink);
+}
+/* --ink-2, not --ink-3. The rail is the body of section 02, and --ink-3 on
+   the --bg-2 ground of an alternating section measures 6.63:1, which clears
+   AA and misses AAA. --ink-2 on the same ground is 9.79:1 and still reads a
+   step below the --ink label beside it. */
+.rail span{ color:var(--ink-2); font-size:.92rem; line-height:1.55; }
+
+.rail-note{
+  margin:clamp(28px,3.4vw,44px) 0 0;
+  padding:16px 18px;
+  border:1px solid var(--line);
+  border-left:2px solid var(--accent);
+  border-radius:var(--r);
+  background:var(--surface);
+  color:var(--ink-3); font-size:.94rem; line-height:1.62;
+}
+.rail-note b{ color:var(--ink); }
+
+@media (max-width:680px){
+  .rail{ grid-template-columns:1fr; }
+  .rail li{ grid-template-columns:1fr; row-gap:3px; }
+  .rail li:nth-last-child(-n+2){ border-bottom:0; }
+  .rail li:last-child{ border-bottom:1px solid var(--line); }
+}
+
+
+/* =========================================================================
+   SIMPLIFICATION PASS.
+
+   Three jobs, in order of how much of the owner's complaint each one
+   answers.
+
+   1. One spacing scale. The page had seven grid gap declarations resolving
+      to six different values at 1440 (10, 23.04, 34, 36, 37.44 and 72px),
+      and two of them were the same clamp with different caps, which is an
+      accident rather than a decision. Every grid now spends one of two
+      tokens.
+   2. One column geometry. Four separate three-up grids were computing four
+      different column widths inside the same 1123px container, so the
+      second and third columns started at four different x positions and
+      the vertical rules between sections did not line up. They now share
+      one track definition and one breakpoint.
+   3. One measure. Headings ran to 820px and the lede under them stopped at
+      653px, on every section, so every section header had two right edges.
+      Trailing paragraphs ran to five different widths. All of it now
+      resolves to --measure.
+   ========================================================================= */
+:root{
+  /* The grid scale. Two values, not six. */
+  --gap-grid:    clamp(16px, 1.7vw, 26px);   /* cards, rails, three-up rows */
+  --gap-split:   clamp(28px, 3.4vw, 52px);   /* the two-up splits */
+  /* One reading measure, in rem rather than ch. `ch` is relative to the
+     element's own font-size, so the same 66ch token resolved to 666px on a
+     lede, 626px on the rail note, 604px on the platform note and 566px on
+     the status foot: four right edges from one token. rem is root relative,
+     so every block that spends this lands on the same pixel. 42rem is about
+     672px at a 1440 laptop and grows with the root clamp on a wide display. */
+  --measure:     min(100%, 42rem);
+}
+
+/* ---- 1. one measure ---------------------------------------------------- */
+.sec-head{ max-width:var(--measure); }
+.lede, .sec-lede{ max-width:var(--measure); }
+/* Lists of sentences are prose and take the prose measure. The entry steps
+   were running the full 1123px container, which is about 105 characters a
+   line against the 62 of the lede directly above them. */
+.entry-steps,
+.ticks,
+.rail-note,
+.status-foot,
+.lk-note,
+.plat-note,
+.get-foot,
+.get-note p,
+.get-secondary p,
+.coda-lede{ max-width:var(--measure); }
+
+/* ---- 2. one column geometry -------------------------------------------- */
+.lk-grid,
+.status-grid{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0,1fr));
+  gap:var(--gap-grid);
+}
+/* Both two-up splits share one gap and one ratio, so the boundary between
+   the columns falls at the same x in both sections. 1fr 1fr was tried first
+   and clipped the shell commands: at 1123px of content that leaves the code
+   column 537px and the longest `lightbox-cli export` line needs about 590.
+   The pre has its own scroller, but a command that reads as truncated is a
+   command nobody trusts. */
+.cli-grid,
+.get-grid{
+  display:grid;
+  grid-template-columns:minmax(0,1.22fr) minmax(0,1fr);
+  gap:var(--gap-split);
+  align-items:start;
+}
+/* One breakpoint for every grid on the page, so the whole document reflows
+   in one step instead of each section dropping a column at its own width. */
+@media (max-width:1000px){
+  .lk-grid, .status-grid{ grid-template-columns:repeat(2, minmax(0,1fr)); }
+}
+@media (max-width:680px){
+  .lk-grid, .status-grid, .cli-grid, .get-grid{ grid-template-columns:1fr; }
+}
+
+/* A column that stretches to the tallest sibling and then has nothing to put
+   in the bottom 430px reads as a layout fault, because it is one. Each
+   column is now its own height and they align on the top edge, which is the
+   edge the reader is actually scanning. */
+.status-col{ align-self:start; }
+
+/* ---- 3. the develop rail, rebuilt -------------------------------------- */
+/* Ten rows, two columns, one rule per row. Grid rows are equal height, so
+   the rules line up straight across the gutter. */
+.rail{
+  list-style:none; margin:0; padding:0;
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0,1fr));
+  column-gap:var(--gap-split);
+}
+.rail li{
+  display:grid;
+  grid-template-columns:minmax(0,11rem) minmax(0,1fr);
+  column-gap:var(--gap-grid);
+  align-items:baseline;
+  padding-block:15px;
+  border-top:1px solid var(--line);
+}
+/* The last row of each column closes the list. */
+.rail li:nth-last-child(-n+2){ border-bottom:1px solid var(--line); }
+.rail b{
+  font-family:var(--display); font-weight:650; letter-spacing:-.012em;
+  color:var(--ink);
+}
+/* --ink-2, not --ink-3. The rail is the body of section 02, and --ink-3 on
+   the --bg-2 ground of an alternating section measures 6.63:1, which clears
+   AA and misses AAA. --ink-2 on the same ground is 9.79:1 and still reads a
+   step below the --ink label beside it. */
+.rail span{ color:var(--ink-2); font-size:.92rem; line-height:1.55; }
+
+.rail-note{
+  margin:clamp(28px,3.4vw,44px) 0 0;
+  padding:16px 18px;
+  border:1px solid var(--line);
+  border-left:2px solid var(--accent);
+  border-radius:var(--r);
+  background:var(--surface);
+  color:var(--ink-3); font-size:.94rem; line-height:1.62;
+}
+.rail-note b{ color:var(--ink); }
+
+@media (max-width:680px){
+  .rail{ grid-template-columns:1fr; }
+  .rail li{ grid-template-columns:1fr; row-gap:3px; }
+  .rail li:nth-last-child(-n+2){ border-bottom:0; }
+  .rail li:last-child{ border-bottom:1px solid var(--line); }
+}
+
+/* ---- 4. section 01 now carries the no-save-button argument -------------- */
+.own{
+  margin-top:clamp(40px,4.6vw,64px);
+  padding-top:clamp(32px,3.6vw,48px);
+  border-top:1px solid var(--line);
+}
+.own-h{
+  font-family:var(--display); font-weight:700;
+  font-size:clamp(1.35rem,2.1vw,1.75rem); line-height:1.12;
+  letter-spacing:-.025em; color:var(--ink);
+  margin:0 0 14px;
+}
+.own-lede{
+  margin:0; max-width:var(--measure);
+  font-size:clamp(1rem,1.16vw,1.13rem); line-height:1.68; color:var(--ink-2);
+}
+.own .ticks{ margin-top:22px; max-width:var(--measure); }
+
+/* ---- 5. contributing, folded into Get it as a coda ---------------------- */
+.coda{
+  margin-top:clamp(32px,3.6vw,48px);
+  padding-top:clamp(28px,3.2vw,40px);
+  border-top:1px solid var(--line);
+  display:grid; gap:14px;
+}
+.coda-lede{
+  margin:0; font-size:.95rem; line-height:1.65; color:var(--ink-3);
+}
+.coda-lede b{ color:var(--ink); }
+
+.status-foot{
+  margin:clamp(22px,2.6vw,32px) 0 0;
+  font-size:.85rem; color:var(--ink-4);
+}
+
+/* ---- 6. line breaking -------------------------------------------------- */
+/* One measure for the header block means some headings now take two lines.
+   Two balanced lines is a typographic choice; one long line and an orphaned
+   word is a mistake. `balance` on the heading and `pretty` on the body are
+   the browser doing that work, with no measure change and no copy change. */
+.h2, .own-h{ text-wrap:balance; }
+.lede, .sec-lede, .rail-note, .coda-lede, .status-foot, .lk-note, .plat-note{
+  text-wrap:pretty;
+}
+
+.entry-steps{ max-width:var(--measure); }
+.own .ticks{ max-width:var(--measure); }

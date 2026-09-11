@@ -52,6 +52,16 @@ pub struct VerifyReport {
     /// `Full`-only: orphaned `.tmp-*` residue of a kill mid-`atomic_write`
     /// (A-13), removed.
     pub orphan_temp_files_removed: u64,
+    /// True when the catalog query that drives this whole report failed.
+    ///
+    /// **Read this before trusting any other field.** The row query used to
+    /// be `unwrap_or_default()`, so a failed read produced an empty row set,
+    /// and an empty row set produces a report of all zeroes: nought rows
+    /// checked, nought missing, nought corrupt. An integrity checker that
+    /// reports a clean bill of health when it could not run is worse than
+    /// one that panics, because the answer is indistinguishable from a
+    /// genuinely healthy store.
+    pub query_failed: bool,
 }
 
 /// Which cache(s) a purge targets (spec §5.6 `Command::PurgeCaches
@@ -70,7 +80,20 @@ pub(crate) fn verify_store(
     mode: VerifyMode,
 ) -> VerifyReport {
     let mut report = VerifyReport::default();
-    let rows = catalog.reader().all_preview_rows().unwrap_or_default();
+    // See `VerifyReport::query_failed`. A failed read must not be reported as
+    // a clean store.
+    let rows = match catalog.reader().all_preview_rows() {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "verify_store could not read the preview rows; reporting the run as failed \
+                 rather than as a clean store"
+            );
+            report.query_failed = true;
+            return report;
+        }
+    };
     let mut known_paths: HashSet<String> = HashSet::new();
 
     for row in &rows {

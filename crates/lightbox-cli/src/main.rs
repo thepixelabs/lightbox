@@ -105,6 +105,7 @@ USAGE:
   lightbox-cli history    --catalog <dir> --image <id> [--json]
   lightbox-cli step-to    --catalog <dir> --image <id> --seq <n>
   lightbox-cli undo       --catalog <dir> --image <id>
+  lightbox-cli reset      --catalog <dir> --image <id>
   lightbox-cli redo       --catalog <dir> --image <id>
   lightbox-cli clear-history --catalog <dir> --image <id>
   lightbox-cli snapshot create  --catalog <dir> --image <id> --name <name>
@@ -216,6 +217,7 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
         "history" => edit::cmd_history(rest),
         "step-to" => edit::cmd_step_to(rest),
         "undo" => edit::cmd_undo(rest),
+        "reset" => edit::cmd_reset(rest),
         "redo" => edit::cmd_redo(rest),
         "clear-history" => edit::cmd_clear_history(rest),
         "snapshot" => edit::cmd_snapshot(rest),

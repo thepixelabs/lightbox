@@ -96,12 +96,27 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)"
 SPDX-License-Identifier = "OFL-1.1"
 
-# Site imagery: photographs rendered by the Lightbox engine from the CC0
-# raw.pixls.us fixture corpus, and screenshots of the application itself.
+# Site imagery, and an honest note on where it comes from.
+#
+# The photographs were produced with a generative image model and then rendered
+# through the Lightbox engine, which is why the graded frames are genuine engine
+# output. That origin is recorded here rather than glossed: the full resolution
+# sources carry the generator's own C2PA provenance, and they are not published
+# (see .gitignore) both because they are large and because their provenance
+# metadata belongs with the file rather than stripped out of it.
+#
+# The application screenshots are captures of the real app, opened on those same
+# photographs. The interface in them is this project's own work.
+#
+# CC0 is the right label: it asks nothing of anyone reusing these files, which
+# is the only sensible position to take on imagery a model generated.
 [[annotations]]
-path = ["web/assets/img/**", "web/assets/favicon.svg"]
+path = [
+  "web/assets/img/**",
+  "web/assets/favicon.svg",
+]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "raw.pixls.us contributors (CC0) and PixeLabs"
+SPDX-FileCopyrightText = "2026 PixeLabs"
 SPDX-License-Identifier = "CC0-1.0"
 
 # XMP is XML and could carry a comment, but a preset file is data the app reads

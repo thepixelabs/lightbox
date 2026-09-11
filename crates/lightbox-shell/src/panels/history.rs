@@ -189,6 +189,26 @@ fn history_section(ui: &mut egui::Ui, ctx: &mut DevelopCtx<'_>) {
         {
             ctx.edit.redo();
         }
+
+        // Reset to as-shot. `EditCommand::ResetEdits` shipped with E09 and
+        // had no caller in the shell or the CLI, so the one thing a
+        // photographer reaches for first ("put it back how it was") was
+        // implemented and unreachable. It goes here rather than in Basic
+        // because it resets the whole recipe, not one panel, and because
+        // this is where undo already lives.
+        //
+        // It writes one history step, so it is itself undoable. That is why
+        // it needs no confirmation, unlike Clear above, which destroys the
+        // log and cannot be undone.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("Reset")
+                .on_hover_text("Put every control back to as-shot. Undoable.")
+                .clicked()
+            {
+                ctx.edit.reset_all();
+            }
+        });
     });
 
     // Newest-first steps (E09 `Queries::edit_history` order), plus the

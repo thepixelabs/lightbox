@@ -106,6 +106,19 @@ pub trait EditBinding {
     /// True when a kept later step exists to redo.
     fn can_redo(&self) -> bool;
     /// `Command::Edit(Undo)` for the bound image.
+    /// Resets the whole image to its neutral default, as one history step.
+    ///
+    /// `EditCommand::ResetEdits` has been implemented in `lightbox-core`
+    /// since E09 and had no caller anywhere: not in the shell, not in the
+    /// CLI. The engine could do it and no user could ask for it, which is
+    /// the same shape of gap as the vibrance sliders. This is the seam that
+    /// closes it.
+    ///
+    /// Distinct from `reset(ParamId)`, which resets one control, and from
+    /// `clear_history`, which drops the log and keeps the current edit.
+    /// This keeps the log and drops the edit, so it is undoable.
+    fn reset_all(&mut self);
+
     fn undo(&mut self);
     /// `Command::Edit(Redo)` for the bound image.
     fn redo(&mut self);
@@ -546,6 +559,13 @@ impl EditBinding for SessionEditBinding {
 
     fn can_redo(&self) -> bool {
         self.history.iter().any(|s| s.seq > self.head_seq)
+    }
+
+    fn reset_all(&mut self) {
+        let Some(image) = self.image else { return };
+        self.submit_edit(EditCommand::ResetEdits {
+            images: vec![image],
+        });
     }
 
     fn undo(&mut self) {

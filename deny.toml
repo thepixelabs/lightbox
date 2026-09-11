@@ -10,7 +10,7 @@
 # LGPL code may enter the *product* only via dynamically-linked C libraries in
 # later epics; those are audited by surface 2 (native-binary SBOM, E16), and
 # bundled content/data by surface 3 (data manifest, E16). See
-# docs/plan/licensing.md.
+# docs/reference/licensing.md.
 #
 # CI runs: cargo deny check licenses bans sources
 
@@ -32,7 +32,7 @@ private = { ignore = true }
 # constraint was the outbound license. It is now the COMMERCIAL license, which
 # is a strictly tighter constraint: a dependency Lightbox cannot sublicense to a
 # paying customer cannot be linked in, whatever the AGPL would permit. Additions
-# require a licensing review PR that updates docs/plan/licensing.md alongside
+# require a licensing review PR that updates docs/reference/licensing.md alongside
 # this file.
 allow = [
   "MIT",

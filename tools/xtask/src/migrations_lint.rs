@@ -5,7 +5,7 @@
 //! `cargo xtask lint-migrations`, the migration-number registry lint
 //! (E01 spec §5 T9, §4.4/OQ-2).
 //!
-//! Cross-checks `docs/plan/migrations.md` (the committed registry that
+//! Cross-checks `docs/reference/migrations.md` (the committed registry that
 //! parallel epics reserve numbers in) against the embedded migration files
 //! in `crates/lightbox-catalog/migrations/`. Fails on: duplicate numbers in
 //! either place, a migration file without a registry row, a name mismatch,
@@ -25,7 +25,7 @@ pub(crate) struct RegistryRow {
 
 /// Runs the lint against the workspace; prints a summary on success.
 pub(crate) fn lint(workspace_root: &Path) -> anyhow::Result<()> {
-    let registry_path = workspace_root.join("docs/plan/migrations.md");
+    let registry_path = workspace_root.join("docs/reference/migrations.md");
     let registry_text = std::fs::read_to_string(&registry_path)
         .with_context(|| format!("reading {}", registry_path.display()))?;
     let migrations_dir = workspace_root.join("crates/lightbox-catalog/migrations");
@@ -102,7 +102,7 @@ pub(crate) fn check(
         match registry.get(number) {
             None => problems.push(format!(
                 "migration file {number:04}_{name}.sql has no registry row \
-                 (reserve the number in docs/plan/migrations.md)"
+                 (reserve the number in docs/reference/migrations.md)"
             )),
             Some(row) if row.name != *name => problems.push(format!(
                 "migration {number:04} name mismatch: file says {name:?}, \

@@ -7,7 +7,13 @@ resolver = "2"
 members = ["crates/*", "tools/*"]
 # The cargo-fuzz seed target (spec §5 T19: fuzzing non-gating at M0) builds
 # only under `cargo fuzz` (nightly, libFuzzer); keep it out of the PR-gate graph.
-exclude = ["crates/lightbox-decode/fuzz"]
+exclude = [
+  "crates/lightbox-decode/fuzz",
+  # Not a Rust crate: a Python checker CI runs against the website. It lives
+  # under tools/ because that is where project tooling lives, and `tools/*`
+  # would otherwise try to read a Cargo.toml that will never exist.
+  "tools/site-checks",
+]
 
 [workspace.package]
 version = "0.1.0"

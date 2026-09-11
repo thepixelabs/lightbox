@@ -201,6 +201,17 @@ pub struct ActiveEntry<'a> {
     pub width: u32,
     /// Full-size height.
     pub height: u32,
+    /// Whether the source is a raw file (probe-derived `SourceKind::Raw`).
+    ///
+    /// Only the badge uses this, and only to keep it honest. Every image the
+    /// canvas draws today, raw or not, arrives through
+    /// `EmbeddedPreviewProvider`, which hardcodes
+    /// `SourceTier::EmbeddedPreview`. On a JPEG that tier name is meaningless
+    /// (the file IS the image), so tier alone cannot drive the badge without
+    /// mislabelling every rendered file. On a raw file it means something
+    /// specific and unflattering: these are the camera's finished preview
+    /// pixels, not the sensor's.
+    pub is_raw: bool,
 }
 
 /// What the working set says about the currently active entry (C5:
@@ -1258,12 +1269,40 @@ impl EditorCanvas {
                 None => "…".to_owned(),
             }
         };
+
+        // The source segment, and the reason this is not folded into
+        // `quality` above.
+        //
+        // `quality` describes the RENDER: how far the engine got this frame.
+        // On an engine frame it reads "full-res", which is true of the render
+        // and says nothing about what was rendered. Every image the canvas
+        // draws today comes from the camera's embedded JPEG, because
+        // `decode_for_develop` (the sensor path) has exactly one caller in the
+        // workspace and it is `lightbox-cli`; `lightbox-shell` does not depend
+        // on `lightbox-decode` at all. So on a raw file, "full-res" alone
+        // reads as "you are looking at your sensor data" and the person
+        // pulling a highlight back has no way to know they are working on
+        // eight-bit rendered pixels with nothing left to recover.
+        //
+        // Say it on every frame, not only before the engine takes over, and
+        // say it only for raw files, where it means something. Remove this
+        // when the shell learns to ask the proxy for sensor pixels, and update
+        // `web/index.html` and `README.md` in the same commit, which
+        // `tools/site-checks/check_site.py` will insist on.
+        let source =
+            if entry.is_raw && matches!(self.tier.tier(), Some(SourceTier::EmbeddedPreview)) {
+                "  ·  embedded preview"
+            } else {
+                ""
+            };
+
         let text = format!(
-            "{}  ·  {}×{}  ·  {}  ·  {}  ·  {}/{}",
+            "{}  ·  {}×{}  ·  {}{}  ·  {}  ·  {}/{}",
             entry.filename,
             entry.width,
             entry.height,
             quality,
+            source,
             self.zoom.label(),
             idx + 1,
             total,

@@ -29,16 +29,19 @@ Commands:
                                    corpus into fixtures/ (see fixtures/manifest.toml)
   hash <file>...                   print xxh3-128 and sha256 of files (for
                                    authoring manifest pins)
-  lint-migrations                  cross-check docs/plan/migrations.md against
+  lint-migrations                  cross-check docs/reference/migrations.md against
                                    crates/lightbox-catalog/migrations/ (CI gate)
   lint-native-deps                 cross-check Cargo.lock's *-sys crates against
                                    native-inventory.toml (SBOM surface-2
                                    placeholder, CI gate)
-  bundle-mac [--install] [--no-build]
+  bundle-mac [--install] [--no-build] [--with-libraw] [--dmg]
                                    build target/macos/Lightbox.app — release
                                    binary + generated .icns + Info.plist,
                                    ad-hoc signed; --install copies it into
-                                   /Applications
+                                   /Applications, --dmg also writes a
+                                   distributable disk image. Release builds
+                                   MUST pass --with-libraw, without it the
+                                   app cannot read sensor data
   exit-drill [--files N] [--raw-copies N] [--no-shell]
                                    T29 M0 exit drill on THIS machine: 1k-file
                                    import, kill -9 mid-import → clean reopen,
@@ -129,6 +132,8 @@ fn cmd_bundle_mac(args: &[String]) -> anyhow::Result<()> {
         match arg.as_str() {
             "--install" => opts.install = true,
             "--no-build" => opts.no_build = true,
+            "--with-libraw" => opts.with_libraw = true,
+            "--dmg" => opts.dmg = true,
             other => bail!("unknown bundle-mac flag {other:?}\n\n{USAGE}"),
         }
     }

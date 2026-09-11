@@ -459,6 +459,8 @@ impl crate::panels::develop_ctx::EditBinding for InertBinding {
     fn can_redo(&self) -> bool {
         false
     }
+    fn reset_all(&mut self) {}
+
     fn undo(&mut self) {}
     fn redo(&mut self) {}
     fn history(&self) -> &[lightbox_edit::HistoryStepMeta] {

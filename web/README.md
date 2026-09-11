@@ -27,22 +27,32 @@ to a static image.
 | `css/site.css` | Design tokens at the top, then sections in page order, responsive rules and reduced-motion overrides at the bottom. |
 | `js/develop.js` | A small raw develop pipeline in WebGL: white balance, exposure, tone, saturation, split tone, vignette and grain, plus histogram read-back from a 128 by 80 offscreen target. |
 | `js/scenes.js` | The canvas set pieces: the interactive tone curve, and the HSL, white balance, crop, histogram and export demonstrations. All share one animation loop that only runs while a scene is on screen. |
-| `js/site.js` | Navigation, reveal on scroll, counters, the scroll-driven hero develop sequence, the preset picker, the crash-drill terminal and the copy buttons. |
+| `js/site.js` | Navigation, reveal on scroll, one entry animation and the copy buttons. Four and a half kilobytes, no canvas and no WebGL: the live develop demos were removed because they demonstrated a browser shader rather than Lightbox. |
 | `assets/img/` | Photographs and screenshots, WebP only apart from the social card. See the provenance note below. |
 | `assets/fonts/` | Self-hosted webfonts. Inter and JetBrains Mono are Latin subsets of the very TTFs the application embeds; Inter Tight is the Latin subset of the variable face. All SIL OFL 1.1. |
 
 ## About the images
 
-Every photograph on the page is the same raw file, a Fujifilm FinePix X100
-capture published under CC0 on [raw.pixls.us](https://raw.pixls.us) and used in
-the project's test fixture corpus. Every version of it was rendered by the
-actual Lightbox engine on a GPU, not by a filter in an image editor:
+Every photograph on the page was generated for this project and then rendered
+through the real Lightbox engine, so the graded frames are genuine engine
+output rather than a filter applied in an image editor. Nothing here is borrowed and there is no credit line to carry. The full
+resolution sources are kept outside the repository: they are large, and they
+carry the generator's own provenance metadata, which belongs with the file.
 
 ```sh
-lightbox-cli open fixtures/fujifilm-x100.raf --store /tmp/site.lbdata
+lightbox-cli open <source>.jpg --store /tmp/site.lbdata
 lightbox-cli preset apply --catalog /tmp/site.lbdata --image 1 --id <preset-id>
-lightbox-cli render --catalog /tmp/site.lbdata --image 1 --out out.png --width 1400
+lightbox-cli render --catalog /tmp/site.lbdata --image 1 --out out.png
 ```
+
+The nine preset frames are regenerated the same way, one per family, and the
+numbers printed beside them are read out of the shipped `.xmp` files by
+`tools/site-checks/looks_from_presets.py` rather than typed by hand. CI fails
+if the two disagree.
+
+The application screenshots are captures of the real app, taken with
+`lightbox <paths> --screenshot out.png`, opened on those same generated
+photographs.
 
 The application screenshots come from the shell's own capture mode, which runs
 the real app against a throwaway catalog so the result is identical on any
@@ -58,12 +68,15 @@ worth making while it is accurate.
 
 ## Third-party requests
 
-The page self-hosts its fonts and loads no tag manager, no embedded video and
-nothing from a font CDN. There is exactly one external request, and it is
-deliberate: a Cloudflare Web Analytics beacon, which is cookieless, collects no
-personal data and therefore needs no consent banner. It is gated to the
-production host, so running this locally or from a fork sends nothing at all.
-`privacy.html` says what it records.
+There are none. The page self-hosts its fonts and loads no tag manager, no
+embedded video, nothing from a font CDN and no analytics. Open the network tab
+and every request is to this origin.
+
+An analytics beacon used to sit here, gated to the production host and never
+actually switched on. It went because the argument for it was weak: a page whose
+central claim is that Lightbox never phones home should not open a connection to
+count its own readers, and the download figures GitHub publishes answer the same
+question without putting a script on anyone's machine.
 
 Keep it to that one. A page arguing that Lightbox never phones home has no
 business opening a connection to Google to draw its own headline, and a

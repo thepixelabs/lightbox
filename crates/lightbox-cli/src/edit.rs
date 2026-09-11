@@ -310,6 +310,28 @@ pub(crate) fn cmd_undo(args: &[String]) -> anyhow::Result<u8> {
     })
 }
 
+/// `reset` puts one image back to as-shot, as a single undoable step.
+///
+/// `EditCommand::ResetEdits` shipped with E09 and had no caller anywhere,
+/// shell or CLI. Scripting a batch back to neutral was impossible despite
+/// the engine supporting it.
+pub(crate) fn cmd_reset(args: &[String]) -> anyhow::Result<u8> {
+    with_usage(|| {
+        let mut flags = Flags::new(args);
+        let catalog = required_catalog(&mut flags)?;
+        let image = required_image(&mut flags)?;
+        flags.finish()?;
+        let (_core, session) = open_session(&catalog)?;
+        run_edit_command(
+            &session,
+            EditCommand::ResetEdits {
+                images: vec![image],
+            },
+        )?;
+        print_and_close(session, image)
+    })
+}
+
 pub(crate) fn cmd_redo(args: &[String]) -> anyhow::Result<u8> {
     with_usage(|| {
         let mut flags = Flags::new(args);

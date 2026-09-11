@@ -2,25 +2,31 @@
 
 Editing-first, local-first, open-source **raw photo editor** in Rust (egui + wgpu node-graph engine + SQLite edit store + local ONNX AI). **There is no library/DAM**, drag-and-drop / OS open dialog → editor with filmstrip. That cut is an owner decision; never reintroduce library features.
 
-## Getting oriented (start here)
+## Getting oriented
 
-1. Read `docs/plan/03-handoff.md`, the single source of truth for project state: what's built, what's specced, the epic board with dependencies, and the development process. Do NOT try to read the whole `docs/` tree.
-2. Cross-check with `git log --oneline -15`: commits named `E<nn> Phase <n>: …` show implementation progress; the epic board in the handoff tells you what's next.
-3. Work the next item per the handoff's **§5 development process** (phase-by-phase implementation with a green-build gate on every commit; scope changes go through a written mandate, an architecture update, and a recorded approval).
+Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first. It is a map of the workspace
+and the handful of decisions everything else is built on: the node graph, the
+edit store, the out-of-process raw decoder, and why each is shaped the way it
+is. Then read the crate you are about to touch. The crates carry module level
+doc comments that explain intent rather than restating the code, so
+`cargo doc --open` is a reasonable second stop.
 
-**Reading order for an epic:** the one `docs/plan/epics/E<nn>-*.md` spec you're executing → the `01-architecture.md` sections it cites → existing code in `crates/`. Ignore files bannered `SUPERSEDED`.
+[`docs/engine-book/`](docs/engine-book/) is the guide to the render engine
+specifically, including how to add a node. [`docs/interop/crs-mapping.md`](docs/interop/crs-mapping.md)
+documents how recipe fields map onto Adobe's `crs:` XMP namespace, which is
+what makes sidecars readable by other software.
 
 ## Build & verify
 
 ```sh
-export PATH="$HOME/.cargo/bin:$PATH"    # shell state doesn't persist between Bash calls
+export PATH="$HOME/.cargo/bin:$PATH"    # if cargo is not already on your PATH
 cargo xtask fixtures                     # one-time fixture fetch
 cargo build --workspace && cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check
 cargo deny check                         # license gate (GPL never in-process)
 ```
 
-Exit bar for ANY commit: all five green. Never commit broken. Record spec deviations in `docs/plan/epics/<EPIC>-deviations.md`.
+Exit bar for ANY commit: all five green. Never commit broken. If you depart from what a doc comment says, update the doc comment in the same commit.
 
 ## Guardrails (owner intent)
 
