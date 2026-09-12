@@ -209,6 +209,11 @@ impl ExportDialog {
             naming: NamingSpec {
                 suffix: (!self.suffix.is_empty()).then(|| self.suffix.clone()),
             },
+            // E15 metadata policy + watermark: no UI in this dialog yet, so
+            // both take their defaults, which are "copyright only, no
+            // watermark". That is the safe default by design, see
+            // `lightbox_export::settings::MetadataLevel`.
+            ..ExportSettings::default()
         }
     }
 

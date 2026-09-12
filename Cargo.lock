@@ -2186,6 +2186,7 @@ version = "0.1.0"
 dependencies = [
  "fast_image_resize",
  "jpeg-encoder",
+ "kamadak-exif",
  "lightbox-color",
  "lightbox-edit",
  "lightbox-jobs",

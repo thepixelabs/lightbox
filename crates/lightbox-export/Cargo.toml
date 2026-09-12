@@ -32,6 +32,15 @@ fast_image_resize.workspace = true
 jpeg-encoder.workspace = true
 png.workspace = true
 tiff.workspace = true
+# Metadata control on export: reading a source file's EXIF into
+# `settings::SourceMetadata` (`metadata::read_source`). Already the
+# workspace's EXIF reader (`lightbox-decode`, E02 spec §3.7) and already in
+# every shipped binary's graph, so no new license surface and no deny.toml
+# change. Lightbox WRITES EXIF with its own IFD serializer in
+# `metadata.rs`, not with this crate: building the bytes ourselves is what
+# makes "this level does not write GPS" a property of the code rather than
+# a promise about a library's behaviour.
+kamadak-exif.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

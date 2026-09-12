@@ -6,9 +6,13 @@
 //!
 //! **Deliberately smaller than the full E15 spec's [`ExportSettings`]**: no
 //! `Destination`/`CollisionPolicy` (the caller resolves an explicit output
-//! path per item, see the crate root doc comment), no watermark, no
-//! metadata policy, no CBOR/preset persistence, no JXL/AVIF/DNG/Original.
-//! Every cut is named in `docs/plan/epics/E15-deviations.md`.
+//! path per item, see the crate root doc comment), no CBOR/preset
+//! persistence, no JXL/AVIF/DNG/Original. Every cut is named in
+//! `docs/plan/epics/E15-deviations.md`.
+//!
+//! [`MetadataPolicy`] (spec §5.6) and [`Watermark`] (spec §5.11) live here
+//! too; the byte-level emitters they drive are [`crate::metadata`] and
+//! [`crate::watermark`].
 
 use std::path::Path;
 
@@ -192,6 +196,303 @@ impl NamingSpec {
     }
 }
 
+// ─── metadata policy (spec §5.6) ───────────────────────────────────────────
+
+/// How much metadata leaves with the exported file.
+///
+/// An export re-encodes from pixels, so **nothing** is inherited from the
+/// source container: every byte of metadata in the output is something this
+/// policy asked [`crate::metadata::build`] to write. The levels below are
+/// therefore an allowlist, not a strip list, which is why the privacy claim
+/// holds by construction rather than by remembering to delete things.
+///
+/// What every level writes, unconditionally, because it describes the
+/// exported file rather than the photographer or the scene:
+/// - the EXIF `Software` tag and `xmp:CreatorTool`, both `"Lightbox"`,
+/// - the exported pixel dimensions (`PixelXDimension`/`PixelYDimension`),
+/// - the ICC profile (color management, written by [`crate::encode`]
+///   independently of this policy).
+///
+/// What **no** level ever writes, at all:
+/// - IPTC IIM (the legacy `8BIM`/APP13 block). Lightbox does not emit it in
+///   any format; the IPTC-equivalent fields it does emit are XMP properties
+///   (`dc:`, `photoshop:`, `Iptc4xmpCore:`), which is IPTC's own current
+///   recommendation.
+/// - Textual place names (city/state/country). Lightbox has no field for
+///   them, so "location" here means exactly the EXIF GPS IFD.
+/// - EXIF `Orientation`. Export pixels are already rotated by the render,
+///   so writing an orientation tag would rotate them a second time.
+/// - Person/face regions, ratings, labels, keywords, edit history.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MetadataLevel {
+    /// The copyright statement and nothing else about the photograph.
+    ///
+    /// **The default**, deliberately the safe end rather than the maximal
+    /// one: an export is usually something leaving the machine, and the
+    /// setting that leaks a home address should be the one you opt into.
+    #[default]
+    CopyrightOnly,
+    /// [`MetadataLevel::CopyrightOnly`] plus the creator's name and their
+    /// contact email and URL (`dc:creator`, EXIF `Artist`,
+    /// `Iptc4xmpCore:CreatorContactInfo`).
+    CopyrightAndContact,
+    /// Everything Lightbox models **except** camera identification
+    /// (make, model, lens, exposure, aperture, ISO, focal length) and
+    /// location (the EXIF GPS IFD and its XMP mirror).
+    ///
+    /// Capture date, description and the rights/contact block survive.
+    AllExceptCameraAndLocation,
+    /// Everything Lightbox models, including camera identification and the
+    /// GPS position when the source carried one.
+    All,
+}
+
+impl MetadataLevel {
+    /// True where the creator name and contact email/URL are written.
+    #[must_use]
+    pub fn writes_contact(self) -> bool {
+        !matches!(self, MetadataLevel::CopyrightOnly)
+    }
+
+    /// True where descriptive fields (capture date, description) are
+    /// written.
+    #[must_use]
+    pub fn writes_descriptive(self) -> bool {
+        matches!(
+            self,
+            MetadataLevel::AllExceptCameraAndLocation | MetadataLevel::All
+        )
+    }
+
+    /// True where camera identification (make/model/lens/exposure/aperture/
+    /// ISO/focal length) is written.
+    #[must_use]
+    pub fn writes_camera(self) -> bool {
+        matches!(self, MetadataLevel::All)
+    }
+
+    /// True where the GPS position is written. False at every level except
+    /// [`MetadataLevel::All`].
+    #[must_use]
+    pub fn writes_location(self) -> bool {
+        matches!(self, MetadataLevel::All)
+    }
+}
+
+/// The rights and contact block: a per-export setting the user configures
+/// once, not something read out of the photograph (Lightroom's metadata
+/// preset plays the same role).
+///
+/// Where a field is `None` here, [`crate::metadata::build`] falls back to
+/// the matching field on [`SourceMetadata`] when the source file carried
+/// one; a value set here always wins.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RightsInfo {
+    /// `dc:creator` / EXIF `Artist`. Written from
+    /// [`MetadataLevel::CopyrightAndContact`] up.
+    pub creator: Option<String>,
+    /// `dc:rights` / EXIF `Copyright`. Written at every level.
+    pub copyright: Option<String>,
+    /// `Iptc4xmpCore:CreatorContactInfo/Iptc4xmpCore:CiEmailWork`. Written
+    /// from [`MetadataLevel::CopyrightAndContact`] up.
+    pub contact_email: Option<String>,
+    /// `Iptc4xmpCore:CreatorContactInfo/Iptc4xmpCore:CiUrlWork` and
+    /// `xmpRights:WebStatement`. Written from
+    /// [`MetadataLevel::CopyrightAndContact`] up.
+    pub contact_url: Option<String>,
+}
+
+/// An EXIF unsigned rational (`num/den`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Rational {
+    /// Numerator.
+    pub num: u32,
+    /// Denominator. A zero denominator is written through verbatim (EXIF
+    /// permits it and readers treat it as "undefined"); Lightbox never
+    /// divides by it.
+    pub den: u32,
+}
+
+impl Rational {
+    /// A rational, as-is.
+    #[must_use]
+    pub fn new(num: u32, den: u32) -> Rational {
+        Rational { num, den }
+    }
+}
+
+/// A WGS-84 position, as EXIF's GPS IFD models it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GpsPosition {
+    /// Signed degrees, north positive.
+    pub latitude_deg: f64,
+    /// Signed degrees, east positive.
+    pub longitude_deg: f64,
+    /// Metres above (positive) or below (negative) sea level.
+    pub altitude_m: Option<f64>,
+}
+
+/// The per-image facts an export may carry forward, resolved by the caller
+/// exactly like [`crate::run::ExportItem::recipe`] is.
+///
+/// [`crate::metadata::read_source`] fills one of these from a source file's
+/// EXIF; a caller with the values already in hand can build it directly.
+/// Every field is optional and an absent field is simply not written.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct SourceMetadata {
+    /// EXIF `Make`.
+    pub make: Option<String>,
+    /// EXIF `Model`.
+    pub model: Option<String>,
+    /// EXIF `LensModel`.
+    pub lens_model: Option<String>,
+    /// EXIF `DateTimeOriginal`, in EXIF's own `YYYY:MM:DD HH:MM:SS` form.
+    pub capture_time: Option<String>,
+    /// EXIF `ExposureTime`, in seconds.
+    pub exposure_time: Option<Rational>,
+    /// EXIF `FNumber`.
+    pub f_number: Option<Rational>,
+    /// EXIF `PhotographicSensitivity` (ISO).
+    pub iso: Option<u16>,
+    /// EXIF `FocalLength`, in millimetres.
+    pub focal_length_mm: Option<Rational>,
+    /// The GPS position, when the source had one.
+    pub gps: Option<GpsPosition>,
+    /// EXIF `ImageDescription` / `dc:description`.
+    pub description: Option<String>,
+    /// EXIF `Artist`, used only when [`RightsInfo::creator`] is `None`.
+    pub creator: Option<String>,
+    /// EXIF `Copyright`, used only when [`RightsInfo::copyright`] is `None`.
+    pub copyright: Option<String>,
+}
+
+/// The metadata half of [`ExportSettings`] (spec §5.6): how much leaves with
+/// the file, plus the rights block that goes with it.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct MetadataPolicy {
+    /// How much metadata to write. Defaults to
+    /// [`MetadataLevel::CopyrightOnly`].
+    pub level: MetadataLevel,
+    /// The per-export rights and contact block.
+    pub rights: RightsInfo,
+}
+
+// ─── watermark (spec §5.11) ────────────────────────────────────────────────
+
+/// The nine anchor points a watermark can sit on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum WatermarkAnchor {
+    /// Top left.
+    TopLeft,
+    /// Top centre.
+    TopCenter,
+    /// Top right.
+    TopRight,
+    /// Middle left.
+    MiddleLeft,
+    /// Dead centre.
+    Center,
+    /// Middle right.
+    MiddleRight,
+    /// Bottom left.
+    BottomLeft,
+    /// Bottom centre.
+    BottomCenter,
+    /// Bottom right. The default, where a signature normally goes.
+    #[default]
+    BottomRight,
+}
+
+impl WatermarkAnchor {
+    /// `(x, y)` in 0.0..=1.0, where 0 is left/top and 1 is right/bottom.
+    #[must_use]
+    pub fn fractions(self) -> (f32, f32) {
+        let x = match self {
+            WatermarkAnchor::TopLeft
+            | WatermarkAnchor::MiddleLeft
+            | WatermarkAnchor::BottomLeft => 0.0,
+            WatermarkAnchor::TopCenter
+            | WatermarkAnchor::Center
+            | WatermarkAnchor::BottomCenter => 0.5,
+            WatermarkAnchor::TopRight
+            | WatermarkAnchor::MiddleRight
+            | WatermarkAnchor::BottomRight => 1.0,
+        };
+        let y = match self {
+            WatermarkAnchor::TopLeft | WatermarkAnchor::TopCenter | WatermarkAnchor::TopRight => {
+                0.0
+            }
+            WatermarkAnchor::MiddleLeft
+            | WatermarkAnchor::Center
+            | WatermarkAnchor::MiddleRight => 0.5,
+            WatermarkAnchor::BottomLeft
+            | WatermarkAnchor::BottomCenter
+            | WatermarkAnchor::BottomRight => 1.0,
+        };
+        (x, y)
+    }
+}
+
+/// A text watermark burnt into the exported pixels (spec §5.11, text only).
+///
+/// **Graphical (PNG) watermarks are not built.** They would need an image
+/// decoder in this crate, and the task that added watermarking was explicit
+/// that one must not be added for that alone; see [`crate::watermark`]'s
+/// module doc comment for what the text renderer is and what it looks like.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Watermark {
+    /// The text to draw. `\n` starts a new line; every other control
+    /// character is dropped by the renderer. Must not be empty or
+    /// whitespace-only ([`ExportSettings::validate`] rejects that).
+    pub text: String,
+    /// Which of the nine anchor points the text sits on.
+    pub anchor: WatermarkAnchor,
+    /// Alpha applied to the whole watermark, 0.0..=1.0.
+    pub opacity: f32,
+    /// Cap height as a fraction of the image's **short** edge, in
+    /// 0.0..=1.0 (exclusive of zero). The short edge rather than the long
+    /// one so a panorama does not get a watermark the height of a building.
+    /// Scaled down automatically when the text would not otherwise fit
+    /// between the insets.
+    pub size: f32,
+    /// Margin from the image edge as a fraction of the short edge, in
+    /// 0.0..0.5.
+    pub inset: f32,
+    /// Text color, in the export's output color space, non-linear (the
+    /// same encoding the file is written in).
+    pub color: [u8; 3],
+    /// Draw a contrasting halo behind the glyphs so the watermark stays
+    /// legible over both a bright sky and a dark shadow. The halo color is
+    /// derived from [`Watermark::color`]: black behind light text, white
+    /// behind dark text.
+    pub halo: bool,
+}
+
+impl Default for Watermark {
+    fn default() -> Watermark {
+        Watermark {
+            text: String::new(),
+            anchor: WatermarkAnchor::default(),
+            opacity: 0.7,
+            size: 0.04,
+            inset: 0.03,
+            color: [255, 255, 255],
+            halo: true,
+        }
+    }
+}
+
+impl Watermark {
+    /// A watermark with `text` and every other knob at its default.
+    #[must_use]
+    pub fn text<S: Into<String>>(text: S) -> Watermark {
+        Watermark {
+            text: text.into(),
+            ..Watermark::default()
+        }
+    }
+}
+
 /// The root export settings document (spec §5.1 `ExportSettings`,
 /// narrowed, see the module doc comment for the full cut list).
 #[derive(Clone, PartialEq, Debug)]
@@ -206,6 +507,11 @@ pub struct ExportSettings {
     pub sharpen: Option<OutputSharpen>,
     /// Simple stem+suffix naming.
     pub naming: NamingSpec,
+    /// How much metadata leaves with the file. Defaults to
+    /// [`MetadataLevel::CopyrightOnly`].
+    pub metadata: MetadataPolicy,
+    /// Text watermark burnt into the pixels (`None` = off, the default).
+    pub watermark: Option<Watermark>,
 }
 
 impl Default for ExportSettings {
@@ -216,6 +522,8 @@ impl Default for ExportSettings {
             sizing: Sizing::default(),
             sharpen: None,
             naming: NamingSpec::default(),
+            metadata: MetadataPolicy::default(),
+            watermark: None,
         }
     }
 }
@@ -224,7 +532,7 @@ impl Default for ExportSettings {
 /// before any pixels move (mirrors the full spec's plan-time preflight,
 /// §4.3, narrowed to the checks a single-settings core slice can make
 /// without a catalog).
-#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+#[derive(Clone, PartialEq, Debug, thiserror::Error)]
 pub enum SettingsError {
     /// JPEG quality outside 1..=100 (`jpeg-encoder`'s own valid range).
     #[error("JPEG quality must be 1..=100, got {0}")]
@@ -232,6 +540,19 @@ pub enum SettingsError {
     /// A resize target of zero on either axis.
     #[error("resize target dimensions must be > 0")]
     InvalidResizeTarget,
+    /// A watermark was requested with nothing to draw.
+    #[error("watermark text must not be empty")]
+    WatermarkTextEmpty,
+    /// Watermark opacity outside 0.0..=1.0 (or not a number).
+    #[error("watermark opacity must be 0.0..=1.0, got {0}")]
+    WatermarkOpacityOutOfRange(f32),
+    /// Watermark size outside 0.0..=1.0, exclusive of zero (or not a
+    /// number).
+    #[error("watermark size must be >0.0 and <=1.0 (fraction of the short edge), got {0}")]
+    WatermarkSizeOutOfRange(f32),
+    /// Watermark inset outside 0.0..0.5 (or not a number).
+    #[error("watermark inset must be 0.0..0.5 (fraction of the short edge), got {0}")]
+    WatermarkInsetOutOfRange(f32),
 }
 
 impl ExportSettings {
@@ -256,6 +577,20 @@ impl ExportSettings {
                 if w == 0 || h == 0 {
                     return Err(SettingsError::InvalidResizeTarget);
                 }
+            }
+        }
+        if let Some(wm) = &self.watermark {
+            if wm.text.trim().is_empty() {
+                return Err(SettingsError::WatermarkTextEmpty);
+            }
+            if !(0.0..=1.0).contains(&wm.opacity) {
+                return Err(SettingsError::WatermarkOpacityOutOfRange(wm.opacity));
+            }
+            if !(wm.size > 0.0 && wm.size <= 1.0) {
+                return Err(SettingsError::WatermarkSizeOutOfRange(wm.size));
+            }
+            if !(0.0..0.5).contains(&wm.inset) {
+                return Err(SettingsError::WatermarkInsetOutOfRange(wm.inset));
             }
         }
         Ok(())
@@ -355,5 +690,115 @@ mod tests {
         assert_eq!(stem_of(Path::new("/a/b/IMG_0001.CR2")), "IMG_0001");
         assert_eq!(stem_of(Path::new("noext")), "noext");
         assert_eq!(stem_of(Path::new("/")), "export");
+    }
+
+    #[test]
+    fn the_default_metadata_level_is_the_safe_one() {
+        let level = ExportSettings::default().metadata.level;
+        assert_eq!(level, MetadataLevel::CopyrightOnly);
+        assert!(!level.writes_location(), "the default must not leak GPS");
+        assert!(!level.writes_camera());
+        assert!(!level.writes_descriptive());
+        assert!(!level.writes_contact());
+    }
+
+    #[test]
+    fn only_the_all_level_writes_camera_and_location() {
+        for level in [
+            MetadataLevel::CopyrightOnly,
+            MetadataLevel::CopyrightAndContact,
+            MetadataLevel::AllExceptCameraAndLocation,
+        ] {
+            assert!(!level.writes_location(), "{level:?} must not write GPS");
+            assert!(!level.writes_camera(), "{level:?} must not write camera");
+        }
+        assert!(MetadataLevel::All.writes_location());
+        assert!(MetadataLevel::All.writes_camera());
+    }
+
+    #[test]
+    fn descriptive_and_contact_tiers_widen_monotonically() {
+        assert!(!MetadataLevel::CopyrightOnly.writes_contact());
+        assert!(MetadataLevel::CopyrightAndContact.writes_contact());
+        assert!(!MetadataLevel::CopyrightAndContact.writes_descriptive());
+        assert!(MetadataLevel::AllExceptCameraAndLocation.writes_descriptive());
+        assert!(MetadataLevel::AllExceptCameraAndLocation.writes_contact());
+        assert!(MetadataLevel::All.writes_descriptive());
+    }
+
+    #[test]
+    fn anchor_fractions_cover_the_nine_points() {
+        use WatermarkAnchor as A;
+        let all = [
+            (A::TopLeft, (0.0, 0.0)),
+            (A::TopCenter, (0.5, 0.0)),
+            (A::TopRight, (1.0, 0.0)),
+            (A::MiddleLeft, (0.0, 0.5)),
+            (A::Center, (0.5, 0.5)),
+            (A::MiddleRight, (1.0, 0.5)),
+            (A::BottomLeft, (0.0, 1.0)),
+            (A::BottomCenter, (0.5, 1.0)),
+            (A::BottomRight, (1.0, 1.0)),
+        ];
+        for (anchor, want) in all {
+            assert_eq!(anchor.fractions(), want, "{anchor:?}");
+        }
+        assert_eq!(A::default(), A::BottomRight);
+    }
+
+    #[test]
+    fn watermark_validation_rejects_the_out_of_range_knobs() {
+        let with = |wm: Watermark| ExportSettings {
+            watermark: Some(wm),
+            ..ExportSettings::default()
+        };
+        assert_eq!(with(Watermark::text("(c) 2026")).validate(), Ok(()));
+        assert_eq!(
+            with(Watermark::text("   ")).validate(),
+            Err(SettingsError::WatermarkTextEmpty)
+        );
+        assert_eq!(
+            with(Watermark {
+                opacity: 1.5,
+                ..Watermark::text("x")
+            })
+            .validate(),
+            Err(SettingsError::WatermarkOpacityOutOfRange(1.5))
+        );
+        assert_eq!(
+            with(Watermark {
+                size: 0.0,
+                ..Watermark::text("x")
+            })
+            .validate(),
+            Err(SettingsError::WatermarkSizeOutOfRange(0.0))
+        );
+        assert_eq!(
+            with(Watermark {
+                inset: 0.5,
+                ..Watermark::text("x")
+            })
+            .validate(),
+            Err(SettingsError::WatermarkInsetOutOfRange(0.5))
+        );
+        // NaN is out of range on every knob, not silently accepted.
+        assert!(with(Watermark {
+            opacity: f32::NAN,
+            ..Watermark::text("x")
+        })
+        .validate()
+        .is_err());
+        assert!(with(Watermark {
+            size: f32::NAN,
+            ..Watermark::text("x")
+        })
+        .validate()
+        .is_err());
+        assert!(with(Watermark {
+            inset: f32::NAN,
+            ..Watermark::text("x")
+        })
+        .validate()
+        .is_err());
     }
 }

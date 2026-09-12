@@ -144,6 +144,20 @@ USAGE:
       [--quality 1..=100] [--depth 8|16] [--long-edge N] \\
       [--color srgb|adobe-rgb|display-p3] [--sharpen low|standard|high] [--suffix <text>] [--cpu]
 
+  Metadata control on export (either form). Default: copyright
+  (the safe level; only 'all' writes a GPS position into the file):
+      [--metadata copyright|copyright-contact|all-except-camera-location|all]
+      [--copyright <text>] [--creator <name>] [--contact-email <addr>] [--contact-url <url>]
+
+  Text watermark burnt into the pixels (either form):
+      [--watermark <text>]
+      [--watermark-position (top|middle|bottom)-(left|center|right)]   default bottom-right
+      [--watermark-opacity 0..=1]   default 0.7
+      [--watermark-size 0..=1]      cap height as a fraction of the short edge, default 0.04
+      [--watermark-inset 0..0.5]    margin as a fraction of the short edge, default 0.03
+      [--watermark-color rrggbb]    default ffffff
+      [--no-watermark-halo]         drop the contrasting outline behind the text
+
 EXIT CODES:
   0 success | 1 failure | 2 usage error | 3 catalog corrupt/refused
 ";

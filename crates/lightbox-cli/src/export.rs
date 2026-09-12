@@ -9,13 +9,23 @@
 //! lightbox-cli export --catalog <dir> --image <id> --out <file> \
 //!     --format jpeg|png|tiff [--quality 1..=100] [--depth 8|16] \
 //!     [--long-edge N] [--color srgb|adobe-rgb|display-p3] \
-//!     [--sharpen low|standard|high] [--cpu]
+//!     [--sharpen low|standard|high] [--metadata <level>] \
+//!     [--copyright <text>] [--creator <name>] [--contact-email <addr>] \
+//!     [--contact-url <url>] [--watermark <text>] \
+//!     [--watermark-position <anchor>] [--watermark-opacity 0..=1] \
+//!     [--watermark-size 0..=1] [--watermark-inset 0..0.5] \
+//!     [--watermark-color rrggbb] [--no-watermark-halo] [--cpu]
 //!
 //! lightbox-cli export --catalog <dir> --images <id>[,<id>...] --out-dir <dir> \
-//!     --format jpeg|png|tiff [--quality 1..=100] [--depth 8|16] \
-//!     [--long-edge N] [--color srgb|adobe-rgb|display-p3] \
-//!     [--sharpen low|standard|high] [--suffix <text>] [--cpu]
+//!     --format jpeg|png|tiff [... the same optional flags ...] \
+//!     [--suffix <text>] [--cpu]
 //! ```
+//!
+//! **`--metadata` defaults to `copyright`**, the safe end of
+//! [`lightbox_export::settings::MetadataLevel`], not the maximal one: a
+//! scripted export usually sends a file somewhere, and the level that
+//! carries GPS out of the machine is the one you opt into. `--metadata all`
+//! is the only level that writes a location.
 //!
 //! The single-image form calls [`lightbox_export::run::export_one`]
 //! directly against `Session::engine()`, the exact "bypass the command
@@ -35,8 +45,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context};
 use lightbox_core::{CloseOpts, ClosePolicy, Command, Core, CoreConfig, Event, ImageDetail};
 use lightbox_export::settings::{
-    BitDepth, ExportSettings, FileFormat, NamingSpec, OutputColor, OutputColorSpace, OutputSharpen,
-    SharpenAmount, SizeRule, Sizing,
+    BitDepth, ExportSettings, FileFormat, MetadataLevel, MetadataPolicy, NamingSpec, OutputColor,
+    OutputColorSpace, OutputSharpen, RightsInfo, SharpenAmount, SizeRule, Sizing, Watermark,
+    WatermarkAnchor,
 };
 use lightbox_export::ExportItem;
 use lightbox_jobs::CancelToken;
@@ -89,11 +100,124 @@ fn parse_sharpen(v: &str) -> Result<SharpenAmount, UsageError> {
     }
 }
 
+fn parse_metadata_level(v: &str) -> Result<MetadataLevel, UsageError> {
+    match v.to_ascii_lowercase().replace(['_', ' '], "-").as_str() {
+        "copyright" | "copyright-only" => Ok(MetadataLevel::CopyrightOnly),
+        "copyright-contact" | "contact" => Ok(MetadataLevel::CopyrightAndContact),
+        "all-except-camera-location" | "no-camera-location" => {
+            Ok(MetadataLevel::AllExceptCameraAndLocation)
+        }
+        "all" => Ok(MetadataLevel::All),
+        other => Err(UsageError(format!(
+            "--metadata must be copyright|copyright-contact|all-except-camera-location|all, \
+             got {other:?}"
+        ))),
+    }
+}
+
+fn parse_anchor(v: &str) -> Result<WatermarkAnchor, UsageError> {
+    match v.to_ascii_lowercase().replace(['_', ' '], "-").as_str() {
+        "top-left" => Ok(WatermarkAnchor::TopLeft),
+        "top-center" | "top-centre" | "top" => Ok(WatermarkAnchor::TopCenter),
+        "top-right" => Ok(WatermarkAnchor::TopRight),
+        "middle-left" | "left" => Ok(WatermarkAnchor::MiddleLeft),
+        "center" | "centre" | "middle" => Ok(WatermarkAnchor::Center),
+        "middle-right" | "right" => Ok(WatermarkAnchor::MiddleRight),
+        "bottom-left" => Ok(WatermarkAnchor::BottomLeft),
+        "bottom-center" | "bottom-centre" | "bottom" => Ok(WatermarkAnchor::BottomCenter),
+        "bottom-right" => Ok(WatermarkAnchor::BottomRight),
+        other => Err(UsageError(format!(
+            "--watermark-position must be one of the nine anchors \
+             (top|middle|bottom)-(left|center|right), got {other:?}"
+        ))),
+    }
+}
+
+/// `rrggbb`, with or without a leading `#`.
+fn parse_color_hex(v: &str) -> Result<[u8; 3], UsageError> {
+    let hex = v.trim_start_matches('#');
+    let bad = || UsageError(format!("--watermark-color must be rrggbb hex, got {v:?}"));
+    if hex.len() != 6 {
+        return Err(bad());
+    }
+    let byte = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).map_err(|_| bad());
+    Ok([byte(0)?, byte(2)?, byte(4)?])
+}
+
 /// Shared flag parsing for both export forms; returns the fully-built
 /// settings plus the flags neither form has consumed yet.
 struct CommonFlags {
     settings: ExportSettings,
     cpu: bool,
+}
+
+fn parse_metadata(flags: &mut Flags) -> anyhow::Result<MetadataPolicy> {
+    let level = flags
+        .take_value("--metadata")?
+        .map(|v| parse_metadata_level(&v))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(MetadataPolicy {
+        level,
+        rights: RightsInfo {
+            creator: flags.take_value("--creator")?,
+            copyright: flags.take_value("--copyright")?,
+            contact_email: flags.take_value("--contact-email")?,
+            contact_url: flags.take_value("--contact-url")?,
+        },
+    })
+}
+
+fn parse_watermark(flags: &mut Flags) -> anyhow::Result<Option<Watermark>> {
+    let text = flags.take_value("--watermark")?;
+    let anchor = flags
+        .take_value("--watermark-position")?
+        .map(|v| parse_anchor(&v))
+        .transpose()?;
+    let opacity = flags
+        .take_value("--watermark-opacity")?
+        .map(|v| parse_num::<f32>("--watermark-opacity", &v))
+        .transpose()?;
+    let size = flags
+        .take_value("--watermark-size")?
+        .map(|v| parse_num::<f32>("--watermark-size", &v))
+        .transpose()?;
+    let inset = flags
+        .take_value("--watermark-inset")?
+        .map(|v| parse_num::<f32>("--watermark-inset", &v))
+        .transpose()?;
+    let color = flags
+        .take_value("--watermark-color")?
+        .map(|v| parse_color_hex(&v))
+        .transpose()?;
+    let no_halo = flags.take_switch("--no-watermark-halo");
+
+    let Some(text) = text else {
+        // Tuning flags without a `--watermark` is a typo, not an intent to
+        // export unmarked; say so rather than silently ignoring them.
+        if anchor.is_some()
+            || opacity.is_some()
+            || size.is_some()
+            || inset.is_some()
+            || color.is_some()
+            || no_halo
+        {
+            return Err(
+                UsageError("--watermark-* flags need --watermark <text>".to_owned()).into(),
+            );
+        }
+        return Ok(None);
+    };
+    let base = Watermark::default();
+    Ok(Some(Watermark {
+        text,
+        anchor: anchor.unwrap_or(base.anchor),
+        opacity: opacity.unwrap_or(base.opacity),
+        size: size.unwrap_or(base.size),
+        inset: inset.unwrap_or(base.inset),
+        color: color.unwrap_or(base.color),
+        halo: !no_halo,
+    }))
 }
 
 fn parse_common(flags: &mut Flags) -> anyhow::Result<CommonFlags> {
@@ -124,6 +248,8 @@ fn parse_common(flags: &mut Flags) -> anyhow::Result<CommonFlags> {
         .map(|v| parse_sharpen(&v))
         .transpose()?;
     let suffix = flags.take_value("--suffix")?;
+    let metadata = parse_metadata(flags)?;
+    let watermark = parse_watermark(flags)?;
     let cpu = flags.take_switch("--cpu");
 
     let format = parse_format(&format_name, quality, depth)?;
@@ -138,6 +264,8 @@ fn parse_common(flags: &mut Flags) -> anyhow::Result<CommonFlags> {
         },
         sharpen: sharpen.map(|amount| OutputSharpen { amount }),
         naming: NamingSpec { suffix },
+        metadata,
+        watermark,
     };
     settings
         .validate()
@@ -204,12 +332,22 @@ fn cmd_export_one(
         .image_detail(image)
         .with_context(|| format!("image {} not found in the catalog", image.0))?;
     let recipe = session.query().edit_state(image)?.recipe;
+    // The per-image metadata comes from the original file, the same way the
+    // batch path resolves it (`lightbox_core`'s `resolve_export_items`).
+    // A source we cannot locate or cannot parse exports with no per-image
+    // metadata rather than failing; the rights block still goes out.
+    let source_metadata = session
+        .query()
+        .asset_abs_path(detail.asset)
+        .ok()
+        .map(|path| lightbox_export::metadata::read_source(&path));
     let item = ExportItem {
         image,
         pv: recipe.pv,
         recipe,
         full_extent: extent_of(&detail),
         out_path: out.to_path_buf(),
+        source_metadata,
     };
 
     let engine = session.engine();

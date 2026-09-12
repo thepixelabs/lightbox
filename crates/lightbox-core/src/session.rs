@@ -1450,6 +1450,16 @@ fn resolve_export_items(
         };
         let stem = lightbox_export::settings::stem_of(Path::new(&detail.filename));
         let file_name = settings.naming.file_name(&stem, settings.format);
+        // E15 metadata policy: the export crate has no catalog and no
+        // source path, so this resolver supplies the per-image metadata
+        // exactly as it already supplies the recipe and the extent. An
+        // unresolvable or EXIF-less source degrades to `None`, never to a
+        // failed item. `settings.metadata.level` decides what of it is
+        // allowed into the file; nothing here filters.
+        let source_metadata = reader
+            .asset_abs_path(detail.asset)
+            .ok()
+            .map(|path| lightbox_export::metadata::read_source(&path));
         resolved.push(lightbox_export::ExportItem {
             image,
             pv: state.recipe.pv,
@@ -1459,6 +1469,7 @@ fn resolve_export_items(
                 h: detail.height.max(1),
             },
             out_path: dest_dir.join(file_name),
+            source_metadata,
         });
     }
     (resolved, failed)

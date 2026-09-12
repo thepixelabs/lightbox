@@ -27,8 +27,8 @@ use lightbox_render::ng::{Engine, Extent, ProcessVersion};
 use lightbox_types::ImageId;
 
 use crate::error::ExportError;
-use crate::settings::ExportSettings;
-use crate::{encode, pixel};
+use crate::settings::{ExportSettings, SourceMetadata};
+use crate::{encode, metadata, pixel, watermark};
 
 /// One image to export: its recipe (already resolved by the caller, E09's
 /// `EditStore::recipe_of` or the session's `edit_state`, spec §5.2's
@@ -50,12 +50,23 @@ pub struct ExportItem {
     /// planner/collision-policy stage, see the crate root doc comment; the
     /// caller is responsible for collisions/sanitization).
     pub out_path: PathBuf,
+    /// This image's own metadata (camera, capture time, GPS), resolved by
+    /// the caller in the same way `recipe` and `full_extent` are, because
+    /// this crate has no catalog and no source path.
+    /// [`crate::metadata::read_source`] fills one from a file.
+    ///
+    /// `None` exports with no per-image metadata at all, which is a valid
+    /// and safe outcome: the rights block in
+    /// [`ExportSettings::metadata`](crate::settings::ExportSettings::metadata)
+    /// is still written, and the policy has nothing to strip.
+    pub source_metadata: Option<SourceMetadata>,
 }
 
 /// Runs the full per-image pipeline synchronously: render → resize →
-/// output color transform → basic sharpen → quantize → encode → atomic
-/// write (spec §4.1, narrowed, see the crate root doc comment). Blocking;
-/// callers run this on a blocking pool ([`export_batch`] does).
+/// output color transform → basic sharpen → watermark → quantize →
+/// encode (with the policy-filtered metadata) → atomic write (spec §4.1,
+/// narrowed, see the crate root doc comment). Blocking; callers run this
+/// on a blocking pool ([`export_batch`] does).
 pub fn export_one(
     engine: &Engine,
     item: &ExportItem,
@@ -92,15 +103,24 @@ pub fn export_one(
     if let Some(sharpen) = settings.sharpen {
         pixel::sharpen_in_place(&mut rgb_f32, w, h, sharpen.amount);
     }
+    // [5] watermark, at final resolution, in the output color space, and
+    // after sharpening so the mark does not pick up an unsharp halo of its
+    // own (see `crate::watermark`'s module doc comment).
+    if let Some(wm) = &settings.watermark {
+        watermark::apply(&mut rgb_f32, w, h, wm);
+    }
     if cancel.is_cancelled() {
         return Err(ExportError::Cancelled);
     }
 
-    // [5] quantize + [6] encode.
+    // [6] quantize + [7] encode. The metadata blocks are built from the
+    // policy and this item's own source metadata; `w`/`h` are the exported
+    // dimensions, which is what EXIF's PixelXDimension is defined to hold.
     let quantized = pixel::quantize(&rgb_f32, settings.format.depth());
-    let bytes = encode::encode(w, h, &quantized, settings.format, &icc)?;
+    let meta = metadata::build(&settings.metadata, item.source_metadata.as_ref(), w, h);
+    let bytes = encode::encode(w, h, &quantized, settings.format, &icc, &meta)?;
 
-    // [7] atomic write (temp-then-rename in the destination dir; spec §4.1
+    // [8] atomic write (temp-then-rename in the destination dir; spec §4.1
     // stage 8, narrowed: no fsync/crash-recovery sweep at core-slice scope).
     write_atomic(&item.out_path, &bytes)?;
     Ok(())
