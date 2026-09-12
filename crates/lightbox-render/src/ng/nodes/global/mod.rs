@@ -40,6 +40,7 @@ pub mod contrast;
 pub mod creative_lut;
 pub mod dehaze;
 pub mod exposure;
+pub mod grain;
 pub mod hsl;
 pub mod noise_reduction;
 pub mod sharpen;
@@ -47,17 +48,19 @@ pub mod texture;
 pub mod tone_curve;
 pub mod tone_recovery;
 pub mod vibrance_sat;
+pub mod vignette;
 pub mod white_balance;
 pub mod whites_blacks;
 
 use std::sync::Arc;
 
-use lightbox_edit::{GlobalStages, ParamId};
+use lightbox_edit::{Geometry, GlobalStages, ParamId};
 
 use crate::ng::error::{CompileError, RegistryError};
 use crate::ng::graph::{NodeIndex, RenderGraph};
-use crate::ng::node::{KernelSalt, NodeRegistry, ParamBlock, PvRange};
-use crate::ng::types::{NodeId, ProcessVersion, RenderScale, Roi};
+use crate::ng::node::{KernelSalt, NodeRegistry, ParamBlock, PvRange, RenderNode};
+use crate::ng::nodes::geometry::{GeomCropNode, GeometryNode};
+use crate::ng::types::{Extent, NodeId, ProcessVersion, RenderScale, Roi};
 
 pub use bw_mix::{BwMixFactory, BwMixNode};
 pub use clarity::{ClarityFactory, ClarityNode};
@@ -66,6 +69,7 @@ pub use contrast::{ContrastFactory, ContrastNode};
 pub use creative_lut::{CreativeLutFactory, CreativeLutNode, LookResolver};
 pub use dehaze::{DehazeFactory, DehazeNode};
 pub use exposure::{ExposureFactory, ExposureNode};
+pub use grain::{GrainFactory, GrainNode};
 pub use hsl::{HslFactory, HslNode};
 pub use noise_reduction::{NoiseReductionFactory, NoiseReductionNode};
 pub use sharpen::{SharpenFactory, SharpenNode};
@@ -73,6 +77,7 @@ pub use texture::{TextureFactory, TextureNode};
 pub use tone_curve::{ToneCurveFactory, ToneCurveNode};
 pub use tone_recovery::{ToneRecoveryFactory, ToneRecoveryNode};
 pub use vibrance_sat::{VibranceSatFactory, VibranceSatNode};
+pub use vignette::{VignetteFactory, VignetteNode};
 pub use white_balance::{WhiteBalanceFactory, WhiteBalanceNode};
 pub use whites_blacks::{WhitesBlacksFactory, WhitesBlacksNode};
 
@@ -190,6 +195,16 @@ pub fn register_global_nodes(
         PvRange::from_open(pv),
         Arc::new(CreativeLutFactory::default()),
     )?;
+    reg.register(
+        VignetteNode::ID,
+        PvRange::from_open(pv),
+        Arc::new(VignetteFactory::default()),
+    )?;
+    reg.register(
+        GrainNode::ID,
+        PvRange::from_open(pv),
+        Arc::new(GrainFactory::default()),
+    )?;
     Ok(())
 }
 
@@ -297,6 +312,107 @@ pub fn build_tone_color_segment(
     let cur = maybe_add::<SharpenNode>(g, reg, pv, SharpenNode::ID, p, cur)?;
     let cur = maybe_add_creative_lut(g, reg, pv, p, cur, look_resolver)?;
     Ok(cur)
+}
+
+/// The post-crop canvas extent: what `geom.crop` will actually hand the
+/// stages spliced after it.
+///
+/// Derived by asking `geom.crop` itself (`GeomCropNode::param_block` then
+/// `RenderNode::output_extent`, the same pair the compiled node uses at
+/// eval time) rather than re-deriving the rect rounding here, so the
+/// vignette's canvas can never disagree with the crop's real output by a
+/// pixel. An identity crop leaves the source extent untouched;
+/// `geom.warp` never changes extent in this engine slice
+/// (`nodes/geometry/crop.rs`'s `output_extent` doc comment).
+///
+/// Note the coupling this creates: a `ParamId::Crop` delta changes the
+/// canvas baked into `fx.vignette`'s [`ParamBlock`], hence its content
+/// key, hence its cached tiles. That is handled by the content key, not by
+/// [`invalidates`], which stays a hint (see its own doc comment).
+pub fn post_crop_extent(geometry: &Geometry, src_extent: Extent) -> Extent {
+    if GeomCropNode::is_identity(geometry) {
+        return src_extent;
+    }
+    let params = GeomCropNode::param_block(geometry, src_extent);
+    GeomCropNode::new().output_extent(&[src_extent], &params, src_extent)
+}
+
+/// Builds the effects DAG segment from `src`'s output: `VignetteNode →
+/// GrainNode`, each elided when its slice of `p.effects` is identity (spec
+/// §4.1). An all-neutral effects block therefore returns `Ok(src)` with
+/// zero nodes added.
+///
+/// # Where this sits, and why it is not negotiable
+///
+/// The compiler splices this **after** `nodes::geometry::
+/// build_geometry_segment` and **before** `xform.display`. Two reasons,
+/// both structural:
+///
+/// * The vignette is a **post-crop** vignette. Spliced before the crop it
+///   would be centred on the original frame, so any cropped photograph
+///   would carry a visibly off-centre vignette. Its canvas is
+///   [`post_crop_extent`], baked into the node's params because
+///   `RenderNode::eval_*` sees a tile, not a canvas.
+/// * Grain goes **last**, after the vignette. Film grain is a property of
+///   the emulsion, so it sits on top of everything, including the
+///   vignette's own darkening. Grain before the vignette would get
+///   darkened along with the corners, which is backwards.
+///
+/// `src_extent` is the source extent the geometry segment was itself built
+/// against (`SourceDesc::full_extent`), the same value and the same
+/// `util.resize`-is-extent-identity assumption
+/// `build_geometry_segment` already records.
+pub fn build_effects_segment(
+    g: &mut RenderGraph,
+    reg: &NodeRegistry,
+    pv: ProcessVersion,
+    p: &GlobalStages,
+    geometry: &Geometry,
+    src_extent: Extent,
+    src: NodeIndex,
+) -> Result<NodeIndex, CompileError> {
+    let canvas = post_crop_extent(geometry, src_extent);
+    let cur = maybe_add_vignette(g, reg, pv, p, canvas, src)?;
+    let cur = maybe_add::<GrainNode>(g, reg, pv, GrainNode::ID, p, cur)?;
+    Ok(cur)
+}
+
+/// `fx.vignette`'s own resolve+connect primitive: identical to
+/// [`maybe_add`] except that the [`ParamBlock`] carries the post-crop
+/// canvas, which `GlobalNode::param_block`'s signature cannot supply
+/// (mirrors [`maybe_add_creative_lut`], the other stage the generic path
+/// cannot serve).
+fn maybe_add_vignette(
+    g: &mut RenderGraph,
+    reg: &NodeRegistry,
+    pv: ProcessVersion,
+    p: &GlobalStages,
+    canvas: Extent,
+    src: NodeIndex,
+) -> Result<NodeIndex, CompileError> {
+    if VignetteNode::is_identity(p) {
+        return Ok(src);
+    }
+    let id = VignetteNode::ID;
+    let node = reg
+        .resolve(id, pv)
+        .ok_or(CompileError::NodeNotRegistered { id, pv })?;
+    let salt = reg
+        .kernel_salt(id, pv)
+        .unwrap_or_else(|| KernelSalt(blake3::hash(id.0.as_bytes())));
+    let params = VignetteNode::param_block_with_canvas(p, canvas);
+    let idx = g.add_node_full(node, params, salt);
+    let to_port = g
+        .node(idx)
+        .descriptor()
+        .inputs
+        .first()
+        .map(|d| d.name)
+        .ok_or_else(|| {
+            CompileError::UnknownStage(format!("{id} has no input port to splice into"))
+        })?;
+    g.connect(src, idx, to_port)?;
+    Ok(idx)
 }
 
 /// D10's own resolve+connect primitive for `global.creative_lut`, the one
@@ -414,6 +530,8 @@ pub fn invalidates(id: ParamId) -> &'static [NodeId] {
         ParamId::Sharpen => &[SharpenNode::ID],
         ParamId::NoiseReduction => &[NoiseReductionNode::ID],
         ParamId::CreativeLut => &[CreativeLutNode::ID],
+        ParamId::PostCropVignette => &[VignetteNode::ID],
+        ParamId::Grain => &[GrainNode::ID],
         _ => &[],
     }
 }
@@ -552,5 +670,41 @@ mod tests {
     fn creative_lut_delta_invalidates_only_the_creative_lut_node() {
         assert_eq!(invalidates(ParamId::CreativeLut), &[CreativeLutNode::ID]);
         assert!(!invalidates(ParamId::CreativeLut).contains(&DehazeNode::ID));
+    }
+
+    /// Effects: a `PostCropVignette` delta invalidates `fx.vignette`
+    /// and nothing else, a `Grain` delta invalidates `fx.grain` and
+    /// nothing else (grain sits downstream of the vignette, so it must not
+    /// be dragged in by a vignette edit).
+    #[test]
+    fn effects_deltas_invalidate_only_their_own_node() {
+        assert_eq!(invalidates(ParamId::PostCropVignette), &[VignetteNode::ID]);
+        assert_eq!(invalidates(ParamId::Grain), &[GrainNode::ID]);
+        assert!(!invalidates(ParamId::PostCropVignette).contains(&GrainNode::ID));
+        assert!(!invalidates(ParamId::Grain).contains(&VignetteNode::ID));
+    }
+
+    /// The post-crop canvas is `geom.crop`'s own rounded output extent, not
+    /// the source extent: this is what keeps the vignette centred on the
+    /// cropped frame.
+    #[test]
+    fn post_crop_extent_follows_the_crop_rect() {
+        use lightbox_edit::leaves::Crop;
+        let src = Extent { w: 400, h: 200 };
+        assert_eq!(post_crop_extent(&Geometry::default(), src), src);
+        let cropped = Geometry {
+            crop: Crop {
+                left: 0.25,
+                top: 0.0,
+                right: 0.75,
+                bottom: 1.0,
+            },
+            ..Geometry::default()
+        };
+        assert_eq!(
+            post_crop_extent(&cropped, src),
+            Extent { w: 200, h: 200 },
+            "a half-width crop halves the canvas the vignette centres on"
+        );
     }
 }

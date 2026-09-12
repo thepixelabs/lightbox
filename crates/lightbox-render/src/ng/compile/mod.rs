@@ -302,6 +302,22 @@ impl RecipeCompiler {
                     src.full_extent,
                     prev.expect("tone/color segment always returns a node"),
                 )?);
+                // Effects (`fx.vignette` then `fx.grain`) sit after
+                // geometry and before xform.display. The vignette is a
+                // POST-CROP vignette, so it must see the cropped canvas or
+                // a cropped photograph gets an off-centre vignette; grain
+                // goes last because film grain sits on top of everything,
+                // the vignette included. See
+                // `nodes::global::build_effects_segment`.
+                prev = Some(global::build_effects_segment(
+                    &mut graph,
+                    &self.registry,
+                    pv,
+                    &recipe.global,
+                    &recipe.geometry,
+                    src.full_extent,
+                    prev.expect("geometry segment always returns a node"),
+                )?);
             }
         }
         Ok(graph)

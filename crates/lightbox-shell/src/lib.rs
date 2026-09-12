@@ -774,7 +774,8 @@ impl LightboxApp {
         panel_host.register(panels::hsl::def());
         panel_host.register(panels::bw::def());
         panel_host.register(panels::grading::def());
-        panel_host.register(panels::detail::def()); // order 50, after grading
+        panel_host.register(panels::detail::def());
+        panel_host.register(panels::effects::def());
         panel_host.register(panels::looks::def());
         panel_host.register(panels::history::def());
         panel_host.register(panels::presets::def());

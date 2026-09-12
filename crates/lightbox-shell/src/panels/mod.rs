@@ -35,6 +35,10 @@
 //! * [`looks`], E10 tasks D10/D11: the `develop.looks` creative-look
 //!   browser, install/browse (family-grouped)/apply/hover-preview an
 //!   `installed_look` pack, an amount slider, and a missing-look badge.
+//! * [`effects`], the `develop.effects` panel: post-crop vignetting and
+//!   grain, the rail half of `lightbox_render`'s `fx.vignette` /
+//!   `fx.grain` nodes (both leaves already round-tripped through the
+//!   recipe and the `crs:` XMP mapping before either could render).
 //! * [`geometry`], E11 geometry TOOL UI: the `develop.geometry` panel
 //!   (crop tool + aspect presets + straighten + flip + reset), driving
 //!   `canvas::crop_gizmo` and the E11 engine's `ParamId::{Crop,Angle,Flip}`.
@@ -56,6 +60,7 @@ pub mod bw;
 pub mod curve;
 pub mod detail;
 pub mod develop_ctx;
+pub mod effects;
 pub mod geometry;
 pub mod grading;
 pub mod histogram;
