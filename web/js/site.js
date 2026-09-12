@@ -85,7 +85,28 @@
      COPY BUTTONS
      --------------------------------------------------------------------- */
   (function copy() {
+    var n = 0;
     document.querySelectorAll('.copy').forEach(function (btn) {
+      n += 1;
+      btn.type = 'button';
+
+      // Five of these on the page, and every one of them is named "Copy" and
+      // nothing else, so a screen reader reads the same name five times with
+      // no way to tell which block it would copy. Each code card already
+      // carries its own label in the head beside the button, so the button
+      // borrows it: the accessible name becomes "Copy, From source" without
+      // a single new string being written.
+      var head = btn.parentElement;
+      var title = head && head.querySelector('.mono');
+      if (title) {
+        if (!btn.id) btn.id = 'copy-btn-' + n;
+        if (!title.id) title.id = 'copy-for-' + n;
+        btn.setAttribute('aria-labelledby', btn.id + ' ' + title.id);
+      }
+      // The label swaps to "Copied" on success. That is the only feedback the
+      // button gives, so it has to be announced rather than just drawn.
+      btn.setAttribute('aria-live', 'polite');
+
       btn.addEventListener('click', function () {
         var src = document.getElementById(btn.getAttribute('data-copy'));
         if (!src) return;

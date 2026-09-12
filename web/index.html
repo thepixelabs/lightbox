@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Lightbox: a raw editor that never loses your edit</title>
 <meta name="description" content="Open source raw photo editor for macOS. Your edits are tracked by the content of the photograph, so renaming or moving a file never orphans them. Full colour toolset on your GPU, 36 presets, unlimited history, and your originals are never touched.">
-<meta name="theme-color" content="#faf9f7">
+<meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0c0f13" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="https://lightbox.pixelabs.net/">
@@ -23,7 +24,9 @@
 <meta name="twitter:image" content="https://lightbox.pixelabs.net/assets/img/og.jpg">
 
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-<link rel="preload" as="image" href="assets/img/app-editor.webp" fetchpriority="high">
+<link rel="preload" as="image" href="assets/img/app-editor.webp"
+      imagesrcset="assets/img/app-editor@900.webp 900w, assets/img/app-editor.webp 1600w"
+      imagesizes="(min-width: 901px) 38vw, 92vw" fetchpriority="high">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/InterTight-var.woff2" crossorigin>
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/Inter-Regular.woff2" crossorigin>
 <link rel="stylesheet" href="css/site.css">
@@ -35,6 +38,7 @@
 <div class="grain" aria-hidden="true"></div>
 
 <header class="nav" id="nav">
+  <div class="wrap nav-inner">
   <a class="nav-brand" href="#top" aria-label="Lightbox, back to top">
     <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
       <path d="M10.15 6H6a3 3 0 0 0-3 3v14a3 3 0 0 0 3 3h7.65Z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
@@ -56,6 +60,7 @@
       Source
     </a>
     <a class="btn btn-primary" href="#get">Get it</a>
+  </div>
   </div>
 </header>
 
@@ -82,7 +87,10 @@
     </div>
 
     <figure class="hero-demo">
-      <img src="assets/img/app-editor.webp" width="1600" height="1000"
+      <img src="assets/img/app-editor.webp"
+           srcset="assets/img/app-editor@900.webp 900w, assets/img/app-editor.webp 1600w"
+           sizes="(min-width: 901px) 38vw, 92vw"
+           width="1600" height="1000"
            fetchpriority="high" decoding="async"
            alt="The Lightbox editor: a Highland road photograph on the canvas, a filmstrip of three images below it, and the develop rail open on the right">
     </figure>

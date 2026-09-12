@@ -143,11 +143,14 @@ a{ color:inherit; }
 /* ---------- nav -------------------------------------------------------- */
 .nav{
   position:fixed; inset:0 0 auto 0; z-index:100;
-  display:flex; align-items:center; gap:24px;
-  padding:14px var(--pad);
+  padding-block:14px;
   transition:background .4s var(--ease), border-color .4s var(--ease), backdrop-filter .4s;
   border-bottom:1px solid transparent;
 }
+/* The glass runs edge to edge; the brand, links and buttons sit in the same
+   .wrap column as every section below, so the bar's ends line up with the
+   page rather than with the viewport. */
+.nav-inner{ display:flex; align-items:center; gap:24px; }
 .nav::before{
   content:""; position:absolute; inset:0; z-index:-1; pointer-events:none;
   background:linear-gradient(to bottom, rgba(6,7,9,.78), rgba(6,7,9,0));
@@ -1193,65 +1196,86 @@ a{ color:inherit; }
   color-scheme: light dark;
 
   /* ---- ground and surfaces ------------------------------------------
-     A warm neutral paper rather than pure white. Pure white next to a
-     photograph reads as a blown highlight; paper reads as a light table. */
-  --bg:        #faf9f7;   /* page ground */
-  --bg-2:      #f2f0ed;   /* alternating sections, footer */
-  --surface:   #ffffff;   /* cards lifted off the ground */
-  --surface-2: #f6f4f1;   /* recessed wells inside cards */
-  --surface-3: #edeae6;   /* pressed and hover states on the ground */
+     A tinted off-white, not paper-white. The previous ground was #faf9f7,
+     which is 1.05:1 against pure white: at that distance a page reads as one
+     undifferentiated sheet and the only thing separating two sections is a
+     hairline. The ground now sits 1.09:1 off white and the alternating band
+     1.10:1 off the ground, which is the same separation the house light
+     theme uses (#F4F2F7 / #EAE8F0 measures 1.09:1).
 
-  /* ---- lines --------------------------------------------------------- */
-  --line:      rgba(20,23,28,.10);   /* hairline, NON-TEXT */
-  --line-2:    rgba(20,23,28,.18);   /* stated border, NON-TEXT */
-  --line-3:    rgba(20,23,28,.30);   /* hover border, NON-TEXT */
+     The tint is cool and near neutral rather than the house lavender,
+     because the accent here is the application's blue and because a page
+     full of photographs should not be surrounded by a hue that argues with
+     them. Cards stay pure white on purpose: a graded frame is judged
+     against neutral, so the surround immediately around a photograph is the
+     one place on the page that carries no tint at all. */
+  --bg:        #f4f5f8;   /* page ground,        1.090:1 off white */
+  --bg-2:      #e8eaf1;   /* alternating bands,  1.103:1 off --bg */
+  --surface:   #ffffff;   /* cards and photo frames: neutral, untinted */
+  --surface-2: #eef0f5;   /* recessed wells inside cards */
+  --surface-3: #e1e4ed;   /* pressed and hover states on the ground */
+
+  /* ---- lines ---------------------------------------------------------
+     Tinted with the accent rather than flat grey, which is the house rule.
+     Deep and desaturated so a rule inside a card full of graded frames
+     reads as a cool grey and not as a blue line. --line composites to
+     #d0d8e3 on the ground, 1.32:1, which is a hairline you can see. */
+  --line:      rgba(20,64,116,.16);   /* hairline, NON-TEXT */
+  --line-2:    rgba(20,64,116,.28);   /* stated border, NON-TEXT */
+  --line-3:    rgba(20,64,116,.44);   /* hover border, NON-TEXT */
 
   /* ---- ink, four levels ---------------------------------------------
-     Measured against --bg #faf9f7. Levels 1 to 4 all clear AA, so any of
-     them may carry body copy. Decoration has its own token below so that
-     dimming a rule never means dimming a sentence. */
-  --ink:       #14171c;   /* 17.07:1 AAA. headings, emphasis */
-  --ink-2:     #363c44;   /* 10.58:1 AAA. body copy, ledes */
-  --ink-3:     #4e555e;   /*  7.17:1 AAA. secondary copy, card body */
-  --ink-4:     #656c75;   /*  5.05:1 AA.  fine print, captions, caveats */
-  --ink-faint: #9aa1aa;   /*  2.48:1 NON-TEXT ONLY. rules, spines, dots */
-  --ink-mute:  #7b838d;   /*  3.65:1 NON-TEXT ONLY. meaningful indicators,
-                              clears the 3:1 non-text minimum */
+     Re-measured against the new --bg #f4f5f8, and against --bg-2 #e8eaf1,
+     which is the harder of the two because half the page's fine print sits
+     on the alternating band. Every level clears AA on both grounds, so any
+     of them may carry body copy anywhere. Decoration has its own token
+     below so that dimming a rule never means dimming a sentence.
+
+     --ink-4 was #656c75. On the deeper band that measured 4.42:1 and would
+     have failed, so it moves down two steps; the side effect is that the
+     weakest text on the page went from 4.67:1 to 5.29:1. */
+  --ink:       #14171c;   /* bg 16.48:1 AAA, bg-2 14.94:1 AAA. headings */
+  --ink-2:     #363c44;   /* bg 10.21:1 AAA, bg-2  9.26:1 AAA. body, ledes */
+  --ink-3:     #4e555e;   /* bg  6.92:1 AA,  bg-2  6.27:1 AA.  secondary */
+  --ink-4:     #596069;   /* bg  5.83:1 AA,  bg-2  5.29:1 AA.  fine print */
+  --ink-faint: #98a3b0;   /* bg  2.35:1 NON-TEXT ONLY. rules, spines, dots */
+  --ink-mute:  #737c87;   /* bg  3.88:1 NON-TEXT ONLY. meaningful indicators,
+                              clears the 3:1 non-text minimum on both bands */
 
   /* ---- brand accent ---------------------------------------------------
      The shipped app accent #5583a8 sits at 3.75:1 on paper, which is below
      AA, so it could never carry a link. Same hue family, more chroma and
      enough depth to be a text colour as well as a fill. */
-  --accent:        #1266b0;  /* 5.62:1 on --bg AA. fills, primary button */
-  --accent-hover:  #0f5b9e;  /* 6.44:1 on --bg AA */
-  --accent-active: #0b4a83;  /* 8.05:1 on --bg AAA */
-  --accent-hi:     #0d5490;  /* 7.43:1 on --bg AAA. links, strong accent text */
+  --accent:        #1266b0;  /* 5.42:1 on --bg AA. fills, primary button */
+  --accent-hover:  #0f5b9e;  /* 6.22:1 on --bg AA */
+  --accent-active: #0b4a83;  /* 8.30:1 on --bg AAA */
+  --accent-hi:     #0d5490;  /* 7.17:1 on --bg AAA. links, strong accent text */
   --accent-lo:     #6aa8dd;  /* NON-TEXT. light end of gradient fills */
   --accent-on:     #ffffff;  /* 5.91:1 on --accent AA. text on an accent fill */
-  --accent-wash:   #e9f1fa;  /* NON-TEXT ground. --accent-hi on it is 6.86:1 */
-  --accent-line:   rgba(18,102,176,.30);
+  --accent-wash:   #e4eefa;  /* NON-TEXT ground. --accent-hi on it is 6.66:1 */
+  --accent-line:   rgba(18,102,176,.32);
   --accent-glow:   rgba(18,102,176,.26);
 
   /* ---- spectral accents, the grading language -------------------------
      Three, drawn at ink weight so they can key a section heading and still
      be read. The bright variants are for the instrument surfaces only. */
-  --sp-warm:     #c2410c;  /* 4.92:1 on --bg AA */
-  --sp-warm-ink: #9a3609;  /* 6.87:1 on --bg AA */
-  --sp-warm-wash:#fdefe6;  /* NON-TEXT ground. --sp-warm-ink on it is 6.42:1 */
-  --sp-mag:      #b02a63;  /* 5.94:1 on --bg AA */
-  --sp-mag-ink:  #8f2050;  /* 8.01:1 on --bg AAA */
-  --sp-mag-wash: #fceef4;  /* NON-TEXT ground. --sp-mag-ink on it is 7.50:1 */
-  --sp-cool:     #0f766e;  /* 5.20:1 on --bg AA */
-  --sp-cool-ink: #0b5d57;  /* 7.34:1 on --bg AAA */
-  --sp-cool-wash:#e6f4f2;  /* NON-TEXT ground. --sp-cool-ink on it is 6.84:1 */
+  --sp-warm:     #c2410c;  /* 4.75:1 on --bg AA */
+  --sp-warm-ink: #9a3609;  /* 6.63:1 on --bg AA */
+  --sp-warm-wash:#fbe9dd;  /* NON-TEXT ground. --sp-warm-ink on it is 6.13:1 */
+  --sp-mag:      #b02a63;  /* 5.74:1 on --bg AA */
+  --sp-mag-ink:  #8f2050;  /* 7.74:1 on --bg AAA */
+  --sp-mag-wash: #fbe6ef;  /* NON-TEXT ground. --sp-mag-ink on it is 7.09:1 */
+  --sp-cool:     #0f766e;  /* 5.02:1 on --bg AA */
+  --sp-cool-ink: #0b5d57;  /* 7.09:1 on --bg AAA */
+  --sp-cool-wash:#dff0ec;  /* NON-TEXT ground. --sp-cool-ink on it is 6.55:1 */
 
   /* ---- status --------------------------------------------------------- */
-  --ok:        #15703f;   /* 5.42:1 on --bg AA,  5.71:1 on --surface AA */
-  --ok-wash:   #e6f3ea;
-  --warn:      #8f5407;   /* 5.80:1 on --bg AA,  6.11:1 on --surface AA */
-  --warn-wash: #fdf4e4;   /* NON-TEXT ground. --warn on it is 5.59:1 */
-  --err:       #b4272a;   /* 6.11:1 on --bg AA,  6.43:1 on --surface AA */
-  --err-wash:  #fdecec;
+  --ok:        #15703f;   /* 5.63:1 on --bg AA,  6.14:1 on --surface AA */
+  --ok-wash:   #ddf0e4;
+  --warn:      #8f5407;   /* 5.60:1 on --bg AA,  6.11:1 on --surface AA */
+  --warn-wash: #fbf0dd;   /* NON-TEXT ground. --warn on it is 5.41:1 */
+  --err:       #b4272a;   /* 5.90:1 on --bg AA,  6.43:1 on --surface AA */
+  --err-wash:  #fce6e6;
 
   /* ---- instrument surfaces -------------------------------------------
      The application's own chrome: demo canvases, the develop rail, code
@@ -1275,10 +1299,13 @@ a{ color:inherit; }
   --inst-cool:   #63c3dc;   /*  9.27:1 on --inst-bg AAA */
   --inst-ok:     #5fbf8a;   /*  8.32:1 on --inst-bg AAA */
 
-  /* ---- elevation. Cool tinted, never pure black on paper. ------------- */
-  --shadow-1: 0 1px 2px rgba(18,26,38,.05), 0 2px 6px -2px rgba(18,26,38,.07);
-  --shadow-2: 0 1px 2px rgba(18,26,38,.05), 0 14px 30px -14px rgba(18,26,38,.18);
-  --shadow-3: 0 2px 4px rgba(18,26,38,.06), 0 34px 70px -30px rgba(18,26,38,.30);
+  /* ---- elevation ------------------------------------------------------
+     Tinted with the accent and soft rather than tight, which is the house
+     shadow (0 2px 16px rgba(80,40,120,.10) there, the same shape in this
+     palette's blue here). Never pure black on a light ground. */
+  --shadow-1: 0 1px 2px rgba(22,52,92,.05), 0 2px 16px rgba(22,52,92,.09);
+  --shadow-2: 0 1px 3px rgba(22,52,92,.06), 0 14px 32px -12px rgba(22,52,92,.20);
+  --shadow-3: 0 2px 6px rgba(22,52,92,.07), 0 34px 70px -28px rgba(22,52,92,.30);
 
   /* ---- focus ---------------------------------------------------------- */
   --ring: var(--accent-active);   /* 8.05:1 against --bg, AAA at every surface */
@@ -1301,60 +1328,74 @@ a{ color:inherit; }
    ========================================================================= */
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --bg:        #0d1013;
-    --bg-2:      #12161a;
-    --surface:   #171c21;
-    --surface-2: #1d2329;
-    --surface-3: #232a31;
+    /* The alternating band was #12161a against a #0d1013 ground: 1.05:1,
+       which is not a band, it is a rounding error. Both ends move apart so
+       the dark page alternates by the same amount the light one does
+       (1.108:1 here, 1.103:1 there), and the card surface lifts clear of
+       the band instead of sitting on top of it. */
+    --bg:        #0c0f13;   /* page ground */
+    --bg-2:      #151b22;   /* alternating bands, 1.108:1 off --bg */
+    --surface:   #1d232b;   /* cards, 1.096:1 off the band */
+    --surface-2: #232a33;
+    --surface-3: #2a323c;
 
-    --line:      rgba(255,255,255,.085);
-    --line-2:    rgba(255,255,255,.16);
-    --line-3:    rgba(255,255,255,.28);
+    /* Accent tinted, as on the light side. Composites to #1a242e on the
+       ground, 1.22:1, which is a visible hairline without being a stripe. */
+    --line:      rgba(120,175,230,.13);
+    --line-2:    rgba(120,175,230,.23);
+    --line-3:    rgba(120,175,230,.36);
 
-    --ink:       #eef1f4;   /* 16.83:1 on --bg AAA */
-    --ink-2:     #c2cad2;   /* 11.51:1 on --bg AAA */
-    --ink-3:     #a2abb4;   /*  8.20:1 on --bg AAA */
-    --ink-4:     #8a939c;   /*  6.12:1 on --bg AA  */
-    --ink-faint: #3f464e;   /* NON-TEXT ONLY */
-    --ink-mute:  #5a626a;   /* NON-TEXT ONLY, 3.08:1 clears the 3:1 minimum */
+    --ink:       #eef1f4;   /* bg 16.94:1 AAA, surface 13.95:1 AAA */
+    --ink-2:     #c2cad2;   /* bg 11.59:1 AAA, surface  9.55:1 AAA */
+    --ink-3:     #a2abb4;   /* bg  8.25:1 AAA, surface  6.79:1 AA  */
+    --ink-4:     #8a939c;   /* bg  6.16:1 AA,  surface  5.07:1 AA  */
+    --ink-faint: #454d56;   /* NON-TEXT ONLY */
+    --ink-mute:  #606872;   /* NON-TEXT ONLY, 3.40:1 clears the 3:1 minimum */
 
-    --accent:        #2f7cc0;  /* fill. --accent-on white on it is 4.55:1 AA */
-    --accent-hover:  #3f8dd2;
-    --accent-active: #256aa8;
-    --accent-hi:     #63a6e0;  /* 7.32:1 on --bg AAA. links */
+    /* The fill was #2f7cc0, and white on it measures 4.41:1, not the 4.55:1
+       the old comment claimed. That is the download button and the Get it
+       button failing AA on every dark screen. The fill deepens until the
+       white label clears AA with room, and hover still brightens rather
+       than darkening, because a button that dims when you point at it reads
+       as disabled. */
+    --accent:        #2a6faf;  /* white label 5.26:1 AA, 3.65:1 on --bg */
+    --accent-hover:  #3079bd;  /* white label 4.57:1 AA */
+    --accent-active: #24608f;  /* white label 6.68:1 AA */
+    --accent-hi:     #63a6e0;  /* 7.37:1 on --bg AAA. links */
     --accent-lo:     #2c5f88;  /* NON-TEXT */
     --accent-on:     #ffffff;
-    --accent-wash:   #14222e;
+    --accent-wash:   #142433;
     --accent-line:   rgba(99,166,224,.34);
     --accent-glow:   rgba(99,166,224,.30);
 
-    --sp-warm:      #f0a64c;   /* 9.33:1 on --bg AAA */
+    --sp-warm:      #f0a64c;   /* 9.39:1 on --bg AAA */
     --sp-warm-ink:  #f5bd77;
-    --sp-warm-wash: #2a1f10;
-    --sp-mag:       #e77ba8;   /* 7.08:1 on --bg AAA */
+    --sp-warm-wash: #2e2213;
+    --sp-mag:       #e77ba8;   /* 7.13:1 on --bg AAA */
     --sp-mag-ink:   #ee9dc0;
-    --sp-mag-wash:  #2a1520;
-    --sp-cool:      #4fbfd8;   /* 8.88:1 on --bg AAA */
+    --sp-mag-wash:  #2e1824;
+    --sp-cool:      #4fbfd8;   /* 8.94:1 on --bg AAA */
     --sp-cool-ink:  #7ad2e5;
-    --sp-cool-wash: #0f2429;
+    --sp-cool-wash: #12282d;
 
-    --ok:        #54c58a;   /* 8.84:1 on --bg AAA */
-    --ok-wash:   #10241a;
-    --warn:      #e0a344;   /* 8.62:1 on --bg AAA */
-    --warn-wash: #241a0c;
-    --err:       #f0736f;   /* 6.71:1 on --bg AA */
-    --err-wash:  #2a1414;
+    --ok:        #54c58a;   /* 8.90:1 on --bg AAA */
+    --ok-wash:   #13281e;
+    --warn:      #e0a344;   /* 8.68:1 on --bg AAA */
+    --warn-wash: #281e10;
+    --err:       #f0736f;   /* 6.76:1 on --bg AA */
+    --err-wash:  #2e1818;
 
-    /* Instrument plates lift in dark mode so they still read as plates
-       rather than dissolving into the page, and the deepest well drops
-       below the page ground so a demo screen still reads as a screen. */
+    /* Instrument plates lift off the page ground so they still read as
+       plates, and sit below a --surface card so a terminal inside a callout
+       reads as recessed. The deepest well drops below everything, because a
+       demo screen has to read as a screen. */
     --inst-bg:   #191f25;   /* --inst-ink 14.52:1 AAA, --inst-ink-4 4.55:1 AA */
     --inst-bg-2: #1f262d;
     --inst-bg-3: #0a0d10;
 
-    --shadow-1: 0 1px 2px rgba(0,0,0,.40), 0 2px 8px -2px rgba(0,0,0,.45);
-    --shadow-2: 0 1px 2px rgba(0,0,0,.45), 0 18px 36px -16px rgba(0,0,0,.70);
-    --shadow-3: 0 2px 6px rgba(0,0,0,.50), 0 40px 80px -32px rgba(0,0,0,.85);
+    --shadow-1: 0 1px 2px rgba(0,0,0,.40), 0 2px 16px rgba(0,0,0,.40);
+    --shadow-2: 0 1px 3px rgba(0,0,0,.45), 0 18px 38px -14px rgba(0,0,0,.70);
+    --shadow-3: 0 2px 6px rgba(0,0,0,.50), 0 40px 80px -30px rgba(0,0,0,.85);
 
     --ring: var(--accent-hi);
   }
@@ -1362,22 +1403,22 @@ a{ color:inherit; }
 
 /* The same set, applied when the reader has explicitly asked for dark. */
 :root[data-theme="dark"]{
-  --bg:#0d1013; --bg-2:#12161a; --surface:#171c21; --surface-2:#1d2329; --surface-3:#232a31;
-  --line:rgba(255,255,255,.085); --line-2:rgba(255,255,255,.16); --line-3:rgba(255,255,255,.28);
+  --bg:#0c0f13; --bg-2:#151b22; --surface:#1d232b; --surface-2:#232a33; --surface-3:#2a323c;
+  --line:rgba(120,175,230,.13); --line-2:rgba(120,175,230,.23); --line-3:rgba(120,175,230,.36);
   --ink:#eef1f4; --ink-2:#c2cad2; --ink-3:#a2abb4; --ink-4:#8a939c;
-  --ink-faint:#3f464e; --ink-mute:#5a626a;
-  --accent:#2f7cc0; --accent-hover:#3f8dd2; --accent-active:#256aa8; --accent-hi:#63a6e0;
-  --accent-lo:#2c5f88; --accent-on:#ffffff; --accent-wash:#14222e;
+  --ink-faint:#454d56; --ink-mute:#606872;
+  --accent:#2a6faf; --accent-hover:#3079bd; --accent-active:#24608f; --accent-hi:#63a6e0;
+  --accent-lo:#2c5f88; --accent-on:#ffffff; --accent-wash:#142433;
   --accent-line:rgba(99,166,224,.34); --accent-glow:rgba(99,166,224,.30);
-  --sp-warm:#f0a64c; --sp-warm-ink:#f5bd77; --sp-warm-wash:#2a1f10;
-  --sp-mag:#e77ba8;  --sp-mag-ink:#ee9dc0;  --sp-mag-wash:#2a1520;
-  --sp-cool:#4fbfd8; --sp-cool-ink:#7ad2e5; --sp-cool-wash:#0f2429;
-  --ok:#54c58a; --ok-wash:#10241a; --warn:#e0a344; --warn-wash:#241a0c;
-  --err:#f0736f; --err-wash:#2a1414;
+  --sp-warm:#f0a64c; --sp-warm-ink:#f5bd77; --sp-warm-wash:#2e2213;
+  --sp-mag:#e77ba8;  --sp-mag-ink:#ee9dc0;  --sp-mag-wash:#2e1824;
+  --sp-cool:#4fbfd8; --sp-cool-ink:#7ad2e5; --sp-cool-wash:#12282d;
+  --ok:#54c58a; --ok-wash:#13281e; --warn:#e0a344; --warn-wash:#281e10;
+  --err:#f0736f; --err-wash:#2e1818;
   --inst-bg:#191f25; --inst-bg-2:#1f262d; --inst-bg-3:#0a0d10;
-  --shadow-1:0 1px 2px rgba(0,0,0,.40), 0 2px 8px -2px rgba(0,0,0,.45);
-  --shadow-2:0 1px 2px rgba(0,0,0,.45), 0 18px 36px -16px rgba(0,0,0,.70);
-  --shadow-3:0 2px 6px rgba(0,0,0,.50), 0 40px 80px -32px rgba(0,0,0,.85);
+  --shadow-1:0 1px 2px rgba(0,0,0,.40), 0 2px 16px rgba(0,0,0,.40);
+  --shadow-2:0 1px 3px rgba(0,0,0,.45), 0 18px 38px -14px rgba(0,0,0,.70);
+  --shadow-3:0 2px 6px rgba(0,0,0,.50), 0 40px 80px -30px rgba(0,0,0,.85);
   --ring:var(--accent-hi);
 }
 
@@ -1792,23 +1833,26 @@ body{ background:var(--bg); color:var(--ink-2); }
 
 
 /* =========================================================================
-   5. TWO THINGS THIS FILE CANNOT REACH, FOR WHOEVER INTEGRATES IT.
-   web/index.html carries two document level colour declarations that still
-   say the page is dark:
+   5. THE DOCUMENT LEVEL COLOUR DECLARATIONS.
+   This section used to be a note asking whoever integrated the file to go
+   and change two meta tags in web/index.html, because a stylesheet cannot
+   reach them. Both are now correct, so the note is a record rather than a
+   request.
 
-     <meta name="theme-color"  content="#08090a">
-     <meta name="color-scheme" content="dark">
+   web/index.html carries one theme-color per scheme:
 
-   Change them to content="#faf9f7" and content="light dark". The CSS
-   color-scheme property on :root already overrides the second one, so
-   nothing renders wrong if they stay, but the meta tags decide the tint of
-   the mobile browser chrome around the page and they should agree with it.
-   A dark chrome bar above a paper page is the kind of seam a reader
-   notices without being able to say why.
+     <meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)">
+     <meta name="theme-color" content="#0c0f13" media="(prefers-color-scheme: dark)">
 
-   Nothing in this file touches web/js/scenes.js or web/js/site.js. Both
-   draw light strokes onto instrument surfaces, which is why those surfaces
-   are dark in both modes rather than flipping with the page.
+   Those are the two --bg values in this file and they have to be kept in
+   step with them. The tags decide the tint of the mobile browser chrome
+   around the page; chrome that disagrees with the ground is the kind of
+   seam a reader notices without being able to say why. A single
+   theme-color gets the dark reader wrong, which is what was shipping.
+
+   Nothing in this file touches web/js/site.js. It draws no colour: the
+   instrument surfaces are dark in both modes because they represent the
+   application's own chrome, not because a script needs them that way.
    ========================================================================= */
 
 /* The landing page names the licence and stops. What it used to do was
@@ -2487,3 +2531,237 @@ pre{ max-width:100%; }
 
 .entry-steps{ max-width:var(--measure); }
 .own .ticks{ max-width:var(--measure); }
+
+/* =========================================================================
+   MASTHEAD PASS.
+
+   Four things, all of them answers to the same observation: at a laptop
+   width the page was a 672px column of text sitting inside a 1123px
+   container, with grids underneath that used the whole 1123px. Every
+   section therefore had two right edges, and the top right quadrant of six
+   of the eight sections was empty. Nothing on the page was wrong in
+   isolation; the rhythm was.
+
+   1. The section header becomes a masthead: heading left, lede right, one
+      keyed rule across the top. It fills the container, and both blocks
+      keep a reading measure because they are now columns rather than one
+      block with a cap on it.
+   2. The three entry steps go three across for the same reason.
+   3. The wordmark gets the size a wordmark should have.
+   4. The footer stops using the left half of the page.
+   ========================================================================= */
+
+/* ---- 1. the section masthead -------------------------------------------
+   The eyebrow spans both columns and keeps its keyed rule, so the top of
+   every section still opens with a coloured mark. Below it the heading
+   takes the wider column and the lede the narrower one. The heading spans
+   the remaining rows so that a section with two ledes stacks them tightly
+   in the right column instead of leaving a hole the height of the heading
+   between them. Row gap is zero because every child already carries its
+   own bottom margin. */
+.sec-head{
+  max-width:none;
+  display:grid;
+  grid-template-columns:minmax(0,1fr);
+  column-gap:var(--gap-split);
+  row-gap:0;
+  align-items:start;
+}
+.sec-head > .eyebrow{ grid-column:1 / -1; grid-row:1; }
+.sec-head > .sec-lede{ max-width:var(--measure); }
+.sec-head > .sec-lede:last-child{ margin-bottom:0; }
+
+@media (min-width:1000px){
+  .sec-head{ grid-template-columns:minmax(0,1.24fr) minmax(0,1fr); }
+  .sec-head > .h2{ grid-column:1; grid-row:2 / span 40; margin-bottom:0; }
+  .sec-head > .sec-lede{ grid-column:2; }
+  /* The lede's first line drops to sit inside the heading's cap height
+     rather than level with its ascender, which is where the eye expects a
+     standfirst to start. */
+  .sec-head > .sec-lede:first-of-type{ margin-top:.55rem; }
+}
+
+/* ---- 2. the entry steps, three across ----------------------------------
+   Three numbered steps read as a sequence, so they belong side by side.
+   The counter leaves its absolute position and sits above the label, which
+   is what lets the step become a column rather than a row. */
+@media (min-width:1000px){
+  .entry-steps{
+    max-width:none;
+    display:grid;
+    grid-template-columns:repeat(3, minmax(0,1fr));
+    column-gap:var(--gap-split);
+  }
+  .entry-steps li{
+    padding:16px 0 0;
+    border-top:1px solid var(--line);
+  }
+  .entry-steps li:last-child{ border-bottom:0; }
+  .entry-steps li::before{
+    position:static;
+    display:block;
+    margin:0 0 12px;
+  }
+}
+
+/* ---- 3. the wordmark ---------------------------------------------------
+   17px next to a 50px section heading is not a wordmark, it is a label.
+   Both the mark and the word scale with the viewport and stop growing at a
+   size that still leaves the bar quiet. */
+.nav{ padding-block:clamp(13px,1.15vw,18px); }
+.nav-brand{
+  gap:11px;
+  font-size:clamp(19px, 1.22vw, 23px);
+  font-weight:700;
+  letter-spacing:-.032em;
+}
+.brand-mark{
+  width:clamp(26px, 1.9vw, 32px);
+  height:clamp(26px, 1.9vw, 32px);
+}
+.footer-brand .brand-mark{ width:36px; height:36px; }
+.footer-brand b{
+  font-size:clamp(17px, 1.05vw, 20px);
+  font-weight:700;
+  letter-spacing:-.03em;
+  margin-bottom:1px;
+}
+/* The bar is taller now, so an anchored jump has to clear more of it. */
+html{ scroll-padding-top:clamp(84px, 6.5vw, 108px); }
+
+/* ---- 4. the footer -----------------------------------------------------
+   Brand on the leading edge, links on the trailing one, the fine print
+   under a rule that runs the whole width. */
+@media (min-width:820px){
+  .footer-inner{
+    grid-template-columns:minmax(0,auto) minmax(0,1fr);
+    column-gap:var(--gap-split);
+    row-gap:30px;
+    align-items:center;
+  }
+  .footer-links{ justify-self:end; }
+  .footer-fine{ grid-column:1 / -1; }
+}
+@media (min-width:1100px){
+  /* The rule above the fine print should run the width of the page, but the
+     print under it should not: 12px across 1507px is about 150 characters a
+     line. Two columns keeps the rule full width and the measure short.
+
+     orphans and widows both default to 2, and the notice is four lines, so
+     without relaxing them the browser cannot put two lines in each column
+     and quietly leaves the second empty. The result looked right by
+     accident. This makes it right on purpose. */
+  .footer-fine{
+    max-width:none;
+    columns:2;
+    column-gap:var(--gap-split);
+    orphans:1;
+    widows:1;
+  }
+}
+
+/* ---- 5. band boundaries ------------------------------------------------
+   The alternation is what makes one area read as separate from the next, so
+   it has to actually alternate. It did not: .section-alt was hand applied,
+   and the page ran hero, start, [alt], looks, [alt], your work, status,
+   [alt], contribute. Two pairs of neighbours therefore shared a ground and
+   had nothing between them but a hairline at a tenth of black, which is the
+   seam a reader notices as "these are not separate sections".
+
+   Alternation is a function of position, not a class somebody has to
+   remember to add, so it is computed. Add a section anywhere in the page
+   and the bands stay correct. The class stays in the markup and stops
+   painting, because the markup belongs to whoever wrote it.
+
+   Each boundary also gets a stated accent edge rather than a hairline, and
+   the keyed wash that sits behind every section header drops from nine per
+   cent to seven, so the band change leads and the colour follows it. */
+.section-alt{ background:none; border-block:0; }
+.section-alt::after,
+.section:not(.section-alt)::after{ content:none; }
+
+main > section{ position:relative; isolation:isolate; }
+main > section > .wrap{ position:relative; z-index:1; }
+main > section:nth-of-type(even){
+  background:var(--bg-2);
+  border-block:1px solid var(--line-2);
+}
+main > section::after{
+  content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+  background:radial-gradient(62% 44% at 84% 0%,
+             color-mix(in srgb, var(--key) 7%, transparent), transparent 72%);
+}
+/* The hero leads with the warm gradient on its emphasised line, so its wash
+   is warm too rather than the brand blue every other unkeyed section takes. */
+.hero{ --key:var(--sp-warm); --key-ink:var(--sp-warm-ink); --key-wash:var(--sp-warm-wash); }
+
+.footer{ border-top:1px solid var(--line-2); }
+
+/* ---- 6. the grain stays off the photographs ----------------------------
+   The grain is a fixed multiply layer at z-index 3. Over the page chrome
+   that is texture; over a graded frame it is the page altering the pixels
+   in the one section whose whole argument is that the numbers are read
+   straight out of the preset files. The figures that carry a photograph
+   sit above it. */
+.hero-demo, .lk{ position:relative; z-index:4; }
+
+/* ---- 7. preset cards ---------------------------------------------------
+   Tried bottom-aligning the value block so the rows read straight across a
+   row of cards. It trades one hole for a worse one: the gap moves from the
+   bottom of the card, where it is just air, to directly under the preset
+   name, where it looks like a missing row. The values stay under the name
+   and a short card stays short. */
+
+/* ---- 8. the install path ------------------------------------------------
+   The one element on the page that never got tokenised. It painted
+   background:#090b0d, a literal, and took its colour from `.cli-where p`,
+   which is --ink-3. In dark mode that is light ink on a dark plate and
+   reads fine, which is presumably why it survived. In light mode --ink-3 is
+   #4e555e and the path measured 2.61:1 against that near black plate: a
+   filesystem path the reader is meant to copy, rendered dark grey on black.
+
+   It is a plate of application chrome like the code cards beside it, so it
+   takes the instrument tokens they take, and it wraps instead of scrolling.
+   A path that reads as truncated is a path nobody trusts, and a horizontal
+   scroller nested inside a vertical page is not something a thumb can find. */
+.cli-where .cli-path{
+  background:var(--inst-bg);
+  border-color:var(--inst-line-2);
+  color:var(--inst-ink-2);
+  white-space:normal;
+  overflow-x:visible;
+  overflow-wrap:anywhere;
+  line-height:1.7;
+}
+
+/* ---- 9. the hero clears the bar ----------------------------------------
+   The navigation is position:fixed and nothing below it reserved room for
+   it. At 1440 the hero's eyebrow cleared the bar by about ten pixels, and
+   on a phone it did not clear it at all: the first two lines of the eyebrow
+   sat behind the glass, so the page opened on "NO SUBSCRIPTION" with the
+   rest of the line hidden. The earlier section-rhythm pass is what did it,
+   by overriding a 72px mobile top padding with a 48px one, and the larger
+   wordmark would have made it worse.
+
+   The floor is now the tallest the bar can get, which is set by the Get it
+   button rather than by the wordmark: 14px of label at 1.65 line-height
+   plus 18px of button padding plus 18px of bar padding is about 78px at the
+   widest, so the hero opens at 104px and grows from there. */
+.hero{ padding-block:clamp(104px, 8.5vw, 140px) clamp(40px, 4vw, 64px); }
+@media (max-width:680px){
+  .hero{ padding-block:104px 44px; }
+}
+
+/* ---- 10. the history card keeps up with its argument --------------------
+   .wrap-split centres its two columns. In "Your work" the text column runs
+   about 1700px and the card about 740px, so the card floated in the middle
+   of the right column with roughly 480px of nothing above it and the same
+   below, and it was nowhere near the sentence that says "open the History
+   panel". Top aligning alone just moves the whole hole to the bottom, so
+   the card sticks instead: it arrives beside the sentence that introduces
+   it and stays in view for the rest of the section. Sticky is layout, not
+   animation, so nothing here needs a reduced-motion escape. */
+@media (min-width:901px){
+  .wrap-split{ align-items:start; }
+  .split-demo{ position:sticky; top:clamp(102px, 7.5vw, 130px); }
+}
