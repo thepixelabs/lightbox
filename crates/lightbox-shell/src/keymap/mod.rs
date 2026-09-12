@@ -105,6 +105,11 @@ pub const GEOM_CROP_TOGGLE: ActionId = ActionId("geom.crop_toggle");
 /// conventional photo-editor binding, Lightroom's own "J" clipping-display
 /// shortcut).
 pub const HIST_CLIP_OVERLAY_TOGGLE: ActionId = ActionId("hist.clip_overlay_toggle");
+/// Cycle the canvas before/after arrangement: after only, side by side,
+/// split, back to after only (Lightroom's own "Y" before/after shortcut).
+/// The momentary before-only hold is `\`, read by the canvas itself, see
+/// `canvas/before_after.rs::hold_key_down` for why it cannot be a chord.
+pub const VIEW_BEFORE_AFTER_CYCLE: ActionId = ActionId("view.before_after_cycle");
 
 /// The M1 default action set, registered (spec §6.8). E10/E11/E12 register
 /// theirs on top of this at their own mount points.
@@ -264,6 +269,14 @@ pub fn default_registry() -> KeymapRegistry {
             category: "View",
             contexts: &[CTX_LOUPE],
             default: Some(Chord::plain(Key::J)),
+            repeatable: false,
+        },
+        ActionDef {
+            id: VIEW_BEFORE_AFTER_CYCLE,
+            label: "Before/after view",
+            category: "View",
+            contexts: &[CTX_LOUPE],
+            default: Some(Chord::plain(Key::Y)),
             repeatable: false,
         },
     ];

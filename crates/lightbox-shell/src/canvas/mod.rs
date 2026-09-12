@@ -19,7 +19,14 @@
 //!   `canvas/gizmo.md` first.
 //! * [`crop_gizmo`], E11 geometry TOOL UI: the interactive crop rectangle
 //!   (8 handles + move + rule-of-thirds + constrain-crop), built on `gizmo`.
+//! * [`before_after`], the before-and-after view: what "before" means,
+//!   the GPU snapshot that holds it, and the split divider. The mode is a
+//!   canvas state ([`states::BeforeAfterMode`]) like every other, so the
+//!   canvas reaches it through `states.rs` rather than around it. The
+//!   interaction model is written up in `canvas/before_after.md`, the
+//!   companion to `canvas/gizmo.md`.
 
+pub mod before_after;
 pub mod crop_gizmo;
 pub mod gizmo;
 pub mod states;

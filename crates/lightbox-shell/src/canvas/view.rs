@@ -50,8 +50,9 @@ use lightbox_render::ng::{
 };
 use lightbox_types::{ImageId, Orientation, ProcessVersion, SourceTier, PV_M0};
 
+use crate::canvas::before_after::{self, BeforeAfterView, BeforeKey};
 use crate::canvas::gizmo::{GizmoLayer, GizmoPaintCtx};
-use crate::canvas::states::{self, CanvasPlacard};
+use crate::canvas::states::{self, BeforeAfterMode, CanvasPlacard};
 use crate::canvas::xform::{self, ViewXform};
 use crate::theme::{fonts, tokens};
 use crate::ShellOutcome;
@@ -658,10 +659,14 @@ impl TierPreview {
 // ─── The engine texture (unchanged zero-copy mechanism from `loupe.rs`) ────
 
 /// The engine texture currently composited (registered with egui).
+///
+/// It deliberately does not carry the generation it came from: the
+/// "already consumed this one" test belongs to `EditorCanvas::last_generation`,
+/// which counts every frame taken off the channel, including the
+/// before-capture frames that never become `Displayed` at all.
 struct Displayed {
     texture_id: egui::TextureId,
     size: [u32; 2],
-    generation: u64,
 }
 
 // ─── `EditorCanvas` ─────────────────────────────────────────────────────────
@@ -715,6 +720,18 @@ pub struct EditorCanvas {
     /// D13: whether the clip overlay is currently composited over the
     /// displayed frame (toggled by the `J` keymap action).
     clip_overlay_enabled: bool,
+    /// The before/after view: mode, split divider, and the captured
+    /// before image (`canvas/before_after.rs`).
+    before_after: BeforeAfterView,
+    /// The newest canvas generation this widget has consumed, whether it
+    /// went to the display or to the before snapshot.
+    ///
+    /// Distinct from `displayed.generation` on purpose: a before-capture
+    /// frame is consumed without ever becoming `displayed`, so keying the
+    /// "have I already taken this one" test off `displayed` would hand the
+    /// same frame back on the next poll and composite the BEFORE image as
+    /// the after one.
+    last_generation: u64,
 }
 
 impl EditorCanvas {
@@ -754,9 +771,31 @@ impl EditorCanvas {
             slider_submit_lag_frames: Vec::new(),
             hist_pass: Some(HistogramPass::new(Arc::clone(&device), Arc::clone(&queue))),
             latest_histogram: None,
-            clip_overlay_pass: Some(ClipOverlayPass::new(device, queue)),
+            clip_overlay_pass: Some(ClipOverlayPass::new(
+                Arc::clone(&device),
+                Arc::clone(&queue),
+            )),
             clip_overlay_enabled: false,
+            // Same shared device again: the before snapshot's texel copy
+            // records on the device the canvas composites on, so the
+            // captured texture is directly registerable with egui.
+            before_after: BeforeAfterView::new(device, queue),
+            last_generation: 0,
         }
+    }
+
+    /// `view.before_after_cycle` (keymap): after only, side by side,
+    /// split, back to after only. Before-only is the momentary `\` hold
+    /// and is deliberately not on this cycle (see [`BeforeAfterMode`]).
+    pub fn cycle_before_after(&mut self) {
+        self.before_after.cycle();
+    }
+
+    /// Host bytes the captured before image is holding, `0` when none is
+    /// captured. The whole memory cost of this feature; see
+    /// `canvas/before_after.rs`'s module docs for the analysis.
+    pub fn before_snapshot_bytes(&self) -> usize {
+        self.before_after.snapshot.bytes()
     }
 
     /// D12: the most recently collected histogram reduction (the develop
@@ -791,11 +830,15 @@ impl EditorCanvas {
     /// Releases egui/GPU resources when leaving the canvas (no active
     /// `Ready` entry any more).
     pub fn exit(&mut self) {
-        if let Some(old) = self.displayed.take() {
-            self.render_state
-                .renderer
-                .write()
-                .free_texture(&old.texture_id);
+        {
+            let mut renderer = self.render_state.renderer.write();
+            if let Some(old) = self.displayed.take() {
+                renderer.free_texture(&old.texture_id);
+            }
+            // The captured before image belongs to the image that just
+            // left; releasing it here is what keeps this feature's memory
+            // cost bounded at one snapshot, never one per visited image.
+            self.before_after.snapshot.release(&mut renderer);
         }
         self.last_key = None;
         self.tier.clear();
@@ -805,9 +848,10 @@ impl EditorCanvas {
     }
 
     /// True while a render or a tier-preview decode is in flight (keep
-    /// repainting).
+    /// repainting). A before capture counts: its frame arrives on the same
+    /// watch channel and needs a frame to be polled on.
     pub fn busy(&self) -> bool {
-        self.awaiting_frame || self.tier.is_pending()
+        self.awaiting_frame || self.tier.is_pending() || self.before_after.snapshot.is_capturing()
     }
 
     /// The current zoom mode (top-bar view control).
@@ -952,23 +996,69 @@ impl EditorCanvas {
         if self.rev_seen.map(|(r, _)| r) != Some(rev) {
             self.rev_seen = Some((rev, self.frame_no));
         }
-        match submit_if_changed(scheduler, &mut self.last_key, entry.image, view_px, recipe) {
-            Some(SubmitScope::RecipeOnly) => {
-                self.awaiting_frame = true;
-                // H2: a slider/edit re-render. Lag from first observation
-                // of this rev to the submit, in frames (0 = same frame
-                // the §7 "input → submit ≤ 1 frame" budget's shell half).
-                let lag = self
-                    .rev_seen
-                    .map(|(_, seen_at)| (self.frame_no - seen_at) as u32)
-                    .unwrap_or(0);
-                self.slider_submit_lag_frames.push(lag);
-                if self.slider_submit_lag_frames.len() > 256 {
-                    self.slider_submit_lag_frames.remove(0);
+
+        // --- Before and after: what "before" is for THIS frame, and
+        // whether a capture of it has to be taken (see
+        // `before_after.rs`'s module docs for both). ---
+        let held = before_after::hold_key_down(ui.ctx());
+        self.before_after.set_hold(held);
+        let before_key = BeforeKey {
+            image: entry.image,
+            pv: recipe.pv,
+            geometry: recipe.recipe.geometry.clone(),
+            out: view_px,
+            clip_overlay: self.clip_overlay_enabled,
+        };
+        // A capture that has ended (either way) left the BEFORE recipe
+        // installed in the scheduler, and it has to come out before
+        // anything else renders. This is a bare `set_recipe` rather than a
+        // trip through `submit_if_changed` on purpose: that function's
+        // view-changed path calls `set_view`, and `RenderScheduler::set_view`
+        // re-renders whichever recipe the scheduler currently holds, which
+        // would dispatch one more render of the unedited image and flash it
+        // onto the after side. Recording the key it restores keeps the
+        // `submit_if_changed` call below a no-op when nothing else moved,
+        // and a correct re-establish when the viewport did.
+        if let Some(restored_out) = self.before_after.snapshot.take_restore_for(entry.image) {
+            scheduler.set_recipe(entry.image, recipe.recipe.clone(), recipe.pv);
+            self.awaiting_frame = true;
+            self.last_key = Some(SubmitKey {
+                image: entry.image,
+                out: restored_out,
+                recipe_rev: rev,
+            });
+        }
+
+        let capturing = self.drive_before_capture(ui, scheduler, &before_key, &recipe.recipe, held);
+
+        // A capture owns the scheduler's recipe slot for this image while
+        // it is in flight (there is one recipe per image,
+        // `RenderScheduler::set_recipe`), so the ordinary submit is held
+        // back rather than racing it. That is what makes "the first frame
+        // newer than the recorded generation is the capture" true: this
+        // canvas is the only submitter, so while a capture is out there is
+        // no other frame that could arrive first. The after recipe goes
+        // back in through the restore block above, on the frame after the
+        // capture resolves.
+        if !capturing {
+            match submit_if_changed(scheduler, &mut self.last_key, entry.image, view_px, recipe) {
+                Some(SubmitScope::RecipeOnly) => {
+                    self.awaiting_frame = true;
+                    // H2: a slider/edit re-render. Lag from first observation
+                    // of this rev to the submit, in frames (0 = same frame
+                    // the §7 "input → submit ≤ 1 frame" budget's shell half).
+                    let lag = self
+                        .rev_seen
+                        .map(|(_, seen_at)| (self.frame_no - seen_at) as u32)
+                        .unwrap_or(0);
+                    self.slider_submit_lag_frames.push(lag);
+                    if self.slider_submit_lag_frames.len() > 256 {
+                        self.slider_submit_lag_frames.remove(0);
+                    }
                 }
+                Some(SubmitScope::View) => self.awaiting_frame = true,
+                None => {}
             }
-            Some(SubmitScope::View) => self.awaiting_frame = true,
-            None => {}
         }
 
         // --- C4: progressive tier, then engine swap. ---
@@ -977,6 +1067,26 @@ impl EditorCanvas {
             self.progressive.tier_ready();
         }
         self.poll_engine(scheduler, entry.image);
+        self.settle_before_capture(scheduler, entry.image);
+
+        // --- Which arrangement is actually painted this frame. ---
+        // Resolved before the zoom/pan math because side-by-side reframes
+        // the image into half the width, which changes what Fit means.
+        let after_tex = if self.progressive.is_engine_frame() {
+            self.displayed.as_ref().map(|d| (d.texture_id, d.size))
+        } else {
+            self.tier.texture()
+        };
+        let before_tex = self.before_after.snapshot.texture_for(&before_key);
+        let mode = self
+            .before_after
+            .effective(held, before_tex.is_some() && after_tex.is_some());
+        let (before_pane, after_pane) = match mode {
+            BeforeAfterMode::SideBySide => {
+                before_after::side_by_side_panes(view_rect, before_after::SIDE_BY_SIDE_GUTTER_PT)
+            }
+            _ => (view_rect, view_rect),
+        };
 
         // --- C2: zoom/pan. `Orientation::O1`, see the `xform.rs` module
         // docs on why the canvas doesn't orient yet (E11 is unbuilt). ---
@@ -984,9 +1094,13 @@ impl EditorCanvas {
         let (basis_w, basis_h) = cropped_extent(entry.width, entry.height, crop);
         let image_px = egui::vec2(basis_w as f32, basis_h as f32);
         let disp_100 = xform::oriented_size(Orientation::O1, image_px) / ppp;
+        // Fit against the pane the image is framed in, not the widget: in
+        // side-by-side each pane must fit the WHOLE image on its own, and
+        // both panes are the same size, so one percent serves both and the
+        // two sides stay locked to the same scale.
         let fit_percent = if disp_100.x > 0.0 && disp_100.y > 0.0 {
-            (view_rect.width() / disp_100.x)
-                .min(view_rect.height() / disp_100.y)
+            (after_pane.width() / disp_100.x)
+                .min(after_pane.height() / disp_100.y)
                 .min(1.0)
         } else {
             1.0
@@ -1007,8 +1121,8 @@ impl EditorCanvas {
                     self.pan,
                     old_percent / ppp,
                     new_percent / ppp,
-                    view_rect.center(),
-                    view_rect.center(),
+                    after_pane.center(),
+                    after_pane.center(),
                 );
                 self.zoom = ZoomMode::Percent(new_percent);
             }
@@ -1033,7 +1147,7 @@ impl EditorCanvas {
                             old_scale,
                             new_scale,
                             cursor,
-                            view_rect.center(),
+                            after_pane.center(),
                         );
                         self.zoom = ZoomMode::Percent(new_percent);
                     }
@@ -1051,20 +1165,40 @@ impl EditorCanvas {
         let hit_xform = ViewXform::new(
             image_px,
             Orientation::O1,
-            view_rect,
+            after_pane,
             zoom_percent,
             ppp,
             self.pan,
         );
         let gizmo_claimed = gizmos.route(ui, &response, &hit_xform);
 
-        if response.double_clicked() && !gizmo_claimed {
+        // The split divider routes after the gizmo stack and before
+        // pan/zoom: a gizmo is an edit affordance and outranks a view
+        // affordance, and both outrank panning (`gizmo.md` convention 3).
+        let divider_claimed = self.before_after.route_divider(
+            ui,
+            &response,
+            &hit_xform,
+            !gizmo_claimed && mode == BeforeAfterMode::Split,
+        );
+        // Keyboard parity for the divider, live while the split is shown.
+        if mode == BeforeAfterMode::Split {
+            let step = before_after::divider_key_delta(ui.ctx());
+            if step != 0.0 {
+                self.before_after.nudge_divider(step);
+                // Held-key movement is time-based, so it needs frames.
+                ui.ctx().request_repaint();
+            }
+        }
+        let claimed = gizmo_claimed || divider_claimed;
+
+        if response.double_clicked() && !claimed {
             self.toggle_zoom();
             // Same-frame application, exactly as before Phase F moved the
             // double-click check below the gizmo routing.
             zoom_percent = self.zoom.resolve(fit_percent);
         }
-        if response.dragged() && !gizmo_claimed {
+        if response.dragged() && !claimed {
             self.pan += response.drag_delta();
         }
         // Pan-independent footprint (via a provisional xform, pan doesn't
@@ -1074,7 +1208,7 @@ impl EditorCanvas {
         let provisional = ViewXform::new(
             image_px,
             Orientation::O1,
-            view_rect,
+            after_pane,
             zoom_percent,
             ppp,
             self.pan,
@@ -1082,12 +1216,23 @@ impl EditorCanvas {
         self.pan = clamp_pan(
             self.pan,
             provisional.display_size_screen(),
-            view_rect.size(),
+            after_pane.size(),
         );
         let xform = ViewXform::new(
             image_px,
             Orientation::O1,
-            view_rect,
+            after_pane,
+            zoom_percent,
+            ppp,
+            self.pan,
+        );
+        // The before pane's transform differs from the after pane's only
+        // in which rect it centres on, so the same zoom and the same pan
+        // drive both: the two sides can never drift out of register.
+        let before_xform = ViewXform::new(
+            image_px,
+            Orientation::O1,
+            before_pane,
             zoom_percent,
             ppp,
             self.pan,
@@ -1095,25 +1240,29 @@ impl EditorCanvas {
 
         // --- Composite whichever source is authoritative this frame. ---
         let showing_engine = self.progressive.is_engine_frame();
-        let tex = if showing_engine {
-            self.displayed.as_ref().map(|d| (d.texture_id, d.size))
-        } else {
-            self.tier.texture()
-        };
+        let tex = after_tex;
         match tex {
             Some((texture_id, size)) => {
-                // The corners, mapped through `ViewXform`, the same
-                // authority the gizmo layer hit-tests and paints against
+                // The one authority for WHERE the image lands is the same
+                // `ViewXform` the gizmo layer hit-tests and paints against
                 // (spec §6.4: "one authority" for compositing AND gizmos).
-                let rect = egui::Rect::from_two_pos(
-                    xform.image_to_screen(egui::Vec2::ZERO),
-                    xform.image_to_screen(image_px),
-                );
-                ui.painter().with_clip_rect(view_rect).image(
-                    texture_id,
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
+                // The arrangement only decides which texture is clipped
+                // into which part of it.
+                before_after::paint_arrangement(
+                    ui,
+                    &before_after::Arrangement {
+                        mode,
+                        view_rect,
+                        before_pane,
+                        after_pane,
+                        image_px,
+                        before_xform: &before_xform,
+                        after_xform: &xform,
+                        before: before_tex.map(|(id, _)| id),
+                        after: texture_id,
+                        divider: self.before_after.divider(),
+                        dragging: self.before_after.dragging(),
+                    },
                 );
                 let mut anchor = 0;
                 if let Some(err) = self.progressive.error_chip() {
@@ -1155,6 +1304,17 @@ impl EditorCanvas {
             }
         }
 
+        // A before mode that could not be honoured says so, rather than
+        // quietly showing the after image twice. Anchor 2 sits above the
+        // render-error (0) and device-degraded (1) chips.
+        if self.before_after.wants_before(held) && mode == BeforeAfterMode::AfterOnly {
+            let notice = match self.before_after.snapshot.failure() {
+                Some(reason) => (format!("before unavailable: {reason}"), true),
+                None => ("preparing before…".to_owned(), false),
+            };
+            states::chip_ui(ui, view_rect, 2, &notice.0, notice.1);
+        }
+
         // --- F1: gizmo paint pass, above the composited image, below the
         // info overlay/chips. Zero-copy: `GizmoPaintCtx` hands gizmos the
         // ALREADY-REGISTERED texture id (engine frame or tier preview) so
@@ -1166,7 +1326,102 @@ impl EditorCanvas {
             &GizmoPaintCtx { texture: tex },
         );
 
-        self.info_overlay(ui, view_rect, &entry, idx, total);
+        self.info_overlay(ui, view_rect, &entry, idx, total, mode);
+    }
+
+    /// The published canvas generation right now, without consuming it.
+    ///
+    /// `watch::Receiver::borrow` (unlike `borrow_and_update`) does not
+    /// mark the value seen, so this reads the publisher's true state
+    /// rather than this widget's consumption state. That distinction is
+    /// what makes the capture handshake safe: a frame published but not
+    /// yet composited is still an AFTER frame and must not be mistaken for
+    /// the before render's result.
+    fn published_generation(&self) -> u64 {
+        self.canvas_rx
+            .as_ref()
+            .map(|rx| rx.borrow().generation)
+            .unwrap_or(0)
+    }
+
+    /// Starts a before capture when one is wanted and the scheduler can
+    /// take it. Returns whether a capture is in flight (in which case the
+    /// caller must not submit the after recipe this frame).
+    ///
+    /// **Why the scheduler must be idle first.** There is exactly one
+    /// recipe slot per image (`RenderScheduler::set_recipe`) and one
+    /// in-flight plus one pending job (`Coalescer`), so a before submit
+    /// issued while something is in flight would land in the pending slot
+    /// and the *next* published frame would be the other job's, not the
+    /// before render's. `wait_idle(ZERO)` is a non-blocking read of that
+    /// state (it checks once and returns on the already-passed deadline),
+    /// and this canvas is the only submitter to the scheduler in the whole
+    /// shell, so idle here means the before job dispatches immediately and
+    /// the next generation is unambiguously its own.
+    fn drive_before_capture(
+        &mut self,
+        ui: &egui::Ui,
+        scheduler: &RenderScheduler,
+        key: &BeforeKey,
+        after: &Recipe,
+        held: bool,
+    ) -> bool {
+        if self.before_after.snapshot.is_capturing() {
+            return true;
+        }
+        // Wanted now (a before mode is showing, or `\` is down), or wanted
+        // soon (the pre-warm, once this session has proved it uses the
+        // feature, so the next `\` is a texture swap and not a render).
+        let wanted = self.before_after.wants_before(held) || self.before_after.wants_prewarm();
+        if !wanted || !self.before_after.snapshot.needs_capture(key) {
+            return false;
+        }
+        if self.awaiting_frame || !scheduler.wait_idle(std::time::Duration::ZERO) {
+            // Not now: keep frames coming so this is retried the moment
+            // the scheduler settles, instead of waiting for the next
+            // unrelated input event.
+            ui.ctx().request_repaint();
+            return false;
+        }
+
+        let after_generation = self.published_generation();
+        scheduler.set_recipe(key.image, before_after::before_recipe(after), key.pv);
+        self.before_after
+            .snapshot
+            .begin(key.clone(), after_generation);
+        true
+    }
+
+    /// Ends a capture that is never going to produce a frame.
+    ///
+    /// The precise signal is "the scheduler is idle again and no newer
+    /// generation was published": the before render reached a terminal
+    /// state without publishing, which means it failed or was cancelled.
+    /// Because the publish happens before the scheduler reports the job
+    /// complete, a frame can land between this frame's `poll_engine` and
+    /// this check, so the channel is polled once more before giving up.
+    fn settle_before_capture(&mut self, scheduler: &RenderScheduler, image: ImageId) {
+        if !self.before_after.snapshot.is_capturing() {
+            return;
+        }
+        if self.before_after.snapshot.abort_if_stalled() {
+            // Same restore debt as any other abort; keep frames coming.
+            self.awaiting_frame = true;
+            return;
+        }
+        if !scheduler.wait_idle(std::time::Duration::ZERO) {
+            return;
+        }
+        self.poll_engine(scheduler, image);
+        if self.before_after.snapshot.is_capturing() {
+            let reason = scheduler
+                .last_error(image)
+                .unwrap_or_else(|| "the render produced no frame".to_owned());
+            self.before_after.snapshot.abort(reason);
+            // `abort` owes the same recipe restore a successful capture
+            // does; keep frames coming until it happens.
+            self.awaiting_frame = true;
+        }
     }
 
     /// Samples the canvas watch channel for a newer generation; swaps the
@@ -1191,11 +1446,11 @@ impl EditorCanvas {
             return;
         };
         let frame = rx.borrow_and_update();
-        let already_shown = self
-            .displayed
-            .as_ref()
-            .is_some_and(|d| d.generation == frame.generation);
-        if already_shown || frame.generation == 0 {
+        // Keyed on the newest generation CONSUMED, not the newest
+        // displayed: a before-capture frame is consumed without becoming
+        // `displayed`, and keying off `displayed` would hand it back on
+        // the next poll to be composited as the after image.
+        if frame.generation <= self.last_generation || frame.generation == 0 {
             return;
         }
         let (texture, quality, extent, generation) = (
@@ -1205,6 +1460,33 @@ impl EditorCanvas {
             frame.generation,
         );
         drop(frame);
+        self.last_generation = generation;
+
+        // Before and after: this frame is the before render's result, not
+        // the canvas's. It goes into the snapshot and nowhere else, so the
+        // after frame already on screen stays on screen (no flash to the
+        // unedited image mid-capture), the histogram keeps describing the
+        // edit, and the navigation probe does not count a render the user
+        // never asked for.
+        if self.before_after.snapshot.is_capture_frame(generation) {
+            let overlay_view = if self.clip_overlay_enabled {
+                self.clip_overlay_pass
+                    .as_mut()
+                    .and_then(|pass| pass.run(&texture, extent))
+            } else {
+                None
+            };
+            let captured = overlay_view.as_ref().unwrap_or(&texture);
+            let mut renderer = self.render_state.renderer.write();
+            self.before_after
+                .snapshot
+                .accept(captured, [extent.w, extent.h], &mut renderer);
+            drop(renderer);
+            // The after recipe still has to be put back (the restore
+            // block in `ready_ui`); keep the repaint pump alive for it.
+            self.awaiting_frame = true;
+            return;
+        }
 
         // D12: kick a non-blocking reduction of the FRESH frame, skipped
         // (never blocked) on the rare frame where the ring is still
@@ -1224,7 +1506,7 @@ impl EditorCanvas {
             None
         };
         let shown = overlay_view.as_ref().unwrap_or(&texture);
-        self.swap_displayed(shown, [extent.w, extent.h], generation);
+        self.swap_displayed(shown, [extent.w, extent.h]);
         self.last_quality = Some(quality);
         self.progressive.engine_ready();
         self.awaiting_frame = false;
@@ -1240,18 +1522,14 @@ impl EditorCanvas {
     /// Registers a finished engine texture with egui, releasing the
     /// previous one, flicker-free swap on the SAME shared device (seam
     /// 2). Never copies pixels.
-    fn swap_displayed(&mut self, view: &wgpu::TextureView, size: [u32; 2], generation: u64) {
+    fn swap_displayed(&mut self, view: &wgpu::TextureView, size: [u32; 2]) {
         let mut renderer = self.render_state.renderer.write();
         let texture_id = renderer.register_native_texture(
             &self.render_state.device,
             view,
             wgpu::FilterMode::Linear,
         );
-        if let Some(old) = self.displayed.replace(Displayed {
-            texture_id,
-            size,
-            generation,
-        }) {
+        if let Some(old) = self.displayed.replace(Displayed { texture_id, size }) {
             renderer.free_texture(&old.texture_id);
         }
         self.outcome
@@ -1271,6 +1549,7 @@ impl EditorCanvas {
         entry: &ActiveEntry<'_>,
         idx: usize,
         total: usize,
+        before_after: BeforeAfterMode,
     ) {
         let quality = if self.progressive.is_engine_frame() {
             match self.last_quality {
@@ -1322,14 +1601,26 @@ impl EditorCanvas {
             RawPixels::NotRaw => "",
         };
 
+        // The before/after arrangement, said in the readout as well as
+        // painted on the canvas. Two independent statements of the same
+        // fact, because "which one am I looking at" is the question this
+        // feature must never leave open. Silent in the ordinary
+        // after-only state, so the readout stays quiet when nothing is
+        // unusual.
+        let arrangement = match before_after {
+            BeforeAfterMode::AfterOnly => String::new(),
+            other => format!("  ·  {}", other.label()),
+        };
+
         let text = format!(
-            "{}  ·  {}×{}  ·  {}{}  ·  {}  ·  {}/{}",
+            "{}  ·  {}×{}  ·  {}{}  ·  {}{}  ·  {}/{}",
             entry.filename,
             entry.width,
             entry.height,
             quality,
             source,
             self.zoom.label(),
+            arrangement,
             idx + 1,
             total,
         );

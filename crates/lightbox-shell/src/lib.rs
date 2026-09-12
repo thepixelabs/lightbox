@@ -1147,6 +1147,7 @@ impl LightboxApp {
                 let enabled = self.canvas.clip_overlay_enabled();
                 self.canvas.set_clip_overlay(!enabled);
             }
+            keymap::VIEW_BEFORE_AFTER_CYCLE => self.canvas.cycle_before_after(),
             other => {
                 debug_assert!(false, "dispatched action {:?} has no handler", other.0);
             }
@@ -1333,6 +1334,13 @@ impl LightboxApp {
                 ui.monospace(format!(
                     "swaps      {}",
                     self.outcome.texture_swaps.load(Ordering::Acquire)
+                ));
+                // The whole memory cost of the before/after view: one
+                // viewport-sized rgba8 texture, or nothing when no before
+                // image is captured (`canvas/before_after.rs`).
+                ui.monospace(format!(
+                    "before img {:.1} MB",
+                    self.canvas.before_snapshot_bytes() as f32 / (1024.0 * 1024.0)
                 ));
             });
         finish_floating_window(ctx, &resp);
