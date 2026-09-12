@@ -308,7 +308,7 @@ lightbox-cli export --catalog "$STORE" --images "$(paste -sd, ids.txt)" \
             <li>All 36 bundled looks, plus your own presets, by name or id</li>
             <li>History, undo, redo and named snapshots</li>
             <li>XMP sidecars, read and written</li>
-            <li>Export to JPEG, PNG or TIFF, one image or a list, with resize, depth, colour space and sharpening</li>
+            <li>Export to JPEG, PNG or TIFF, one image or a list, with resize, depth, colour space, sharpening, a text watermark, and a metadata level that defaults to copyright only</li>
           </ul>
         </div>
       </aside>
@@ -395,11 +395,16 @@ lightbox-cli export --catalog "$STORE" --images "$(paste -sd, ids.txt)" \
           <li>Parametric and point tone curves, per channel</li>
           <li>HSL, vibrance, saturation and three-way colour grading</li>
           <li>Clarity, texture, dehaze and a black and white mixer</li>
+          <li>Sharpening and noise reduction, luminance and colour, with an edge mask</li>
+          <li>Post-crop vignetting and film grain</li>
+          <li>Lens distortion and vignetting correction, and defringe</li>
           <li>Crop, straighten and flips with an interactive gizmo</li>
+          <li>Before and after, held, side by side, or split with a divider</li>
           <li>Creative LUTs from <code>.cube</code> and HaldCLUT files</li>
           <li>36 bundled presets, plus your own, with XMP import and export</li>
           <li>History, snapshots and crash-safe persistence</li>
           <li>Export to JPEG, PNG and TIFF with resize, depth, colour space and sharpening</li>
+          <li>A text watermark, and control over how much metadata leaves with the file</li>
           <li>Dockable panels, full theming, remappable keyboard, preferences</li>
           <li>A headless CLI that drives the whole pipeline</li>
         </ul>
@@ -409,13 +414,11 @@ lightbox-cli export --catalog "$STORE" --images "$(paste -sd, ids.txt)" \
         <ul class="status-list status-list-muted">
           <li>Masking and local adjustments</li>
           <li>Healing, cloning and removing things</li>
-          <li>Noise reduction and sharpening</li>
-          <li>Lens corrections and perspective</li>
+          <li>Perspective correction and Upright</li>
+          <li>Automatic chromatic aberration removal</li>
           <li>Any AI at all</li>
           <li>A demosaic of our own</li>
           <li>Camera colour profiles</li>
-          <li>A before and after view</li>
-          <li>Watermarking and metadata on export</li>
           <li>Signing in to cloud storage from inside Lightbox</li>
         </ul>
         <p class="status-note-body">Masking and local adjustments are not built, and they are the next thing we want to build. There is no date on them. When AI arrives it will run on your own machine and hand you sliders you can move, not a finished picture you cannot take apart. Cloud storage would point at your storage account, not ours.</p>
@@ -423,7 +426,7 @@ lightbox-cli export --catalog "$STORE" --images "$(paste -sd, ids.txt)" \
       <div class="status-col reveal">
         <h3 class="status-h status-note">Before you download it</h3>
         <ul class="status-list status-list-muted">
-          <li><b>Raw files open on their sensor data.</b> Highlight recovery from raw latitude is not built yet, so what you get is the full frame with your camera’s own colour matrices applied, not reconstruction of anything the sensor clipped.</li>
+          <li><b>Highlight recovery works, with one condition worth knowing.</b> A sensor’s channels clip at different brightnesses, so a highlight with green blown still holds real red and blue. Lightbox carries that above-white data through the pipeline and the Highlights slider maps it back into range: on our test frame a blown sky that rendered as one flat tone resolves into 59. It recovers detail only where at least one channel is unclipped, a fully clipped pixel stays flat, and today it needs Contrast at zero, because the contrast stage still clips before recovery sees the data. That last one is a bug with a fix designed, not a limit of the approach. Nothing here reconstructs a channel that clipped; we do not guess at data the sensor never recorded.</li>
           <li>macOS on Apple Silicon is the only platform anyone has really used. Every measurement and every crash drill in the repository was done there.</li>
           <li><b>No camera profiles ship yet.</b> Raw files are converted through the colour matrices your camera wrote into the file itself, which is what makes the colour correct rather than approximate. What is missing is the layer above that: the named profiles other editors offer, the ones that emulate a camera maker’s own rendering. Building those needs physical colour targets photographed under controlled light, and we have not done it.</li>
         </ul>
