@@ -30,6 +30,22 @@ on:
   push:
     branches: [main]
 
+# Least privilege. This repository is public, so anyone can open a pull request,
+# and a pull request runs this workflow with whatever the repository default
+# grants its token. Nothing in CI writes to the repository, so nothing in CI
+# needs to be able to. Read is enough. Note that the `pull_request` trigger
+# already withholds repository secrets from fork pull requests, and that
+# `pull_request_target`, which does not, is deliberately not used anywhere here.
+permissions:
+  contents: read
+
+# One run per branch or pull request. Pushing three times in a minute should
+# cost one full matrix, not three, and the two superseded runs were going to be
+# thrown away regardless.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"

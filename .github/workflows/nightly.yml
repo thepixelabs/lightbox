@@ -17,7 +17,14 @@ name: Nightly
 
 on:
   schedule:
-    - cron: "0 3 * * *" # 03:00 UTC daily
+    # Weekly, not nightly. This workflow fans out to thirteen jobs across three
+    # operating systems, and running that every night for a one-person pre-1.0
+    # project burns hours of runner time to re-prove things that a push to main
+    # already proved. The long-form fault injection and the perf harness are
+    # worth running regularly; they are not worth running daily. Sunday 03:00
+    # UTC, and `workflow_dispatch` below is always there when a change warrants
+    # the full sweep sooner.
+    - cron: "0 3 * * 0"
   workflow_dispatch:
 
 permissions:

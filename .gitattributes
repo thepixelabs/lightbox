@@ -1,0 +1,30 @@
+# Line endings.
+#
+# Windows CI checks out with CRLF unless told otherwise, and `cargo fmt --check`
+# then fails every Rust file with "Incorrect newline style". That is not a
+# formatting problem in the source, it is a checkout artefact, and it turned the
+# Windows leg of CI permanently red for a reason that has nothing to do with the
+# code. Normalise text to LF in the working tree on every platform.
+* text=auto eol=lf
+
+# Binary, never normalised. Rewriting a byte inside any of these corrupts it.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.webp   binary
+*.icns   binary
+*.woff2  binary
+*.ttf    binary
+*.raf    binary
+*.arw    binary
+*.cr2    binary
+*.cr3    binary
+*.nef    binary
+*.orf    binary
+*.dng    binary
+*.pef    binary
+*.rw2    binary
+*.tiff   binary
+*.dcp    binary
+*.lblook binary
+*.bundle binary

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs the fast gates before a push, so a red CI run is something you avoid
+# rather than something you wait for.
+#
+# Install once:   git config core.hooksPath .githooks
+# Skip once:      git push --no-verify
+#
+# Deliberately only the quick gates. A full `cargo xtask ci` takes minutes and a
+# hook that is slow enough to be annoying is a hook people disable.
+set -e
+export PATH="$HOME/.cargo/bin:$PATH"
+echo "pre-push: running the quick gates (skip with --no-verify)"
+cargo run -q -p xtask -- ci --quick

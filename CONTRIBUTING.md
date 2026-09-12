@@ -63,6 +63,27 @@ and you need the reasoning behind it, open an issue and ask: the answer is usual
 a paragraph, and it is more useful written into the comment than left in a document
 nobody can read.
 
+## Running the gates locally, and a note on self-hosted runners
+
+`cargo xtask ci` runs every gate CI runs, in the same order, and stops at the
+first failure. `cargo xtask ci --quick` runs formatting and clippy only, which
+is what the pre-push hook uses. Install the hook with
+`git config core.hooksPath .githooks`.
+
+Local runs cannot see Windows or Linux. That is what the cloud matrix is for,
+and it is the reason the matrix exists rather than being trimmed to macOS.
+
+**This repository does not use self-hosted runners, and should not.** It is
+public, so anyone can open a pull request. A workflow triggered by a pull
+request runs the contributor's code, and on a self-hosted runner that code runs
+on the machine hosting the runner, with that machine's filesystem, credentials
+and network access. GitHub's own guidance is not to combine the two. The
+approval-required setting for first-time contributors is a speed bump rather
+than a boundary: it is one click away from being bypassed, and it stops applying
+once somebody has had a single pull request merged. If runner cost ever becomes
+a real problem, the answer is to run less in the cloud, not to move it onto a
+laptop.
+
 ## Where to read, and the order to read it in
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): the map. What is in each crate, the seams between them, and the decisions everything else rests on.

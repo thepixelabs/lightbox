@@ -8,6 +8,7 @@
 //! CI helpers, and the migration-registry lint (T9).
 
 mod bundle_mac;
+mod ci;
 mod exit_drill;
 mod fixtures;
 mod generate;
@@ -31,6 +32,8 @@ Commands:
                                    authoring manifest pins)
   lint-migrations                  cross-check docs/reference/migrations.md against
                                    crates/lightbox-catalog/migrations/ (CI gate)
+  ci [--quick]                     run every gate CI runs, here, before you push.
+                                   --quick runs only formatting and clippy
   lint-native-deps                 cross-check Cargo.lock's *-sys crates against
                                    native-inventory.toml (SBOM surface-2
                                    placeholder, CI gate)
@@ -76,6 +79,10 @@ fn run() -> anyhow::Result<()> {
         Some("hash") => cmd_hash(&args[1..]),
         Some("lint-migrations") => migrations_lint::lint(&workspace_root()),
         Some("lint-native-deps") => native_deps::lint(&workspace_root()),
+        Some("ci") => ci::run(
+            &workspace_root(),
+            args.get(1).is_some_and(|a| a == "--quick"),
+        ),
         Some("bundle-mac") => cmd_bundle_mac(&args[1..]),
         Some("exit-drill") => cmd_exit_drill(&args[1..]),
         Some("--help" | "-h" | "help") | None => {
