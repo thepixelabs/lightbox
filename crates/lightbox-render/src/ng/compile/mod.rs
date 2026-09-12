@@ -299,6 +299,7 @@ impl RecipeCompiler {
                     &self.registry,
                     pv,
                     &recipe.geometry,
+                    &recipe.global.optics,
                     src.full_extent,
                     prev.expect("tone/color segment always returns a node"),
                 )?);

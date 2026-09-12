@@ -148,6 +148,11 @@ pub mod crs {
     pub const LENS_PROFILE_NAME: &str = "LensProfileName";
     pub const LENS_PROFILE_DISTORTION_SCALE: &str = "LensProfileDistortionScale";
     pub const LENS_PROFILE_VIGNETTING_SCALE: &str = "LensProfileVignettingScale";
+    /// Adobe's key for the Manual tab's Distortion slider, the signed
+    /// by-hand correction. Distinct from the profile *scale* above: that
+    /// one says how much of a measured profile to apply, this one IS the
+    /// correction. See [`crate::leaves::LensCorrection`].
+    pub const LENS_MANUAL_DISTORTION: &str = "LensManualDistortionAmount";
 
     // Grain / post-crop vignette extras.
     pub const GRAIN_SIZE: &str = "GrainSize";
@@ -203,7 +208,8 @@ pub const FIELD_TABLE: &[FieldRow] = &[
     FieldRow { lightbox: "global.detail.nr.luma_detail", crs: crs::LUMINANCE_NR_DETAIL, domain: "0..100", conversion: "identity", fidelity: Exact, notes: "" },
     FieldRow { lightbox: "global.detail.nr.chroma", crs: crs::COLOR_NR, domain: "0..100", conversion: "identity", fidelity: Exact, notes: "" },
     FieldRow { lightbox: "global.detail.nr.chroma_detail", crs: crs::COLOR_NR_DETAIL, domain: "0..100", conversion: "identity", fidelity: Exact, notes: "" },
-    FieldRow { lightbox: "global.optics.lens_profile", crs: "LensProfileEnable/Name/DistortionScale/VignettingScale", domain: "profile + scales", conversion: "enable+scales; identity is Lightbox's", fidelity: Approximate, notes: "Profile identity is Lightbox's; not resolvable by LR." },
+    FieldRow { lightbox: "global.optics.lens_profile", crs: "LensProfileEnable/Name/DistortionScale/VignettingScale", domain: "profile + scales", conversion: "enable+scales; identity is Lightbox's", fidelity: Approximate, notes: "Profile identity is Lightbox's; not resolvable by LR. The profile SCALES are amounts and are emitted as amounts; the by-hand correction is the separate manual_distortion row." },
+    FieldRow { lightbox: "global.optics.lens_profile.manual_distortion", crs: crs::LENS_MANUAL_DISTORTION, domain: "−100..100", conversion: "identity", fidelity: Exact, notes: "Adobe's Manual-tab Distortion; never folded into LensProfileDistortionScale (that key means 'apply N% of a profile')." },
     FieldRow { lightbox: "global.optics.ca", crs: crs::AUTO_LATERAL_CA, domain: "bool", conversion: "bool", fidelity: Exact, notes: "" },
     FieldRow { lightbox: "global.optics.defringe", crs: crs::DEFRINGE_PURPLE, domain: "0..100 (single) ↔ purple/green", conversion: "single→purple", fidelity: Approximate, notes: "LR splits purple/green; Lightbox has one amount at M1 (A-4)." },
     FieldRow { lightbox: "global.optics.vignette_corr", crs: crs::VIGNETTE_AMOUNT, domain: "−100..100", conversion: "identity", fidelity: Approximate, notes: "Manual lens-vignette model differs slightly." },

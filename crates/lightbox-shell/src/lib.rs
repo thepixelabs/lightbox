@@ -770,6 +770,7 @@ impl LightboxApp {
         panel_host.register(panels::histogram::def()); // D13: order 10, above Basic
         panel_host.register(panels::basic::def());
         panel_host.register(panels::geometry::def());
+        panel_host.register(panels::optics::def());
         panel_host.register(panels::curve::def());
         panel_host.register(panels::hsl::def());
         panel_host.register(panels::bw::def());

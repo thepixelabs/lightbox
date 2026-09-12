@@ -500,15 +500,45 @@ pub struct Detail {
 
 // ── optics ───────────────────────────────────────────────────────────────────
 
-/// A lens-profile correction (§3.2). Present only when a profile is applied.
+/// A lens correction (§3.2). Present only when lens correction is enabled.
+///
+/// # Two distortion fields, because they are two different quantities
+///
+/// `distortion` is a **profile amount**: how much of the resolved lens
+/// profile's measured distortion coefficients to apply, `0..=200` with unity
+/// at `100` (Lightroom's Profile Corrections "Amount"; `crs:
+/// LensProfileDistortionScale`). It is meaningless without a profile,
+/// because there is nothing for it to scale.
+///
+/// `manual_distortion` is a **manual correction**: a signed dial the user
+/// turns by hand, `-100..=100`, neutral `0` (Lightroom's Manual tab
+/// "Distortion"; `crs:LensManualDistortionAmount`). Positive removes barrel
+/// distortion, negative removes pincushion.
+///
+/// Keeping them apart is what makes a written sidecar mean in other
+/// software what it means here. Folding a manual correction into the
+/// profile amount would emit `LensProfileDistortionScale: 40` for a user
+/// who asked for barrel correction, which is a file that silently does the
+/// wrong thing in Lightroom months later, with no error.
+///
+/// `vignetting` is the profile amount for vignetting and has always had its
+/// manual peer on [`Optics::vignette_corr`]; this pair now mirrors that.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LensCorrection {
     /// Lens/profile id.
     pub profile_id: String,
-    /// Distortion correction amount, `0..=200`, unity `100`.
+    /// Profile distortion amount, `0..=200`, unity `100`.
     pub distortion: f32,
-    /// Vignetting correction amount, `0..=200`, unity `100`.
+    /// Profile vignetting amount, `0..=200`, unity `100`.
     pub vignetting: f32,
+    /// Manual distortion correction, `-100..=100`, neutral `0`. Positive
+    /// removes barrel distortion, negative removes pincushion.
+    ///
+    /// Additive field with a serde default: a recipe stored before it
+    /// existed deserializes with `0.0`, which is neutral, so no stored edit
+    /// changes appearance.
+    #[serde(default)]
+    pub manual_distortion: f32,
 }
 
 impl Default for LensCorrection {
@@ -517,6 +547,7 @@ impl Default for LensCorrection {
             profile_id: String::new(),
             distortion: 100.0,
             vignetting: 100.0,
+            manual_distortion: 0.0,
         }
     }
 }
@@ -525,6 +556,7 @@ impl LensCorrection {
     pub(crate) fn clamp(&mut self) {
         self.distortion = clampf(self.distortion, 0.0, 200.0);
         self.vignetting = clampf(self.vignetting, 0.0, 200.0);
+        self.manual_distortion = clampf(self.manual_distortion, -100.0, 100.0);
     }
 }
 
@@ -778,4 +810,73 @@ pub struct XmpPassthrough {
     /// Foreign fields keyed by an opaque `"ns:local"` path.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub fields: std::collections::BTreeMap<String, CborValue>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Additive-field compatibility.** A `LensCorrection` stored before
+    /// `manual_distortion` existed has no such key. It must deserialize to
+    /// the neutral `0.0` rather than failing, so every recipe already on
+    /// disk keeps loading and keeps rendering exactly as it did.
+    ///
+    /// Driven through the authoritative CBOR path (`ciborium`), not a
+    /// convenient JSON stand-in, because CBOR is what the edit store
+    /// actually holds.
+    #[test]
+    fn a_lens_correction_stored_before_manual_distortion_still_loads() {
+        use ciborium::value::Value;
+
+        let old = Value::Map(vec![
+            (
+                Value::Text("profile_id".to_owned()),
+                Value::Text("lens-x".to_owned()),
+            ),
+            (Value::Text("distortion".to_owned()), Value::Float(140.0)),
+            (Value::Text("vignetting".to_owned()), Value::Float(80.0)),
+        ]);
+        let got: LensCorrection = old
+            .deserialized()
+            .expect("a document without the new key must still deserialize");
+
+        assert_eq!(got.profile_id, "lens-x");
+        assert_eq!(got.distortion, 140.0);
+        assert_eq!(got.vignetting, 80.0);
+        assert_eq!(
+            got.manual_distortion, 0.0,
+            "the absent field must default to neutral, so no stored edit \
+             changes appearance"
+        );
+    }
+
+    /// The manual dial is clamped to its own signed domain, not the
+    /// profile amounts' `0..=200`.
+    #[test]
+    fn clamp_holds_each_distortion_field_to_its_own_domain() {
+        let mut lc = LensCorrection {
+            profile_id: String::new(),
+            distortion: 900.0,
+            vignetting: -900.0,
+            manual_distortion: 900.0,
+        };
+        lc.clamp();
+        assert_eq!(lc.distortion, 200.0);
+        assert_eq!(lc.vignetting, 0.0);
+        assert_eq!(lc.manual_distortion, 100.0);
+
+        lc.manual_distortion = -900.0;
+        lc.clamp();
+        assert_eq!(lc.manual_distortion, -100.0);
+    }
+
+    /// The default is neutral on every axis: enabling lens correction
+    /// cannot change a pixel on its own.
+    #[test]
+    fn the_default_lens_correction_is_neutral() {
+        let d = LensCorrection::default();
+        assert_eq!(d.distortion, 100.0, "profile amount unity");
+        assert_eq!(d.vignetting, 100.0, "profile amount unity");
+        assert_eq!(d.manual_distortion, 0.0, "manual dial neutral");
+    }
 }

@@ -108,7 +108,8 @@ understands `crs:` gets a faithful-as-possible approximation. **Do not read the
 | `global.detail.nr.luma_detail` | `LuminanceNoiseReductionDetail` | 0..100 | identity | Exact | |
 | `global.detail.nr.chroma` | `ColorNoiseReduction` | 0..100 | identity | Exact | |
 | `global.detail.nr.chroma_detail` | `ColorNoiseReductionDetail` | 0..100 | identity | Exact | |
-| `global.optics.lens_profile` | `LensProfileEnable` / `LensProfileName` / `LensProfileDistortionScale` / `LensProfileVignettingScale` | profile + scales | enable + scales; identity is Lightbox's | Approximate | Profile identity is Lightbox's; not resolvable by LR. |
+| `global.optics.lens_profile` | `LensProfileEnable` / `LensProfileName` / `LensProfileDistortionScale` / `LensProfileVignettingScale` | profile + scales | enable + scales; identity is Lightbox's | Approximate | Profile identity is Lightbox's; not resolvable by LR. The profile scales are amounts and are emitted as amounts; the by-hand correction is the separate `manual_distortion` row below. |
+| `global.optics.lens_profile.manual_distortion` | `LensManualDistortionAmount` | −100..100 | identity | Exact | Adobe's Manual-tab Distortion. Never folded into `LensProfileDistortionScale`, which means "apply N% of a profile" and would make a sidecar say something the user never asked for. |
 | `global.optics.ca` | `AutoLateralCA` | bool | bool | Exact | |
 | `global.optics.defringe` | `DefringePurpleAmount` | 0..100 (single) ↔ purple/green | single → purple | Approximate | LR splits purple/green; Lightbox has one amount at M1 (deviations A-4). |
 | `global.optics.vignette_corr` | `VignetteAmount` | −100..100 | identity | Approximate | Manual lens-vignette model differs slightly. |

@@ -39,6 +39,9 @@
 //!   grain, the rail half of `lightbox_render`'s `fx.vignette` /
 //!   `fx.grain` nodes (both leaves already round-tripped through the
 //!   recipe and the `crs:` XMP mapping before either could render).
+//! * [`optics`], the `develop.optics` panel: lens distortion and vignetting
+//!   correction, chromatic aberration, and defringe, over
+//!   `ParamId::{LensProfile, ChromaticAberration, Defringe, VignetteCorr}`.
 //! * [`geometry`], E11 geometry TOOL UI: the `develop.geometry` panel
 //!   (crop tool + aspect presets + straighten + flip + reset), driving
 //!   `canvas::crop_gizmo` and the E11 engine's `ParamId::{Crop,Angle,Flip}`.
@@ -69,6 +72,7 @@ pub mod host;
 pub mod hsl;
 pub mod layout;
 pub mod looks;
+pub mod optics;
 pub mod presets;
 pub mod widgets;
 

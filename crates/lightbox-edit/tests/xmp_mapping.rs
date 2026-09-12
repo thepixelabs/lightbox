@@ -335,6 +335,94 @@ fn crs_only_doc_routes_to_from_lr_crs() {
     assert!(!got.recipe.is_neutral());
 }
 
+// ── optics: the two distortion fields must not be confused ───────────────────
+
+/// A recipe whose ONLY optics edit is a by-hand distortion correction.
+fn manual_distortion_recipe(amount: f32) -> Recipe {
+    let mut r = Recipe::identity(PV_M0);
+    r.global.optics.lens_profile = Some(lightbox_edit::leaves::LensCorrection {
+        manual_distortion: amount,
+        ..lightbox_edit::leaves::LensCorrection::default()
+    });
+    r
+}
+
+/// **The interop contract this field exists for.** A by-hand distortion
+/// correction is emitted on Adobe's manual key, and the profile scale is
+/// left at unity, meaning "apply all of the profile", which is true and
+/// harmless because there is no profile.
+///
+/// Folding the manual correction into the profile scale instead would write
+/// `LensProfileDistortionScale: 40` for a user who asked for barrel
+/// correction: a file that silently does the wrong thing in Lightroom, with
+/// no error, long after anyone could connect it to this code.
+#[test]
+fn manual_distortion_emits_adobes_manual_key_not_the_profile_scale() {
+    let doc = to_xmp_reparsed(&manual_distortion_recipe(-60.0));
+
+    let manual = doc
+        .get(ns::CRS, "LensManualDistortionAmount")
+        .and_then(|v| v.as_f64())
+        .expect("the manual correction must be emitted");
+    assert!((manual - -60.0).abs() < 1e-6, "got {manual}");
+
+    let scale = doc
+        .get(ns::CRS, "LensProfileDistortionScale")
+        .and_then(|v| v.as_f64())
+        .expect("the profile amount is emitted with the leaf");
+    assert!(
+        (scale - 100.0).abs() < 1e-6,
+        "the profile amount must stay at unity, got {scale}"
+    );
+
+    // And the neutral case emits no manual key at all.
+    let neutral = to_xmp_reparsed(&manual_distortion_recipe(0.0));
+    assert!(!neutral.contains(ns::CRS, "LensManualDistortionAmount"));
+}
+
+/// The manual correction survives a `crs:`-only round trip, lands back on
+/// its own field, and does not disturb the profile amounts.
+#[test]
+fn manual_distortion_round_trips_through_a_crs_only_document() {
+    for amount in [-100.0f32, -12.5, 37.0, 100.0] {
+        let doc = to_xmp_reparsed(&manual_distortion_recipe(amount));
+        let imp = Recipe::from_lr_crs(&doc, &fake_probe());
+        let lp = imp
+            .recipe
+            .global
+            .optics
+            .lens_profile
+            .expect("the lens leaf survives the round trip");
+        assert!(
+            (lp.manual_distortion - amount).abs() < 1e-4,
+            "{amount} came back as {}",
+            lp.manual_distortion
+        );
+        assert_eq!(lp.distortion, 100.0);
+        assert_eq!(lp.vignetting, 100.0);
+        assert_partition_exhaustive(&doc, &imp.report);
+    }
+}
+
+/// A sidecar carrying only Lightroom's Manual-tab distortion, with no
+/// profile enabled, still arms the leaf on import. Without this the
+/// correction would be silently dropped on the way in.
+#[test]
+fn a_manual_only_sidecar_still_imports_the_correction() {
+    let mut doc = XmpDoc::new();
+    doc.set(ns::CRS, "LensManualDistortionAmount", XmpValue::Real(-25.0))
+        .expect("set");
+    let imp = Recipe::from_lr_crs(&doc, &fake_probe());
+    let lp = imp
+        .recipe
+        .global
+        .optics
+        .lens_profile
+        .expect("a manual-only document arms the lens leaf");
+    assert!((lp.manual_distortion - -25.0).abs() < 1e-4);
+    assert_partition_exhaustive(&doc, &imp.report);
+}
+
 // ── T21: from_lr_crs mechanism + report ──────────────────────────────────────
 
 #[test]

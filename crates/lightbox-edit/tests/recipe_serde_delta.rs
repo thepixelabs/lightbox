@@ -143,17 +143,23 @@ fn arb_grade() -> impl Strategy<Value = ColorGrade> {
 
 fn arb_optics() -> impl Strategy<Value = Optics> {
     (
-        prop::option::of((f_in(0.0, 200.0), f_in(0.0, 200.0))),
+        // The two profile amounts (0..=200, unity 100) and the manual
+        // distortion dial (-100..=100, neutral 0) are independent axes; the
+        // round trip has to hold across all three, not just the pair.
+        prop::option::of((f_in(0.0, 200.0), f_in(0.0, 200.0), f_in(-100.0, 100.0))),
         any::<bool>(),
         f_in(0.0, 100.0),
         f_in(-100.0, 100.0),
     )
         .prop_map(|(lp, ca, defringe, vignette_corr)| Optics {
-            lens_profile: lp.map(|(distortion, vignetting)| LensCorrection {
-                profile_id: "lens-x".to_string(),
-                distortion,
-                vignetting,
-            }),
+            lens_profile: lp.map(
+                |(distortion, vignetting, manual_distortion)| LensCorrection {
+                    profile_id: "lens-x".to_string(),
+                    distortion,
+                    vignetting,
+                    manual_distortion,
+                },
+            ),
             ca,
             defringe,
             vignette_corr,

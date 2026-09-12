@@ -599,7 +599,10 @@ impl Recipe {
         );
         let lens_enable = gb(doc, crs::LENS_PROFILE_ENABLE).unwrap_or(false);
         let lens_name = gs(doc, crs::LENS_PROFILE_NAME);
-        if lens_enable || lens_name.is_some() {
+        let manual_distortion = gf(doc, crs::LENS_MANUAL_DISTORTION);
+        // A document may carry ONLY the manual correction (Lightroom's
+        // Manual tab with no profile enabled), so it arms the leaf too.
+        if lens_enable || lens_name.is_some() || manual_distortion.is_some() {
             let mut lp = LensCorrection {
                 profile_id: lens_name.clone().unwrap_or_default(),
                 ..LensCorrection::default()
@@ -609,6 +612,9 @@ impl Recipe {
             }
             if let Some(v) = gf(doc, crs::LENS_PROFILE_VIGNETTING_SCALE) {
                 lp.vignetting = clampf(v as f32, 0.0, 200.0);
+            }
+            if let Some(v) = manual_distortion {
+                lp.manual_distortion = clampf(v as f32, -100.0, 100.0);
             }
             recipe.global.optics.lens_profile = Some(lp);
             // Report every lens key actually present so the partition stays
@@ -625,6 +631,15 @@ impl Recipe {
                         .approximate
                         .push(field_fidelity("global.optics.lens_profile", k));
                 }
+            }
+            // The manual correction is an exact identity round trip, unlike
+            // the profile keys above, so it reports in its own bucket.
+            if doc.contains(ns::CRS, crs::LENS_MANUAL_DISTORTION) {
+                consumed.insert(crs::LENS_MANUAL_DISTORTION.to_string());
+                report.mapped.push(field_fidelity(
+                    "global.optics.lens_profile.manual_distortion",
+                    crs::LENS_MANUAL_DISTORTION,
+                ));
             }
         }
 

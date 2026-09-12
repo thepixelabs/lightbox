@@ -268,6 +268,13 @@ impl Recipe {
             }
             cr(doc, crs::LENS_PROFILE_DISTORTION_SCALE, lp.distortion)?;
             cr(doc, crs::LENS_PROFILE_VIGNETTING_SCALE, lp.vignetting)?;
+            // The by-hand correction goes on Adobe's own manual key, never
+            // folded into the profile scale above: that key means "apply N%
+            // of the lens profile", and a reader in other software would
+            // act on it as such. See `leaves::LensCorrection`.
+            if lp.manual_distortion != 0.0 {
+                cr(doc, crs::LENS_MANUAL_DISTORTION, lp.manual_distortion)?;
+            }
         }
         if o.ca {
             cb(doc, crs::AUTO_LATERAL_CA, true)?;
