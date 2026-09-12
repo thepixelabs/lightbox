@@ -417,7 +417,7 @@ lightbox-cli export --catalog "$STORE" --images "$(paste -sd, ids.txt)" \
         <ul class="status-list status-list-muted">
           <li><b>Raw files open on their sensor data.</b> Highlight recovery from raw latitude is not built yet, so what you get is the full frame with your camera’s own colour matrices applied, not reconstruction of anything the sensor clipped.</li>
           <li>macOS on Apple Silicon is the only platform anyone has really used. Every measurement and every crash drill in the repository was done there.</li>
-          <li>No camera profiles ship yet. The editor grades the preview your camera embedded, which is already in a standard colour space, so a per-camera matrix has nothing to act on until sensor decoding is wired into the editor. Building real profiles needs physical colour targets, and we have not done it.</li>
+          <li><b>No camera profiles ship yet.</b> Raw files are converted through the colour matrices your camera wrote into the file itself, which is what makes the colour correct rather than approximate. What is missing is the layer above that: the named profiles other editors offer, the ones that emulate a camera maker’s own rendering. Building those needs physical colour targets photographed under controlled light, and we have not done it.</li>
         </ul>
       </div>
     </div>
