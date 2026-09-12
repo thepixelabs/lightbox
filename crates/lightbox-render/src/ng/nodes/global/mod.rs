@@ -41,6 +41,8 @@ pub mod creative_lut;
 pub mod dehaze;
 pub mod exposure;
 pub mod hsl;
+pub mod noise_reduction;
+pub mod sharpen;
 pub mod texture;
 pub mod tone_curve;
 pub mod tone_recovery;
@@ -65,6 +67,8 @@ pub use creative_lut::{CreativeLutFactory, CreativeLutNode, LookResolver};
 pub use dehaze::{DehazeFactory, DehazeNode};
 pub use exposure::{ExposureFactory, ExposureNode};
 pub use hsl::{HslFactory, HslNode};
+pub use noise_reduction::{NoiseReductionFactory, NoiseReductionNode};
+pub use sharpen::{SharpenFactory, SharpenNode};
 pub use texture::{TextureFactory, TextureNode};
 pub use tone_curve::{ToneCurveFactory, ToneCurveNode};
 pub use tone_recovery::{ToneRecoveryFactory, ToneRecoveryNode};
@@ -172,6 +176,16 @@ pub fn register_global_nodes(
         Arc::new(DehazeFactory::default()),
     )?;
     reg.register(
+        NoiseReductionNode::ID,
+        PvRange::from_open(pv),
+        Arc::new(NoiseReductionFactory::default()),
+    )?;
+    reg.register(
+        SharpenNode::ID,
+        PvRange::from_open(pv),
+        Arc::new(SharpenFactory::default()),
+    )?;
+    reg.register(
         CreativeLutNode::ID,
         PvRange::from_open(pv),
         Arc::new(CreativeLutFactory::default()),
@@ -235,6 +249,17 @@ pub fn build_wb_segment(
 /// TextureNode ► DehazeNode ► …`, right after texture, the last of the
 /// presence trio, before `CreativeLutNode`.
 ///
+/// The Detail pair sits between the presence trio and the creative LUT, in
+/// the order `… DehazeNode ► NoiseReductionNode ► SharpenNode ►
+/// CreativeLutNode`. Noise reduction is FIRST because sharpening amplifies
+/// whatever high-frequency content it is handed, and unremoved sensor noise
+/// is high-frequency content: sharpen before you denoise and you sharpen the
+/// noise, then ask the denoiser to remove structure it can no longer tell
+/// apart from detail. Both sit after the presence trio because clarity and
+/// texture are local-CONTRAST tools on a coarser scale, and before the
+/// creative LUT because a look is a colour transform that should see the
+/// finished, detail-corrected image.
+///
 /// `CreativeLutNode` (task D9) sits exactly where spec §4.1 pins it: `…
 /// DehazeNode ► CreativeLutNode`, the last stage of the tone/color chain.
 /// Elided whenever `GlobalStages::effects.creative_lut` is absent or its
@@ -268,6 +293,8 @@ pub fn build_tone_color_segment(
     let cur = maybe_add::<ClarityNode>(g, reg, pv, ClarityNode::ID, p, cur)?;
     let cur = maybe_add::<TextureNode>(g, reg, pv, TextureNode::ID, p, cur)?;
     let cur = maybe_add::<DehazeNode>(g, reg, pv, DehazeNode::ID, p, cur)?;
+    let cur = maybe_add::<NoiseReductionNode>(g, reg, pv, NoiseReductionNode::ID, p, cur)?;
+    let cur = maybe_add::<SharpenNode>(g, reg, pv, SharpenNode::ID, p, cur)?;
     let cur = maybe_add_creative_lut(g, reg, pv, p, cur, look_resolver)?;
     Ok(cur)
 }
@@ -384,6 +411,8 @@ pub fn invalidates(id: ParamId) -> &'static [NodeId] {
         ParamId::Clarity => &[ClarityNode::ID],
         ParamId::Texture => &[TextureNode::ID],
         ParamId::Dehaze => &[DehazeNode::ID],
+        ParamId::Sharpen => &[SharpenNode::ID],
+        ParamId::NoiseReduction => &[NoiseReductionNode::ID],
         ParamId::CreativeLut => &[CreativeLutNode::ID],
         _ => &[],
     }
@@ -499,6 +528,22 @@ mod tests {
     fn dehaze_delta_invalidates_only_the_dehaze_node() {
         assert_eq!(invalidates(ParamId::Dehaze), &[DehazeNode::ID]);
         assert!(!invalidates(ParamId::Dehaze).contains(&TextureNode::ID));
+    }
+
+    /// The Detail pair's own A4-style hint: each of the two leaves
+    /// invalidates exactly its own node, and neither reaches the other (they
+    /// are adjacent stages, so a stale hint here would be silently wrong in
+    /// the most expensive direction).
+    #[test]
+    fn the_detail_leaves_each_invalidate_only_their_own_node() {
+        assert_eq!(invalidates(ParamId::Sharpen), &[SharpenNode::ID]);
+        assert_eq!(
+            invalidates(ParamId::NoiseReduction),
+            &[NoiseReductionNode::ID]
+        );
+        assert!(!invalidates(ParamId::Sharpen).contains(&NoiseReductionNode::ID));
+        assert!(!invalidates(ParamId::NoiseReduction).contains(&SharpenNode::ID));
+        assert!(!invalidates(ParamId::Sharpen).contains(&DehazeNode::ID));
     }
 
     /// D9's own A4-style hint: a `CreativeLut` delta invalidates

@@ -24,6 +24,8 @@
 //! * [`hsl`], E10 task C9: the `develop.hsl` 8-band HSL color mixer panel.
 //! * [`grading`], E10 tasks C13: the `develop.grading` 3-way color-grading
 //!   wheels panel.
+//! * [`detail`], the `develop.detail` sharpening + noise-reduction panel,
+//!   over `ParamId::Sharpen`/`ParamId::NoiseReduction`.
 //! * [`bw`], E10 task D2: the `develop.bw` Treatment toggle + 8-band B&W
 //!   mixer panel; also owns [`bw::is_monochrome`], the predicate `hsl`/
 //!   `grading` check to grey themselves out in Monochrome.
@@ -52,6 +54,7 @@
 pub mod basic;
 pub mod bw;
 pub mod curve;
+pub mod detail;
 pub mod develop_ctx;
 pub mod geometry;
 pub mod grading;
