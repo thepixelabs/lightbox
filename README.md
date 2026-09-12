@@ -35,12 +35,11 @@ Lightbox is pre-1.0 and under active development. The foundation (workspace, cra
 
 ## What is not built yet
 
-- Sensor-data editing **in the editor**. The decoder is built and ships inside the app, and only `lightbox-cli` calls it today; the editor grades the JPEG your camera embedded in the raw file, and its canvas badge says so. See [Raw decoding, LibRaw, and what the editor actually shows you](#raw-decoding-libraw-and-what-the-editor-actually-shows-you) for how to measure the difference yourself.
 - Masking, local adjustments, and retouch (heal, clone, remove). `lightbox-mask` exists in the workspace only as an empty crate reserving the name.
 - Any local AI: denoise, super-resolution, AI-assisted masking, and the out-of-process ONNX inference host. `lightbox-ml` is likewise an empty reserved crate.
 - AI Looks, the image-adaptive cinematic grading engine described in the project's own planning documents as a core feature, is specced but its build status could not be confirmed from those documents at the time of writing. Do not assume it works.
-- The clean-room demosaic algorithm and the rest of the "complete raw parameter surface" goal: highlight reconstruction from raw latitude, per-channel camera calibration, raw-domain denoise, and lens/geometry correction beyond crop and straighten.
-- The rest of export: watermarking, an external-editor round trip, JPEG XL/AVIF/DNG output, filename templates, collision handling, and export presets.
+- The clean-room demosaic algorithm, per-channel camera calibration, raw-domain denoise, perspective correction and Upright. Lens distortion and vignetting correction and defringe are built; automatic chromatic aberration removal is implemented but inert, because the per-lens coefficients would have to come from a profile database that does not exist and inventing them would be fabrication.
+- The rest of export: an external-editor round trip, JPEG XL/AVIF/DNG output, filename templates, collision handling, and export presets. A text watermark and metadata-level control are built; graphical watermarks are not.
 - XMP/Lightroom interop hardening beyond the basic sidecar read/write above.
 - Any library, catalogue, or index of your photos: no persistent database of images, no collections, no keywords, no ratings, no cross-shoot search. This is cut on purpose, not pending.
 
@@ -151,9 +150,24 @@ preview and says so, on the canvas and in a notice. That disclosure is the
 point: silently serving a smaller, already-processed image is what the editor
 used to do, and it is why highlight recovery appeared not to work.
 
-**Still not built:** highlight reconstruction from raw latitude. LibRaw hands
-over pixels that are already clipped, so recovery has to happen on the mosaic.
-Doing it after demosaic would be guesswork presented as recovery.
+**Highlight recovery from raw latitude is built**, and the earlier claim here
+was wrong on its facts. It said LibRaw hands over pixels that are already
+clipped. Measured across every LibRaw highlight mode on the fixture, modes 0, 1
+and 2 are byte-identical, because `user_mul` is all ones; and no fixture in the
+corpus contains a single raw sample above LibRaw's declared white level. There
+was never whole-pixel headroom to unclip.
+
+What there is, and what LibRaw preserves perfectly, is **per-channel** latitude:
+on `canon-eos-350d.cr2` green clips on 0.60 % of the frame while red clips
+0.003 % and blue 0.006 %. That asymmetry was being destroyed downstream instead,
+by two clamps in `lightbox-color`. With those removed, a blown sky region that
+resolved one distinct tone resolves 59.
+
+**Still not built:** reconstruction of a channel that actually clipped. Doing
+that after demosaic would be guesswork presented as recovery, and we do not do
+it. One caveat that is a bug rather than a boundary: recovery currently requires
+Contrast at zero, because the contrast stage clips in the companion-encoded
+domain upstream of it.
 
 ## Repository layout
 
