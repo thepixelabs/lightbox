@@ -152,7 +152,31 @@ int lbx_lr_process_ahd(void *h) {
   libraw_set_gamma(lr, 0, 1.0);   // linear TRC
   libraw_set_gamma(lr, 1, 1.0);
   libraw_set_no_auto_bright(lr, 1);
-  libraw_set_highlight(lr, 0); // clip highlights (deterministic)
+  // Highlight mode. This looks like the knob that controls whether the
+  // sensor's highlight latitude survives; it is not, and the next person to
+  // come looking should not have to re-derive that. Because `user_mul` below
+  // is all ones, LibRaw's `scale_colors` normalizes the multipliers by their
+  // min (mode 0) or their max (modes 1+), and with four equal multipliers
+  // those are the same number, so modes 0, 1 and 2 produce byte-identical
+  // output. Measured on canon-eos-350d.cr2: 0 samples differ between modes
+  // 0/1/2. `blend_highlights` (mode 2) is a no-op for the same reason, its
+  // clip threshold is `min(65535 * pre_mul[c])`, which no sample can exceed.
+  //
+  // Modes 3+ (`recover_highlights`) are worse than useless here: they rebuild
+  // every channel from whichever has the largest multiplier, and with equal
+  // multipliers that reference channel is arbitrary (index 0) and the
+  // threshold degenerates to half scale, so normally exposed content gets
+  // "recovered" too. Measured on the same file, clipped green pixels went UP,
+  // 47239 (mode 0) -> 50791 (3) -> 56194 (4) -> 67361 (5). Mode 0 is the only
+  // safe choice, so this is not exposed as a parameter.
+  //
+  // The real latitude is per-channel and it is preserved by exactly this
+  // setup: unity multipliers keep each channel's own distance below the white
+  // level intact (on that file green clips over 0.59 % of the frame while red
+  // and blue clip 0.003 % and 0.006 %). White balance is applied downstream,
+  // in `cam_to_working`, which is where that per-channel slack becomes
+  // working-space values above 1 for `global.tone_recovery` to pull back.
+  libraw_set_highlight(lr, 0);
   libraw_set_user_mul(lr, 0, 1.0f);
   libraw_set_user_mul(lr, 1, 1.0f);
   libraw_set_user_mul(lr, 2, 1.0f);

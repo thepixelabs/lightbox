@@ -20,7 +20,33 @@ use crate::wb::WbMode;
 /// Samples per resolved curve (spec §3.4, `N = 4096`).
 const CURVE_SAMPLES: usize = 4096;
 
+/// Divisor setting [`Curve1D::tail_slope`]'s measurement window: the slope is
+/// read across the last `N / TAIL_WINDOW_DIV` samples rather than the final
+/// pair. At `N = 4096` that is a 64-sample window spanning `x ∈ [0.984, 1]`,
+/// over which the default look's shoulder rises by ~0.0137, five orders of
+/// magnitude above `f32::EPSILON` at that magnitude. Reading the final pair
+/// instead would divide a difference of two nearly equal `f32`s by `1/4095`,
+/// amplifying its rounding noise by 4095x, the same catastrophic-cancellation
+/// trap `nodes::global::tone_recovery`'s `GUIDE_EPS` documents.
+const TAIL_WINDOW_DIV: usize = 64;
+
 /// A 1D curve sampled to `N` points for GPU upload (spec §3.4, `N = 4096`).
+///
+/// # Domain: sampled over `[0, 1]`, evaluated over `[0, ∞)`
+///
+/// The sample table covers `[0, 1]`, but [`Curve1D::eval`]'s **inputs are
+/// scene-linear working RGB, which legitimately exceeds 1**: a sensor
+/// highlight that clipped in one channel still carries unclipped signal in the
+/// others, and the camera-to-working matrix (which folds in white balance)
+/// turns that into working values above 1. On `canon-eos-350d.cr2` 2.29 % of
+/// the frame lands above 1 that way, peaking at 2.28.
+///
+/// That is the raw file's highlight latitude, and it is the whole input to
+/// `global.tone_recovery`. So `eval` **extends the curve above 1** rather than
+/// clamping (see its docs). Clipping belongs at the display transform, which
+/// is where `display.rs`'s own shaper evaluator (`display::eval_curve`, a
+/// separate function that does still clamp, correctly, because a display
+/// cannot show above white) performs it.
 #[derive(Clone, Debug)]
 pub struct Curve1D {
     /// Evenly-spaced samples over `[0, 1]`.
@@ -53,8 +79,27 @@ impl Curve1D {
         Curve1D { samples }
     }
 
-    /// Evaluates the sampled curve at `x` with linear interpolation, clamping
-    /// outside `[0, 1]`.
+    /// Evaluates the sampled curve at `x` with linear interpolation.
+    ///
+    /// **Below `0`** the result is clamped to the first sample, unchanged:
+    /// negative working values come from out-of-gamut matrix results, not from
+    /// scene light, and extending a tone curve into them would hand later
+    /// stages ever more negative input to take powers of.
+    ///
+    /// **Above `1`** the curve is *extended*, not clamped, along the straight
+    /// line through its endpoint at the curve's own end slope
+    /// ([`Curve1D::tail_slope`]). Matching the end slope rather than picking
+    /// one makes the extension continuous in both value and first derivative
+    /// at `x == 1`, so a smooth scene gradient crossing the sensor's clip
+    /// point does not acquire a visible crease there.
+    ///
+    /// This is the line that decides whether a raw file's highlight latitude
+    /// reaches the develop graph at all. It used to read `x.clamp(0.0, 1.0)`,
+    /// which flattened every value above 1 onto the curve's endpoint: on
+    /// `canon-eos-350d.cr2` that mapped the distinct scene values
+    /// `[1.94, 1.20, 1.33]` and `[2.08, 1.15, 1.72]` onto the same
+    /// `[1.0, 1.0, 1.0]`, which is what made a blown sky render as flat white
+    /// with nothing left in it for `global.tone_recovery` to pull back.
     pub fn eval(&self, x: f32) -> f32 {
         let n = self.samples.len();
         if n == 0 {
@@ -63,10 +108,41 @@ impl Curve1D {
         if n == 1 {
             return self.samples[0];
         }
+        if x > 1.0 {
+            return self.samples[n - 1] + self.tail_slope() * (x - 1.0);
+        }
         let c = x.clamp(0.0, 1.0) * (n - 1) as f32;
         let i0 = (c.floor() as usize).min(n - 2);
         let f = c - i0 as f32;
         self.samples[i0] * (1.0 - f) + self.samples[i0 + 1] * f
+    }
+
+    /// The slope [`Curve1D::eval`] extends the curve with above `x == 1`,
+    /// measured across the table's last `N / TAIL_WINDOW_DIV` samples (see
+    /// that constant for why a window and not the final pair).
+    ///
+    /// Falls back to `1.0` (pass the excess through unchanged) whenever the
+    /// measured slope is not finite and positive. A flat or falling tail is
+    /// reachable, `from_spline_amount` clamps its samples to `[0, 1]`, so a
+    /// `look_amount > 1` on a curve that already reaches white can saturate
+    /// the last samples to a constant, and a slope of `0` there would silently
+    /// reintroduce exactly the clamp this method exists to remove. Passing the
+    /// excess through is the conservative failure: it keeps the highlight
+    /// latitude, and `global.tone_recovery` still owns what happens to it.
+    pub fn tail_slope(&self) -> f32 {
+        let n = self.samples.len();
+        if n < 2 {
+            return 1.0;
+        }
+        let k = (n / TAIL_WINDOW_DIV).clamp(1, n - 1);
+        let dy = self.samples[n - 1] - self.samples[n - 1 - k];
+        let dx = k as f32 / (n - 1) as f32;
+        let slope = dy / dx;
+        if slope.is_finite() && slope > 0.0 {
+            slope
+        } else {
+            1.0
+        }
     }
 }
 
@@ -106,6 +182,15 @@ impl ResolvedInputTransform {
     ///
     /// Stage order per §5.2: `cam_to_working` matrix → `BaselineExposureOffset`
     /// → HueSatMap → LookTable → ProfileToneCurve → Lightbox look.
+    ///
+    /// **Scene-referred output: the result is not bounded by 1.** Camera-native
+    /// input is `[0, 1]` (the sensor's white level normalizes to 1), but
+    /// `cam_to_working` folds white balance in, and white balance is exactly
+    /// what turns a one-channel sensor clip into working values above 1. None
+    /// of the six stages clamps at the top any more: `apply_huesat` preserves
+    /// magnitude by construction and both tone curves extend past 1
+    /// ([`Curve1D::eval`]). Callers that need display-bounded pixels apply the
+    /// display transform, which is where clipping belongs.
     pub fn eval_cpu(&self, rgb_cam: [f32; 3]) -> [f32; 3] {
         // 1. Camera-native → working-space matrix.
         let mut rgb = mul_f32(&self.cam_to_working, rgb_cam);
@@ -751,5 +836,117 @@ mod tests {
                 "amount=0 curve not identity at {x}"
             );
         }
+    }
+
+    /// The default look's curve, resolved the way the raw source path resolves
+    /// it, which is the curve every raw highlight actually goes through.
+    fn default_look_curve() -> Curve1D {
+        Curve1D::from_spline_amount(&crate::look::author_lightbox_color_v1().tone_curve, 1.0)
+    }
+
+    /// Distinct scene values above white must stay distinct.
+    ///
+    /// This is the property the whole highlight-recovery path rests on. The
+    /// curve used to clamp its input to `[0, 1]`, so every above-white value
+    /// collapsed onto the endpoint: `eval(1.2)`, `eval(2.0)` and `eval(8.0)`
+    /// were all exactly `eval(1.0)`, which is a blown sky rendered as one flat
+    /// tone with nothing left to recover.
+    #[test]
+    fn the_tone_curve_keeps_above_white_values_distinct() {
+        let c = default_look_curve();
+        let at_one = c.eval(1.0);
+        let xs = [1.05f32, 1.2, 1.5, 2.0, 2.28, 8.0];
+        let mut prev = at_one;
+        for x in xs {
+            let y = c.eval(x);
+            assert!(
+                y > prev,
+                "eval({x}) = {y} did not exceed the previous value {prev}: the curve is \
+                 flattening the highlight latitude"
+            );
+            assert!(y.is_finite(), "eval({x}) = {y}");
+            prev = y;
+        }
+        // Not merely distinct: the excess has to survive at a usable scale, or
+        // recovery has nothing to spend. The default look's shoulder slope is
+        // ~0.87, so a stop of latitude must come through as most of a stop.
+        let excess = c.eval(2.0) - at_one;
+        assert!(
+            excess > 0.7,
+            "1.0 stops of latitude above white came through as only {excess}"
+        );
+    }
+
+    /// The extension has to meet the curve smoothly, not just continuously.
+    ///
+    /// A slope discontinuity at exactly `x == 1` would put a visible crease
+    /// into every smooth gradient that crosses the sensor's clip point, which
+    /// is precisely where highlight recovery is looked at closely.
+    #[test]
+    fn the_extension_matches_the_curve_in_value_and_slope_at_white() {
+        let c = default_look_curve();
+        let d = 1.0e-3f32;
+        // Value: the two one-sided limits agree.
+        let below = c.eval(1.0 - d);
+        let at = c.eval(1.0);
+        let above = c.eval(1.0 + d);
+        assert!((at - c.samples[c.samples.len() - 1]).abs() < 1e-6);
+        // Slope: the one-sided differences agree to a few percent (the left
+        // side is read off the sample table, the right off `tail_slope`, so
+        // they are not expected to match to the last bit).
+        let left = (at - below) / d;
+        let right = (above - at) / d;
+        assert!(
+            (left - right).abs() / left.abs().max(1e-6) < 0.05,
+            "slope jumps at white: {left} below vs {right} above"
+        );
+        assert!(
+            (right - c.tail_slope()).abs() < 1e-3,
+            "the extension does not use tail_slope: {right} vs {}",
+            c.tail_slope()
+        );
+    }
+
+    /// A curve whose tail has been flattened must pass the excess through
+    /// rather than silently reinstating the clamp.
+    #[test]
+    fn a_flat_tail_falls_back_to_passing_the_excess_through() {
+        let mut c = default_look_curve();
+        let n = c.samples.len();
+        for s in c.samples.iter_mut().skip(n - 128) {
+            *s = 1.0;
+        }
+        assert_eq!(c.tail_slope(), 1.0, "a flat tail must not yield slope 0");
+        assert!((c.eval(1.75) - 1.75).abs() < 1e-5, "got {}", c.eval(1.75));
+    }
+
+    /// Below zero is deliberately still clamped, and in-range evaluation is
+    /// untouched. Pin both so the change above white cannot quietly widen.
+    #[test]
+    fn below_zero_stays_clamped_and_the_unit_interval_is_unchanged() {
+        let c = default_look_curve();
+        assert_eq!(c.eval(-0.5), c.samples[0]);
+        assert_eq!(c.eval(-40.0), c.samples[0]);
+        for i in 0..=100 {
+            let x = i as f32 / 100.0;
+            let y = c.eval(x);
+            assert!(
+                (0.0..=1.0).contains(&y),
+                "in-range input {x} left the unit interval at {y}"
+            );
+        }
+    }
+
+    /// A degenerate table must not divide by zero or return a non-finite
+    /// slope on the way to answering.
+    #[test]
+    fn degenerate_curves_extend_without_blowing_up() {
+        assert_eq!(Curve1D { samples: vec![] }.eval(3.0), 3.0);
+        assert_eq!(Curve1D { samples: vec![0.5] }.eval(3.0), 0.5);
+        let two = Curve1D {
+            samples: vec![0.0, 1.0],
+        };
+        assert_eq!(two.tail_slope(), 1.0);
+        assert!((two.eval(2.0) - 2.0).abs() < 1e-6);
     }
 }

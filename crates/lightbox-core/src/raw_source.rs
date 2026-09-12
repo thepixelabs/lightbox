@@ -60,6 +60,29 @@
 //! from the same solver the matrix does, so the number the user sees and the
 //! matrix the pixels went through can never disagree.
 //!
+//! # Highlight latitude, and where it survives
+//!
+//! The pixels this provider emits are **not bounded by 1**, deliberately. A
+//! sensor's channels all saturate at the same raw level, but a scene is not
+//! neutral at that level, so under daylight green reaches the white level
+//! roughly a stop before red does. A highlight that has clipped green is
+//! therefore still carrying real, varying, unclipped red and blue, and that
+//! difference is the raw file's highlight latitude.
+//!
+//! Nothing above throws it away. The proxy applies no white balance, so each
+//! channel keeps its own distance below the white level (step 1's matrix is
+//! what folds white balance back in, and so what turns that slack into
+//! working values above 1); `Curve1D::eval` extends the default look past 1
+//! rather than clamping there; and the `Rgba16F` pack is a plain
+//! `f16::from_f32`, which carries to ~65504. On `canon-eos-350d.cr2` 2.29 %
+//! of the frame leaves here above 1, peaking at 2.28, about 1.2 stops.
+//!
+//! `global.tone_recovery` is what spends it: its highlight weight saturates
+//! above 0.72 luma, so a positive `highlights` scales that whole region by one
+//! constant factor, which maps the above-1 structure back into range with its
+//! relative differences intact. Without the latitude that node has a flat
+//! ceiling to work on and can only make white into grey.
+//!
 //! # Failure is disclosed, never silent
 //!
 //! The proxy can be missing or can crash on a file no one has tested. When that

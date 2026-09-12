@@ -80,7 +80,27 @@ impl HueSatTable {
 }
 
 /// Applies an interpolated `[Δhue°, Δsat×, Δval×]` delta to an HSV sample,
-/// wrapping hue and clamping sat/value.
+/// wrapping hue, clamping saturation, and floating value at the top.
+///
+/// **Saturation is clamped, value is not**, and the asymmetry is not an
+/// oversight. Saturation is `(max - min) / max`, a ratio that is `[0, 1]` by
+/// its own definition, so a `Δsat×` that pushes it past 1 is meaningless and
+/// clamping is the only sane reading. Value is the channel maximum of
+/// scene-linear working RGB, which has no such ceiling: a highlight that
+/// clipped in one sensor channel arrives here above 1 (see
+/// `transform::Curve1D`'s docs for where that comes from).
+///
+/// Clamping value was worse than losing the headroom. `hsv_to_rgb` rebuilds
+/// all three channels *from* value, so capping `v` at 1 rescaled the whole
+/// pixel by `1 / v`: on `canon-eos-350d.cr2` a blown-sky pixel that should
+/// have left here near `[1.95, 1.13, 1.63]` came out `[1.0, 0.62, 0.85]`,
+/// which is not the same color one stop down, it is a different, darker,
+/// more saturated one. Only the low end is held, at 0, so a negative
+/// out-of-gamut channel cannot flip the reconstruction inside out.
+///
+/// The value *axis lookup* is unaffected and still clamps: `axis_coord` holds
+/// at the table's top node for any `v >= 1`, which is right, holding the last
+/// authored delta beats extrapolating a LUT off its own end.
 fn apply_delta(hsv: [f32; 3], delta: [f32; 3]) -> [f32; 3] {
     let mut h = hsv[0] + delta[0];
     // Wrap hue into [0, 360).
@@ -89,7 +109,7 @@ fn apply_delta(hsv: [f32; 3], delta: [f32; 3]) -> [f32; 3] {
         h += 360.0;
     }
     let s = (hsv[1] * delta[1]).clamp(0.0, 1.0);
-    let v = (hsv[2] * delta[2]).clamp(0.0, 1.0);
+    let v = (hsv[2] * delta[2]).max(0.0);
     [h, s, v]
 }
 
@@ -301,5 +321,76 @@ mod tests {
         let a = lin.eval([0.0, 0.0, v])[2];
         let b = srgb.eval([0.0, 0.0, v])[2];
         assert!((a - b).abs() > 1e-3, "encodings should differ: {a} vs {b}");
+    }
+
+    /// Value must pass through above 1 rather than being capped there.
+    ///
+    /// `value` is the channel max of scene-linear RGB, and `hsv_to_rgb`
+    /// rebuilds every channel from it, so capping it at 1 does not clip the
+    /// pixel, it rescales the whole pixel by `1 / value`. That is how a raw
+    /// file's highlight latitude used to die on the way into the graph.
+    #[test]
+    fn value_above_one_survives_the_shaping_instead_of_rescaling_the_pixel() {
+        let identity = HueSatLut {
+            dims: [1, 1, 1],
+            deltas: vec![[0.0, 1.0, 1.0]],
+            encoding: HueSatEncoding::Linear,
+        };
+        for v in [1.0f32, 1.25, 2.28, 8.0] {
+            let out = identity.eval([200.0, 0.4, v]);
+            assert!(
+                (out[2] - v).abs() < 1e-5,
+                "an identity table must return value {v} unchanged, got {}",
+                out[2]
+            );
+        }
+
+        // A real `Δval×` still applies, it is only the ceiling that is gone.
+        let halve = HueSatLut {
+            dims: [1, 1, 1],
+            deltas: vec![[0.0, 1.0, 0.5]],
+            encoding: HueSatEncoding::Linear,
+        };
+        approx(halve.eval([0.0, 0.0, 3.0]), [0.0, 0.0, 1.5], 1e-5);
+    }
+
+    /// The default look's highlight desaturation guard reaches an above-white
+    /// pixel and desaturates it *without* pulling it down to white.
+    ///
+    /// This is the end-to-end shape of the bug that was here: the guard is
+    /// authored at the top value node, so every recoverable highlight goes
+    /// through it, and it used to take the headroom with it.
+    #[test]
+    fn the_highlight_desaturation_guard_keeps_the_headroom_it_shapes() {
+        let look = crate::look::author_lightbox_color_v1();
+        let table = HueSatTable::from_lut(look.hue_sat.as_ref().expect("v1 ships shaping"));
+        // A blown-sky pixel of the kind canon-eos-350d.cr2 produces: red well
+        // above white because white balance scaled it, green near white.
+        let hsv_in = [30.0f32, 0.38, 1.95];
+        let out = table.eval(hsv_in);
+        assert!(
+            out[2] > 1.9,
+            "the guard must not cap value: {} came back from {}",
+            out[2],
+            hsv_in[2]
+        );
+        assert!(
+            out[1] < hsv_in[1],
+            "the guard is supposed to desaturate: {} vs {}",
+            out[1],
+            hsv_in[1]
+        );
+    }
+
+    /// Saturation is a ratio and stays clamped: the asymmetry with value is
+    /// deliberate, so pin it.
+    #[test]
+    fn saturation_is_still_clamped_to_one() {
+        let boost = HueSatLut {
+            dims: [1, 1, 1],
+            deltas: vec![[0.0, 4.0, 1.0]],
+            encoding: HueSatEncoding::Linear,
+        };
+        assert!((boost.eval([0.0, 0.9, 1.5])[1] - 1.0).abs() < 1e-6);
     }
 }
