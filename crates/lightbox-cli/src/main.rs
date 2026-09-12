@@ -101,6 +101,11 @@ USAGE:
 
   E09 edit state / history / presets / XMP (headless):
   lightbox-cli edit set   --catalog <dir> --image <id> <param>=<value> [<param>=<value> ...]
+      <param> is a tone/presence scalar (exposure, contrast, ...) or wb.
+      wb=<kelvin>[,<tint>] sets an absolute white point; on a raw file that is
+      the temperature the camera matrices are interpolated at, exactly what the
+      shell'''s Temp slider writes. wb=asshot|auto|daylight|cloudy|shade|
+      tungsten|fluorescent|flash select the named modes.
   lightbox-cli edit get   --catalog <dir> --image <id> [--json]
   lightbox-cli history    --catalog <dir> --image <id> [--json]
   lightbox-cli step-to    --catalog <dir> --image <id> --seq <n>

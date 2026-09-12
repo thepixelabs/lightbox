@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+use lightbox_color::WbMode;
+use lightbox_edit::WhiteBalance;
 use lightbox_jobs::{CancelToken, Class};
 use lightbox_preview::{
     AssetLocator, PreviewClass, PreviewColorspace, PreviewError, PreviewProvider, PreviewState,
@@ -256,6 +258,78 @@ impl SourceProvider for PreviewSourceProvider {
 // The router: raw files to the sensor path, everything else exactly as before.
 // ---------------------------------------------------------------------------
 
+/// The white balance the **source decode** applies, given what the render
+/// graph is going to apply after it.
+///
+/// # Why this is not just [`wb_mode_for`]
+///
+/// White balance on a raw file belongs in the camera-to-working matrix, and
+/// [`crate::raw_source`] can now put it there. The render graph, however,
+/// still white-balances too: `RecipeCompiler::compile` splices
+/// `global::build_wb_segment` in after the source stage
+/// (`crates/lightbox-render/src/ng/compile/mod.rs:271`) for exactly those
+/// recipes where `resolve_temp_tint` yields a `(Kelvin, tint)` pair, that is
+/// `Preset` and `Custom` but not `AsShot`/`Auto`, and that node applies
+/// `lightbox_color::wb::non_raw_wb_matrix`, a working-space Bradford CAT
+/// anchored on D50. It was written for the case where no camera profile
+/// reaches the graph at all (see that node's own module docs), and the
+/// compiler is explicit that stage selection comes from `recipe.global`
+/// and nothing else (`compile/mod.rs:226`).
+///
+/// Note that `SourceDesc::source_kind` is not the missing signal.
+/// `lightbox_render::ng::SourceKind` is `Rgb` vs `Raw { cfa }`, that is
+/// "does the graph still have to demosaic", and a raw file arriving through
+/// this router is already demosaiced, so `Rgb` is the correct value for it.
+/// The graph has no way at all to know that the pixels it was handed were
+/// already white-balanced through a camera profile.
+///
+/// So for a raw file, letting the source apply `Custom { 3000 K }` as well
+/// means the picture is white-balanced twice. Measured on
+/// `fixtures/fujifilm-x100.raf` rendered at 240 px through `lightbox-cli`,
+/// mean R/B of the output: as-shot `0.989`, `wb=3000` `0.397` with the graph
+/// alone, `0.063` with both stages. Cutting R/B by a factor of two and a half
+/// is a plausible answer for a 5035 K file taken to 3000 K; cutting it by
+/// fifteen is not. That is a slider that moves and lies, so this returns
+/// `WbMode::AsShot` for the
+/// values the graph is going to handle, which keeps every rendered pixel
+/// byte-identical to what it was before the sensor path learned about white
+/// balance at all.
+///
+/// # What has to change, and where
+///
+/// All of it is in `crates/lightbox-render/`:
+///
+/// 1. Something on the pixels-in seam has to say "this source already
+///    carries its white balance". `SourceImage` (`ng/source/mod.rs:66`) is
+///    where the source describes itself to the engine, and `SourceDesc`
+///    (`compile/mod.rs:41`) is what the compiler reads, so the signal has to
+///    reach the second from the first. Today `Shared::process` builds
+///    `SourceDesc` before it fetches (`engine.rs:387`), which is the same
+///    ordering problem that file already flags at `compile/mod.rs:48`.
+/// 2. `global::build_wb_segment` must then skip `global.wb` for such a
+///    source (`compile/mod.rs:271`).
+/// 3. `Shared::source_key` must fold the white balance into the source
+///    stage's cache key (`engine.rs:498`). Today its only request-derived
+///    ingredients are `req.image`, `req.pv` and the source node's params,
+///    and that node's params are a constant empty block, so a white-balance
+///    change never re-fetches. `Engine::release_source_pin` is not a
+///    substitute: it drops the host RAM pin, but the pinned uploaded tile in
+///    the node cache is consulted first (`engine.rs:416`) and nothing public
+///    ever drops that. `crates/lightbox-core/tests/raw_wb_source_cache.rs`
+///    measures this.
+///
+/// With 1 and 2 done, this function becomes [`wb_mode_for`] and can be
+/// deleted. With 3 done as well, the shell's Temp slider moves the picture
+/// live rather than only on a fresh process.
+fn source_wb_for(wb: &WhiteBalance) -> WbMode {
+    match crate::raw_source::wb_mode_for(wb) {
+        // The graph adds `global.wb` for exactly these, so the source must
+        // not also apply them. See above.
+        WbMode::TempTint { .. } => WbMode::AsShot,
+        resolved => resolved,
+    }
+}
+
 /// Sends raw files to [`RawSourceProvider`] and everything else to
 /// [`PreviewSourceProvider`], unchanged.
 ///
@@ -269,11 +343,33 @@ impl SourceProvider for PreviewSourceProvider {
 /// canvas badge and the status notice both read. Falling back silently is what
 /// the editor used to do, and it is the reason the website had to apologise for
 /// its own behaviour.
+///
+/// # White balance is read here, at fetch time
+///
+/// A raw decode bakes the white point into the camera-to-working matrix
+/// (`raw_source`'s module docs), so the router has to know the recipe's white
+/// balance before it can ask for pixels. It reads it from the edit hub
+/// ([`RoutingSourceProvider::white_balance_for`]) rather than being told,
+/// because the hub is the one live copy and a second per-image map kept in
+/// step by hand would be a drift bug waiting to happen.
+///
+/// What it then asks the decode for is [`source_wb_for`]'s answer, not the
+/// recipe's value verbatim: the render graph still white-balances after the
+/// source does, and two white balances are worse than one. That function
+/// carries the evidence and the list of what has to change in
+/// `crates/lightbox-render/` before the source can take the whole job.
 pub(crate) struct RoutingSourceProvider {
     rendered: Arc<PreviewSourceProvider>,
     raw: Option<Arc<crate::raw_source::RawSourceProvider>>,
     locator: Arc<dyn AssetLocator>,
     status: crate::raw_source::StatusMap,
+    /// The edit registry, so a raw decode can read the recipe's white
+    /// balance. Set once by `Session::open` right after the hub exists (the
+    /// engine, and therefore this router, has to be constructed first), so
+    /// it is `None` only during construction, when nothing renders yet.
+    edits: std::sync::OnceLock<Arc<crate::edit_hub::EditHub>>,
+    /// Each raw file's own as-shot white point, filled in as files decode.
+    as_shot: crate::raw_source::AsShotMap,
 }
 
 impl RoutingSourceProvider {
@@ -293,7 +389,19 @@ impl RoutingSourceProvider {
             raw,
             locator,
             status: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            edits: std::sync::OnceLock::new(),
+            as_shot: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Hands the router the edit registry it reads white balance from.
+    ///
+    /// Separate from [`RoutingSourceProvider::new`] purely because of
+    /// construction order: the engine needs a `SourceProvider` before the
+    /// session has an `EditHub`. Calling it twice is a no-op, the first
+    /// binding wins.
+    pub(crate) fn bind_edits(&self, hub: Arc<crate::edit_hub::EditHub>) {
+        let _ = self.edits.set(hub);
     }
 
     /// A handle on the status map, for the session to expose to the shell.
@@ -301,9 +409,45 @@ impl RoutingSourceProvider {
         Arc::clone(&self.status)
     }
 
+    /// A handle on the as-shot white-point map, same purpose.
+    pub(crate) fn as_shot_map(&self) -> crate::raw_source::AsShotMap {
+        Arc::clone(&self.as_shot)
+    }
+
+    /// The white balance a raw decode of `image` must be built around.
+    ///
+    /// The live working recipe first, so a slider drag is honoured without
+    /// waiting for a durable commit; then the persisted recipe, which is the
+    /// case that matters headlessly (`lightbox-cli render` never opens an
+    /// edit session, it just reads the stored state). Falls back to
+    /// `AsShot`, which is also the recipe's own default, so an image nothing
+    /// has ever edited decodes exactly as it did before this existed.
+    ///
+    /// The persisted read is deliberately `open_state`, not `EditHub::open`:
+    /// rendering an image must not register an edit session for it as a side
+    /// effect.
+    fn white_balance_for(&self, image: ImageId) -> WhiteBalance {
+        let Some(hub) = self.edits.get() else {
+            return WhiteBalance::AsShot;
+        };
+        if let Some(recipe) = hub.working_recipe(image) {
+            return recipe.global.white_balance;
+        }
+        hub.store()
+            .open_state(image)
+            .map(|st| st.recipe.global.white_balance)
+            .unwrap_or_default()
+    }
+
     fn record(&self, image: ImageId, st: crate::RawSourceStatus) {
         if let Ok(mut m) = self.status.write() {
             m.insert(image, st);
+        }
+    }
+
+    fn record_as_shot(&self, image: ImageId, wb: crate::raw_source::AsShotWhiteBalance) {
+        if let Ok(mut m) = self.as_shot.write() {
+            m.insert(image, wb);
         }
     }
 }
@@ -343,8 +487,10 @@ impl SourceProvider for RoutingSourceProvider {
 
         // Safe: `is_raw` is only true when `located` is `Some`.
         let asset = located.expect("is_raw implies a located asset");
-        match raw.decode(&asset.path, asset.orientation, cancel) {
-            Ok(img) => {
+        let wb = source_wb_for(&self.white_balance_for(image));
+        match raw.decode(&asset.path, asset.orientation, &wb, cancel) {
+            Ok(decoded) => {
+                let img = decoded.image;
                 self.record(
                     image,
                     crate::RawSourceStatus::Sensor {
@@ -352,6 +498,9 @@ impl SourceProvider for RoutingSourceProvider {
                         height: img.full_extent.h,
                     },
                 );
+                if let Some(as_shot) = decoded.as_shot {
+                    self.record_as_shot(image, as_shot);
+                }
                 Box::pin(async move { Ok(img) })
             }
             Err(reason) => {
@@ -416,6 +565,75 @@ mod tests {
                 "{space:?} must never lift as if it were already working-space linear",
             );
         }
+    }
+
+    /// Does the compiled graph white-balance this recipe itself?
+    ///
+    /// Asked of the real shipping compiler rather than reasoned about, so the
+    /// test below cannot quietly agree with a stale reading of
+    /// `lightbox-render`.
+    fn graph_white_balances(wb: lightbox_edit::WhiteBalance) -> bool {
+        use lightbox_render::ng::{shipping_compiler, NodeId, SourceDesc, SourceKind};
+        let mut recipe = lightbox_edit::Recipe::identity(lightbox_types::PV_M0);
+        recipe.global.white_balance = wb;
+        let src = SourceDesc {
+            image: ImageId(1),
+            full_extent: Extent { w: 16, h: 16 },
+            // Demosaiced RGB, which is what the raw path delivers today too.
+            source_kind: SourceKind::Rgb,
+            colorimetry: SourceColorimetry::default(),
+        };
+        shipping_compiler()
+            .compile(&recipe, lightbox_types::PV_M0, &src)
+            .expect("the identity recipe compiles")
+            .node_index(NodeId("global.wb"))
+            .is_some()
+    }
+
+    /// **The source must not white-balance what the graph is going to
+    /// white-balance.** The two stages compose by multiplication, so applying
+    /// both means twice the correction and a Temp slider whose number does
+    /// not describe the picture.
+    ///
+    /// The condition is read off the real compiler, so when `lightbox-render`
+    /// stops adding `global.wb` for raw sources this test starts failing and
+    /// points at the function to delete.
+    #[test]
+    fn the_source_declines_whatever_the_graph_already_handles() {
+        use lightbox_edit::{WbPreset, WhiteBalance};
+        for wb in [
+            WhiteBalance::AsShot,
+            WhiteBalance::Auto,
+            WhiteBalance::Preset(WbPreset::Tungsten),
+            WhiteBalance::Preset(WbPreset::Shade),
+            WhiteBalance::Custom {
+                temp_k: 3000.0,
+                tint: 0.0,
+            },
+            WhiteBalance::Custom {
+                temp_k: 9000.0,
+                tint: 20.0,
+            },
+        ] {
+            let source_applies = source_wb_for(&wb) != WbMode::AsShot;
+            assert!(
+                !(source_applies && graph_white_balances(wb)),
+                "{wb:?} would be white-balanced twice: the source resolves it to \
+                 {:?} and the graph still adds global.wb",
+                source_wb_for(&wb)
+            );
+        }
+    }
+
+    /// The neutral modes reach the decode untouched, which is what keeps an
+    /// unedited raw file byte-identical to what it rendered before the sensor
+    /// path knew about white balance.
+    #[test]
+    fn the_neutral_modes_still_reach_the_decode_as_as_shot() {
+        use lightbox_edit::WhiteBalance;
+        assert_eq!(source_wb_for(&WhiteBalance::default()), WbMode::AsShot);
+        assert_eq!(source_wb_for(&WhiteBalance::AsShot), WbMode::AsShot);
+        assert_eq!(source_wb_for(&WhiteBalance::Auto), WbMode::AsShot);
     }
 
     /// The P3 tag really does select different colour maths, not just a

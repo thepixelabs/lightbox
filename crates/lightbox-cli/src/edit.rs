@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use lightbox_core::{
     CloseOpts, ClosePolicy, Command, Core, CoreConfig, EditCommand, Event, ParamDelta, ParamGroup,
-    ParamId, ParamSubset, ParamValue, PresetId, Session, StepLabel,
+    ParamId, ParamSubset, ParamValue, PresetId, Session, StepLabel, WbPreset, WhiteBalance,
 };
 use lightbox_types::{ImageId, SnapshotId};
 
@@ -132,18 +132,80 @@ const SCALAR_PARAMS: &[(&str, ParamId)] = &[
     ("angle", ParamId::Angle),
 ];
 
+/// The named `wb=` modes, alongside the `wb=<kelvin>[,<tint>]` form.
+const WB_MODES: &[(&str, WhiteBalance)] = &[
+    ("asshot", WhiteBalance::AsShot),
+    ("as-shot", WhiteBalance::AsShot),
+    ("auto", WhiteBalance::Auto),
+    ("daylight", WhiteBalance::Preset(WbPreset::Daylight)),
+    ("cloudy", WhiteBalance::Preset(WbPreset::Cloudy)),
+    ("shade", WhiteBalance::Preset(WbPreset::Shade)),
+    ("tungsten", WhiteBalance::Preset(WbPreset::Tungsten)),
+    ("fluorescent", WhiteBalance::Preset(WbPreset::Fluorescent)),
+    ("flash", WhiteBalance::Preset(WbPreset::Flash)),
+];
+
+/// Parses a `wb=` value: a named mode, or `<kelvin>` / `<kelvin>,<tint>`.
+///
+/// The numeric form is the one that matters: on a raw file the Kelvin is
+/// absolute, the same white point the sensor decode builds the
+/// camera-to-working matrix around, so `wb=3000` and `wb=8000` are two
+/// genuinely different renders of the same file and `wb=8000` is the warmer
+/// of the two. This is the headless way to prove that, which is why the
+/// structured `WhiteBalance` leaf gets a `key=value` spelling when the other
+/// structured leaves do not.
+fn parse_wb(val: &str) -> Result<WhiteBalance, UsageError> {
+    if let Some((_, wb)) = WB_MODES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(val))
+    {
+        return Ok(*wb);
+    }
+    let (k, t) = match val.split_once(',') {
+        Some((k, t)) => (k.trim(), t.trim()),
+        None => (val.trim(), "0"),
+    };
+    let temp_k: f32 = k.parse().map_err(|_| {
+        let names: Vec<&str> = WB_MODES.iter().map(|(n, _)| *n).collect();
+        UsageError(format!(
+            "edit set wb: expected <kelvin>[,<tint>] or one of {}, got {val:?}",
+            names.join(", ")
+        ))
+    })?;
+    let tint: f32 = t
+        .parse()
+        .map_err(|_| UsageError(format!("edit set wb: expected a tint number, got {t:?}")))?;
+    Ok(WhiteBalance::Custom { temp_k, tint })
+}
+
+/// Renders a `WhiteBalance` back in the syntax [`parse_wb`] accepts.
+fn wb_to_string(wb: &WhiteBalance) -> String {
+    match wb {
+        WhiteBalance::Custom { temp_k, tint } => format!("{temp_k},{tint}"),
+        other => WB_MODES
+            .iter()
+            .find(|(_, w)| w == other)
+            .map(|(name, _)| (*name).to_owned())
+            .unwrap_or_else(|| format!("{other:?}")),
+    }
+}
+
 fn parse_param_kv(s: &str) -> Result<(ParamId, ParamValue), UsageError> {
     let (key, val) = s.split_once('=').ok_or_else(|| {
         UsageError(format!(
             "malformed edit set argument {s:?} (want key=value)"
         ))
     })?;
+    if key.eq_ignore_ascii_case("wb") {
+        return Ok((ParamId::WhiteBalance, ParamValue::Wb(parse_wb(val)?)));
+    }
     let id = SCALAR_PARAMS
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(key))
         .map(|(_, id)| *id)
         .ok_or_else(|| {
-            let names: Vec<&str> = SCALAR_PARAMS.iter().map(|(n, _)| *n).collect();
+            let mut names: Vec<&str> = SCALAR_PARAMS.iter().map(|(n, _)| *n).collect();
+            names.push("wb");
             UsageError(format!(
                 "unknown edit param {key:?} (supported: {})",
                 names.join(", ")
@@ -219,6 +281,9 @@ fn cmd_edit_get(args: &[String]) -> anyhow::Result<u8> {
                 if let ParamValue::F32(v) = state.recipe.get(*id) {
                     println!("  {name:<12} {v}");
                 }
+            }
+            if let ParamValue::Wb(wb) = state.recipe.get(ParamId::WhiteBalance) {
+                println!("  {:<12} {}", "wb", wb_to_string(&wb));
             }
         }
         close_quiet(session)?;
@@ -750,4 +815,70 @@ fn cmd_xmp_status(args: &[String]) -> anyhow::Result<u8> {
         close_quiet(session)?;
         Ok(0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `wb=` spelling round-trips, and the numeric form really is
+    /// absolute Kelvin rather than an offset. `wb=5500` has to mean 5500 K,
+    /// because that is the number the sensor decode interpolates the camera
+    /// matrices at.
+    #[test]
+    fn wb_parses_and_prints_the_same_syntax() {
+        for text in [
+            "asshot",
+            "auto",
+            "daylight",
+            "cloudy",
+            "shade",
+            "tungsten",
+            "fluorescent",
+            "flash",
+        ] {
+            let wb = parse_wb(text).expect(text);
+            assert_eq!(wb_to_string(&wb), text, "{text} must round-trip");
+        }
+        assert_eq!(
+            parse_wb("5500").unwrap(),
+            WhiteBalance::Custom {
+                temp_k: 5500.0,
+                tint: 0.0
+            }
+        );
+        assert_eq!(
+            parse_wb(" 3200 , -12.5 ").unwrap(),
+            WhiteBalance::Custom {
+                temp_k: 3200.0,
+                tint: -12.5
+            }
+        );
+        assert_eq!(wb_to_string(&parse_wb("3200,-12.5").unwrap()), "3200,-12.5");
+        // Case is not significant for the named modes.
+        assert_eq!(parse_wb("Tungsten").unwrap(), parse_wb("tungsten").unwrap());
+    }
+
+    /// A value that is neither a mode nor a number is a usage error, not a
+    /// silent fallback to some default temperature.
+    #[test]
+    fn a_nonsense_wb_value_is_refused() {
+        assert!(parse_wb("warmish").is_err());
+        assert!(parse_wb("5500,green").is_err());
+        assert!(parse_wb("").is_err());
+    }
+
+    /// `wb=` reaches the recipe as the structured leaf, not as an `F32`.
+    #[test]
+    fn wb_parses_as_the_white_balance_param() {
+        let (id, value) = parse_param_kv("wb=4100,3").expect("wb is a known param");
+        assert_eq!(id, ParamId::WhiteBalance);
+        assert_eq!(
+            value,
+            ParamValue::Wb(WhiteBalance::Custom {
+                temp_k: 4100.0,
+                tint: 3.0
+            })
+        );
+    }
 }

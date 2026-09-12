@@ -168,6 +168,9 @@ struct SessionInner {
     /// source router. The canvas badge and the status notice both read it, so
     /// the two can never disagree about what the user is looking at.
     raw_status: crate::raw_source::StatusMap,
+    /// Each raw file's own as-shot white point, written by the source router
+    /// when the file decodes. Seeds the Temp/Tint sliders.
+    raw_as_shot: crate::raw_source::AsShotMap,
     edit_hub: Arc<EditHub>,
     /// E04 (spec §4.5): the session working-set model, `Session::
     /// working_set()`'s backing store.
@@ -284,7 +287,9 @@ impl Session {
             Arc::clone(&locator),
         ));
         let raw_status = router.status_map();
-        let source_provider: Arc<dyn SourceProvider> = router;
+        let raw_as_shot = router.as_shot_map();
+        let source_provider: Arc<dyn SourceProvider> =
+            Arc::clone(&router) as Arc<dyn SourceProvider>;
         let backend = if gpu.is_some() {
             BackendPref::Auto
         } else {
@@ -383,6 +388,13 @@ impl Session {
             events.clone(),
         );
 
+        // A raw decode bakes white balance into the camera-to-working matrix,
+        // so the source router has to be able to read the recipe's white
+        // balance before it asks the proxy for pixels (`raw_source`'s module
+        // docs). The hub is the one live copy of that recipe; the router
+        // reads it rather than being pushed a shadow of it.
+        router.bind_edits(Arc::clone(&edit_hub));
+
         // DeviceDegraded seam (spec §3.8): relay the engine's device-lost /
         // degraded-to-CPU events onto the core event bus. `ng::Engine::events`
         // is a broadcast channel (not a callback like the E01 seed's
@@ -457,6 +469,7 @@ impl Session {
                 previews,
                 preview_service,
                 raw_status,
+                raw_as_shot,
                 edit_hub,
                 working_set,
                 events,
@@ -568,6 +581,26 @@ impl Session {
             .ok()
             .and_then(|m| m.get(&image).cloned())
             .unwrap_or(crate::RawSourceStatus::NotRaw)
+    }
+
+    /// The as-shot white point of `image`, absolute `(Kelvin, tint)`, once
+    /// the file has been decoded through the sensor path at least once.
+    ///
+    /// `None` for a rendered file, for a raw file that fell back to its
+    /// embedded preview, and for a raw file nothing has rendered yet. That
+    /// last case is why this is an `Option` rather than a default: the
+    /// as-shot value lives in the raw metadata, so before the first decode
+    /// there is genuinely nothing to report, and a UI that showed a number
+    /// anyway would be inventing one.
+    pub fn raw_as_shot_white_balance(
+        &self,
+        image: ImageId,
+    ) -> Option<crate::raw_source::AsShotWhiteBalance> {
+        self.inner
+            .raw_as_shot
+            .read()
+            .ok()
+            .and_then(|m| m.get(&image).copied())
     }
 
     /// The render scheduler (spec §3.7): latest-wins coalescing + the canvas

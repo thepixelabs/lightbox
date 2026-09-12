@@ -31,10 +31,17 @@
 //!
 //! # Raw vs. rendered (spec §4 WB row, E2's per-control variants)
 //!
-//! * `Raw`: Kelvin temp scale (unit "K"), tint, and the mode combo
-//!   ("As Shot"/Auto/presets/Custom). Dragging temp/tint under a non-
-//!   Custom mode switches to Custom seeded from the neutral placeholder
-//!   (the camera's actual as-shot Kelvin needs raw metadata, E10).
+//! * `Raw`: **absolute** Kelvin temp scale (unit "K"), tint, and the mode
+//!   combo ("As Shot"/Auto/presets/Custom). The scale is absolute in the
+//!   Lightroom sense: the number is the white point the camera's own
+//!   `ColorMatrix1`/`ColorMatrix2` are interpolated at when the sensor path
+//!   builds the camera-to-working matrix (`lightbox_core`'s `raw_source`
+//!   module docs), not a UI offset. Under a non-Custom mode the sliders
+//!   read the file's **as-shot** Kelvin and tint, from
+//!   [`EditBinding::as_shot_white_balance`], so dragging switches to Custom
+//!   starting from the temperature the shot was actually taken at. Before
+//!   the file's first sensor decode there is no as-shot value to show yet
+//!   and the sliders keep the neutral placeholder they always used.
 //! * `Rendered`: "Temp (relative)"/"Tint (relative)" sliders, no Kelvin
 //!   display, no As Shot combo. The recipe's WB leaf has no relative-unit
 //!   carrier, so the relative temp value maps affinely onto the leaf's
@@ -191,12 +198,30 @@ fn render_neutral_temp_tint() -> (f64, f64) {
     lightbox_color::wb::temp_tint_from_working_neutral([1.0, 1.0, 1.0])
 }
 
-/// The current custom temp/tint, or the neutral placeholder for the
-/// non-Custom modes (As Shot/Auto/presets carry no numeric temp at M1).
-fn wb_temp_tint(wb: &WhiteBalance) -> (f64, f64) {
+/// The seed the non-Custom modes (As Shot/Auto/presets) display, and that a
+/// drag turns into a `Custom` value.
+///
+/// On a raw file this is the file's own as-shot white point, solved through
+/// the camera's colour matrices, which is what makes the absolute Kelvin
+/// reading true: "As Shot" reads the temperature the shot was taken at, and
+/// the first pixel of a drag is a measured distance from it rather than from
+/// an invented anchor.
+///
+/// Everything else, and a raw file whose sensor decode has not completed
+/// yet, falls back to [`render_neutral_temp_tint`], the identity point of
+/// the matrix the render graph's `WhiteBalanceNode` actually applies. That
+/// fallback is exactly the behaviour this control had before an as-shot
+/// value was available, so the unknown case is unchanged rather than newly
+/// wrong.
+fn wb_seed_temp_tint(as_shot: Option<(f64, f64)>) -> (f64, f64) {
+    as_shot.unwrap_or_else(render_neutral_temp_tint)
+}
+
+/// The current custom temp/tint, or `seed` for the non-Custom modes.
+fn wb_temp_tint(wb: &WhiteBalance, seed: (f64, f64)) -> (f64, f64) {
     match wb {
         WhiteBalance::Custom { temp_k, tint } => (*temp_k as f64, *tint as f64),
-        _ => render_neutral_temp_tint(),
+        _ => seed,
     }
 }
 
@@ -229,8 +254,16 @@ fn wb_section(ui: &mut egui::Ui, ctx: &mut DevelopCtx<'_>) {
         ParamValue::Wb(wb) => wb,
         _ => WhiteBalance::AsShot,
     };
-    let (temp_k, tint) = wb_temp_tint(&wb);
     let raw = ctx.source_kind == SourceKind::Raw;
+    // Absolute Kelvin only means something against the file's own as-shot
+    // white point, and only a raw file has one. A rendered file keeps the
+    // relative scale below and never consults this.
+    let as_shot = if raw {
+        ctx.edit.as_shot_white_balance()
+    } else {
+        None
+    };
+    let (temp_k, tint) = wb_temp_tint(&wb, wb_seed_temp_tint(as_shot));
 
     // Mode combo, raw only (§4: no "As Shot" camera value for rendered).
     if raw {
@@ -672,6 +705,9 @@ mod tests {
 
     struct RecordingBinding {
         values: HashMap<ParamId, ParamValue>,
+        /// What `EditBinding::as_shot_white_balance` reports: `Some` for a
+        /// raw file whose sensor decode has landed, `None` otherwise.
+        as_shot: Option<(f64, f64)>,
     }
 
     impl RecordingBinding {
@@ -693,7 +729,10 @@ mod tests {
                 values.insert(p, ParamValue::F32(0.0));
             }
             values.insert(ParamId::WhiteBalance, ParamValue::Wb(WhiteBalance::AsShot));
-            RecordingBinding { values }
+            RecordingBinding {
+                values,
+                as_shot: None,
+            }
         }
     }
 
@@ -742,21 +781,34 @@ mod tests {
         fn create_snapshot(&mut self, _name: &str) {}
         fn restore_snapshot(&mut self, _snapshot: SnapshotId) {}
         fn rename_snapshot(&mut self, _snapshot: SnapshotId, _name: &str) {}
+        fn as_shot_white_balance(&self) -> Option<(f64, f64)> {
+            self.as_shot
+        }
     }
 
     struct PanelApp {
         binding: RecordingBinding,
+        source_kind: SourceKind,
     }
 
     fn panel_harness() -> Harness<'static, PanelApp> {
+        harness_for(SourceKind::Rendered, None)
+    }
+
+    /// The panel over a source of `kind`, with `as_shot` standing in for
+    /// what the sensor decode reported for the bound file.
+    fn harness_for(kind: SourceKind, as_shot: Option<(f64, f64)>) -> Harness<'static, PanelApp> {
+        let mut binding = RecordingBinding::new();
+        binding.as_shot = as_shot;
         let app = PanelApp {
-            binding: RecordingBinding::new(),
+            binding,
+            source_kind: kind,
         };
         let mut harness = Harness::new_ui_state(
             |ui, app: &mut PanelApp| {
                 let mut gizmos = GizmoLayer::new();
                 let mut ctx = DevelopCtx {
-                    source_kind: SourceKind::Rendered,
+                    source_kind: app.source_kind,
                     edit: &mut app.binding,
                     gizmos: &mut gizmos,
                 };
@@ -766,6 +818,87 @@ mod tests {
         );
         harness.set_size(egui::vec2(320.0, 600.0));
         harness
+    }
+
+    /// The numeric value a slider is actually displaying, read off the
+    /// AccessKit node rather than re-derived, so this asserts the readout
+    /// and not a second copy of the arithmetic.
+    #[track_caller]
+    fn shown(harness: &Harness<'static, PanelApp>, label: &str) -> f64 {
+        harness
+            .get_by_role_and_label(egui::accesskit::Role::Slider, label)
+            .accesskit_node()
+            .numeric_value()
+            .unwrap_or_else(|| panic!("{label} exposes a numeric value"))
+    }
+
+    /// **The absolute-Kelvin readout.** On a raw file under "As Shot" the
+    /// Temp and Tint sliders must show the file's OWN as-shot white point,
+    /// the value the camera matrices were interpolated at, not a
+    /// placeholder. Anything else and the Kelvin number describes nothing:
+    /// it is the difference between "this shot was taken at 5035 K" and
+    /// "this control happens to sit near the middle".
+    #[test]
+    fn a_raw_file_reads_its_own_as_shot_kelvin() {
+        // The measured as-shot white point of `fixtures/fujifilm-x100.raf`,
+        // solved through its camera matrices by the sensor decode.
+        let mut harness = harness_for(SourceKind::Raw, Some((5034.77, 2.71)));
+        harness.run();
+
+        let temp = shown(&harness, "Temp");
+        let tint = shown(&harness, "Tint");
+        assert!(
+            (temp - 5034.77).abs() < 25.0,
+            "Temp must read the file's as-shot Kelvin, showed {temp:.1}"
+        );
+        assert!(
+            (tint - 2.71).abs() < 0.5,
+            "Tint must read the file's as-shot tint, showed {tint:.2}"
+        );
+
+        // And it is genuinely the file's value, not the placeholder that
+        // happens to sit nearby: the render matrix's own neutral point is a
+        // different temperature and a very different tint.
+        let (neutral_k, neutral_tint) = render_neutral_temp_tint();
+        assert!(
+            (tint - neutral_tint).abs() > 5.0,
+            "the as-shot tint {tint:.2} must not be the placeholder              {neutral_tint:.2} (neutral K {neutral_k:.0})"
+        );
+    }
+
+    /// With no as-shot value yet, which is every raw file until its first
+    /// sensor decode lands, the sliders keep the placeholder they always
+    /// used. Unknown must mean unchanged, not newly wrong.
+    #[test]
+    fn a_raw_file_without_an_as_shot_reading_keeps_the_old_placeholder() {
+        let mut harness = harness_for(SourceKind::Raw, None);
+        harness.run();
+        let (neutral_k, neutral_tint) = render_neutral_temp_tint();
+        assert!(
+            (shown(&harness, "Temp") - neutral_k).abs() < 25.0,
+            "Temp must fall back to the render matrix's neutral point"
+        );
+        assert!(
+            (shown(&harness, "Tint") - neutral_tint).abs() < 0.5,
+            "Tint must fall back to the render matrix's neutral point"
+        );
+    }
+
+    /// **The rendered path is untouched.** A JPEG or PNG has no as-shot
+    /// neutral, so it keeps the relative scale and reads 0 on an untouched
+    /// image even if an as-shot value somehow reached the binding.
+    #[test]
+    fn a_rendered_file_ignores_any_as_shot_reading() {
+        let mut harness = harness_for(SourceKind::Rendered, Some((5034.77, 2.71)));
+        harness.run();
+        assert!(
+            shown(&harness, "Temp (relative)").abs() < 0.5,
+            "the rendered temp scale stays relative and reads 0"
+        );
+        assert!(
+            shown(&harness, "Tint (relative)").abs() < 0.5,
+            "the rendered tint scale stays relative and reads 0"
+        );
     }
 
     /// **A12 AC**: the panel always reflects the recipe, no widget-local

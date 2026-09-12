@@ -76,7 +76,7 @@ pub use working_set::{ItemState, SetEpoch, SetPhase, WorkingSetItem, WorkingSetS
 // `EditHub`.
 pub use lightbox_edit::{
     EditState, HistoryStepMeta, ParamDelta, ParamGroup, ParamId, ParamSubset, ParamValue, PresetId,
-    PresetMeta, Recipe, RecipeRead, SnapshotMeta, StepLabel,
+    PresetMeta, Recipe, RecipeRead, SnapshotMeta, StepLabel, WbPreset, WhiteBalance,
 };
 pub use lightbox_meta::xmp::sync::DivergenceStatus;
 
@@ -118,4 +118,7 @@ pub use lightbox_ingest::{
     SkipReason, SkippedPath,
 };
 
-pub use raw_source::{RawFallbackReason, RawSourceProvider, RawSourceStatus};
+pub use raw_source::{
+    wb_mode_for, AsShotWhiteBalance, RawDecoded, RawFallbackReason, RawSourceProvider,
+    RawSourceStatus,
+};

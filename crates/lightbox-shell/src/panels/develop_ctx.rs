@@ -242,6 +242,26 @@ pub trait EditBinding {
     fn histogram(&self) -> Option<&HistogramData> {
         None
     }
+
+    /// The bound raw file's own as-shot white point, absolute
+    /// `(Kelvin, tint)`, solved through the camera's colour matrices by the
+    /// sensor decode (`lightbox_core::Session::raw_as_shot_white_balance`).
+    ///
+    /// This is what makes the Temp slider's Kelvin reading mean something on
+    /// a raw file: it is the temperature the shot was actually taken at, so
+    /// "As Shot" has a number and moving away from it is a measured
+    /// distance rather than an offset from a placeholder. `None` for a
+    /// rendered file (a JPEG has no as-shot neutral), for a raw file that
+    /// fell back to its embedded preview, and for a raw file before its
+    /// first decode completes, and in every one of those cases the panel
+    /// keeps the behaviour it had.
+    ///
+    /// A no-op default here, so only [`SessionEditBinding`] overrides it,
+    /// the same convention as [`EditBinding::histogram`] and every other
+    /// source-owned reader on this trait.
+    fn as_shot_white_balance(&self) -> Option<(f64, f64)> {
+        None
+    }
 }
 
 /// The real adapter (E3): E09's `EditHub` gesture registry + the command
@@ -779,6 +799,11 @@ impl EditBinding for SessionEditBinding {
 
     fn histogram(&self) -> Option<&HistogramData> {
         self.latest_histogram.as_ref()
+    }
+
+    fn as_shot_white_balance(&self) -> Option<(f64, f64)> {
+        let wb = self.session.raw_as_shot_white_balance(self.image?)?;
+        Some((wb.kelvin, wb.tint))
     }
 }
 
