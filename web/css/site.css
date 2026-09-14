@@ -2482,6 +2482,16 @@ pre{ max-width:100%; }
   .rail li{ grid-template-columns:1fr; row-gap:3px; }
   .rail li:nth-last-child(-n+2){ border-bottom:0; }
   .rail li:last-child{ border-bottom:1px solid var(--line); }
+
+  /* The step counter sits in a 46px gutter to the left of the copy. On a
+     phone that gutter is a seventh of the width, and the step sentences
+     were wrapping at about 43 characters against the lede's 60 directly
+     above them. Below this width the counter takes its own line and the
+     copy gets the full measure back. */
+  .entry-steps li{ padding-left:0; }
+  .entry-steps li::before{
+    position:static; display:block; margin-bottom:6px;
+  }
 }
 
 /* ---- 4. section 01 now carries the no-save-button argument -------------- */
