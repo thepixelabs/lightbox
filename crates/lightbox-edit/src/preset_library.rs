@@ -64,7 +64,7 @@
 //!   correction is scene-specific, not stylistic.
 
 use crate::leaves::{
-    BwMix, ColorGrade, CurvePoint, GradeWheel, HslBand, HslTable, ToneCurve, Treatment,
+    BwMix, ColorGrade, CurvePoint, GradeWheel, Grain, HslBand, HslTable, ToneCurve, Treatment,
 };
 use crate::params::{group_of, ParamDelta, ParamId, ParamSubset, ParamValue};
 
@@ -149,6 +149,20 @@ impl DeltaBuilder {
     fn texture_dehaze(self, texture: f32, dehaze: f32) -> DeltaBuilder {
         self.set(ParamId::Texture, ParamValue::F32(texture))
             .set(ParamId::Dehaze, ParamValue::F32(dehaze))
+    }
+
+    /// Film grain (`fx.grain`), each `0..=100`. Until the grain node existed
+    /// this leaf imported, stored, and rendered nothing, so no shipped preset
+    /// set it; the one preset named for it is the first.
+    fn grain(self, amount: f32, size: f32, roughness: f32) -> DeltaBuilder {
+        self.set(
+            ParamId::Grain,
+            ParamValue::Grain(Grain {
+                amount,
+                size,
+                roughness,
+            }),
+        )
     }
 
     /// Sets one HSL band's hue/sat/lum (index per the `RED..MAGENTA` consts
@@ -902,6 +916,10 @@ pub fn starter_presets() -> Vec<LibraryPreset> {
                 .black_and_white([-45.0, -20.0, 5.0, -30.0, -50.0, -65.0, -55.0, -40.0])
                 .presence(0.0, 0.0, 24.0)
                 .texture_dehaze(32.0, 0.0)
+                // Medium-fine, fairly rough: the pushed Tri-X look the name
+                // promises. Strong enough to read at print size, not so strong
+                // it eats the tonal work above.
+                .grain(35.0, 30.0, 60.0)
                 .curve(&[
                     (0.0, 0.0),
                     (0.2, 0.1),
