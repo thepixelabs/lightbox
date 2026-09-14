@@ -31,6 +31,7 @@ use lightbox_render::ng::tile::{PixelBuf, PixelFormat, TileHandle, TileView};
 use lightbox_render::ng::types::{Extent, Roi, TilePrecision};
 use lightbox_render::ng::OutputQuality;
 use lightbox_render::ng::{SourceColorimetry, SourceQuality};
+use lightbox_render_testkit::compare::{bit_adjacent, max_channel_delta};
 // A9 engine-level integration: drive a 2-node graph through `Engine::submit` on
 // both backends and compare readbacks (single-backend determinism).
 use lightbox_edit::Recipe;
@@ -438,19 +439,23 @@ fn display_gpu_matches_cpu_lightbox_color() {
     let gpu = readback_tile(&dev.device, &dev.queue, &out).expect("display readback");
 
     assert_eq!(gpu.format, PixelFormat::Rgba8Unorm);
-    let mut max_diff = 0u8;
+    // Strides can differ between the two tiles, so compare row by row rather
+    // than handing the raw buffers to the shared comparator.
+    let mut cpu_rows = Vec::with_capacity(48 * 32 * 4);
+    let mut gpu_rows = Vec::with_capacity(48 * 32 * 4);
     for y in 0..32usize {
-        for x in 0..48usize {
-            let a = &cpu.bytes[(y * cpu.stride as usize + x * 4)..][..4];
-            let b = &gpu.bytes[(y * gpu.stride as usize + x * 4)..][..4];
-            for c in 0..4 {
-                max_diff = max_diff.max(a[c].abs_diff(b[c]));
-            }
-        }
+        cpu_rows.extend_from_slice(&cpu.bytes[y * cpu.stride as usize..][..48 * 4]);
+        gpu_rows.extend_from_slice(&gpu.bytes[y * gpu.stride as usize..][..48 * 4]);
     }
+    let max_diff = max_channel_delta(&cpu_rows, &gpu_rows);
+    println!("display CPU/GPU parity: max byte diff {max_diff}");
+    // This used to allow a two-code difference with no reason written down,
+    // which made it the loosest parity gate in the tree. Measured on Metal
+    // the two backends are byte-identical here (max diff 0), so it is held
+    // to the shared bit-adjacent gate like everything else.
     assert!(
-        max_diff <= 2,
-        "display CPU/GPU parity: max byte diff {max_diff} > 2"
+        bit_adjacent(&cpu_rows, &gpu_rows),
+        "display CPU/GPU parity: max byte diff {max_diff} > 1"
     );
 }
 

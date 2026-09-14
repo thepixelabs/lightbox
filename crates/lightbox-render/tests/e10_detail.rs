@@ -25,7 +25,9 @@ use lightbox_render::ng::{
     SourceImage, SourceKind, SourceProvider, SourceQuality, SourceWant,
 };
 use lightbox_render::GpuContext;
-use lightbox_render_testkit::compare::{delta_e_stats, psnr, TOLERANCE_PSNR_DB};
+use lightbox_render_testkit::compare::{
+    bit_adjacent, delta_e_stats, max_channel_delta, psnr, TOLERANCE_PSNR_DB,
+};
 use lightbox_render_testkit::corpus::{
     compare_srgb8_to_golden, goldens_root, synth_source, CorpusKind,
 };
@@ -284,49 +286,29 @@ enum Parity {
     /// (`lightbox_render_testkit::compare`), what every other E10 node's
     /// parity test uses.
     House,
-    /// `PSNR >= 45 dB` **and** no channel of any pixel differing by more
-    /// than one 8-bit LSB.
+    /// The shared bit-adjacent gate,
+    /// `lightbox_render_testkit::compare::bit_adjacent`: no channel of any
+    /// pixel, alpha included, differs by more than one 8-bit code. Its docs
+    /// carry the measured table that justifies it.
     ///
-    /// This is a DIFFERENT gate, not a looser one, and it is used for
-    /// exactly one thing: the flat, near-neutral NOISE corpora that noise
-    /// reduction has to be tested on.
-    ///
-    /// Why. On `nr_luma_100` the CPU and GPU renders differ by AT MOST 1
-    /// LSB in any channel of any pixel, the floor of 8-bit
-    /// representability, with about 10% of pixels landing on the far side
-    /// of a rounding boundary (a bilateral filter's weights are a nonlinear
-    /// function of the data, so the two backends' `exp`/`pow` and their
-    /// summation order shift the f32 result by well under an f16 ULP, which
-    /// is still enough to flip the final 8-bit round). Yet
-    /// `\u{394}E2000` reads up to 1.37 on those pixels, because near
-    /// neutral its chroma term divides by `S_C \u{2248} 1` and a one-LSB
-    /// opposite move in two channels (`R+1, G-1`, an observed pair) is
-    /// already a large chroma delta by that metric. A gate two bit-adjacent
-    /// images cannot pass is measuring the metric, not the code.
+    /// A case earns this gate with a number, not by association. Of the
+    /// three noise-reduction cases first held to it, two measured inside
+    /// the house gate (`nr_luma_100` 0.6452, `nr_chroma_100` 0.9301) and
+    /// went back to `House`. Only `nr_then_sharpen` stays: 1.2241 at a
+    /// one-code maximum, a bilateral filter's data-dependent weights
+    /// leaving 332 of 2304 pixels on a rounding boundary and the sharpen
+    /// pass then amplifying the flip.
     ///
     /// Neither gate subsumes the other, which is why both numbers are
     /// always printed: `sharpen_100` (the Gradient corpus, saturated
     /// colours) shows the mirror image, a 2-LSB max difference that
     /// `\u{394}E2000` scores a comfortable 0.80.
-    OneLsb,
+    BitAdjacent,
 }
 
-/// The largest per-channel 8-bit difference between two renders, and how
-/// many pixels differ at all.
-fn max_channel_delta(a: &[[u8; 4]], b: &[[u8; 4]]) -> (i32, usize) {
-    let mut max = 0;
-    let mut differing = 0;
-    for (pa, pb) in a.iter().zip(b.iter()) {
-        let d = (0..3)
-            .map(|c| (pa[c] as i32 - pb[c] as i32).abs())
-            .max()
-            .unwrap_or(0);
-        if d > 0 {
-            differing += 1;
-        }
-        max = max.max(d);
-    }
-    (max, differing)
+/// How many pixels differ at all between two renders, for the log line.
+fn differing_pixels(a: &[[u8; 4]], b: &[[u8; 4]]) -> usize {
+    a.iter().zip(b.iter()).filter(|(pa, pb)| pa != pb).count()
 }
 
 fn detail_case(
@@ -367,7 +349,8 @@ fn detail_case(
     let gpu_out = render(&gpu_engine, w, h, recipe_with(f), BackendId::Gpu);
     let stats = delta_e_stats(&texels(&cpu_out), &texels(&gpu_out));
     let psnr_db = psnr(&cpu_out.bytes, &gpu_out.bytes);
-    let (max_lsb, differing) = max_channel_delta(&texels(&cpu_out), &texels(&gpu_out));
+    let max_lsb = max_channel_delta(&cpu_out.bytes, &gpu_out.bytes);
+    let differing = differing_pixels(&texels(&cpu_out), &texels(&gpu_out));
     // Both numbers are always printed, whichever gate the case is held to,
     // so a regression is legible either way.
     println!(
@@ -387,9 +370,10 @@ fn detail_case(
             "[detail][{name}] GPU/CPU parity: \u{394}E2000 max {:.4}",
             stats.max
         ),
-        Parity::OneLsb => assert!(
-            max_lsb <= 1,
-            "[detail][{name}] GPU/CPU parity: {max_lsb} LSB max channel difference"
+        Parity::BitAdjacent => assert!(
+            bit_adjacent(&cpu_out.bytes, &gpu_out.bytes),
+            "[detail][{name}] GPU/CPU parity: {max_lsb} code max channel difference, \
+             PSNR {psnr_db:.2} dB"
         ),
     }
 }
@@ -467,7 +451,7 @@ fn noise_reduction_luma_golden_and_parity() {
     detail_case(
         "nr_luma_100",
         noise_patch_pixels(48, 48, 0.05, false, 0xD1CE_0001),
-        Parity::OneLsb,
+        Parity::House,
         |g| {
             g.detail.nr = NoiseReduction {
                 luma: 100.0,
@@ -484,7 +468,7 @@ fn noise_reduction_chroma_golden_and_parity() {
     detail_case(
         "nr_chroma_100",
         noise_patch_pixels(48, 48, 0.05, true, 0xD1CE_0002),
-        Parity::OneLsb,
+        Parity::House,
         |g| {
             g.detail.nr = NoiseReduction {
                 luma: 0.0,
@@ -501,7 +485,7 @@ fn the_whole_detail_panel_together_golden_and_parity() {
     detail_case(
         "nr_then_sharpen",
         noise_patch_pixels(48, 48, 0.04, true, 0xD1CE_0003),
-        Parity::OneLsb,
+        Parity::BitAdjacent,
         |g| {
             g.detail.nr = NoiseReduction {
                 luma: 60.0,

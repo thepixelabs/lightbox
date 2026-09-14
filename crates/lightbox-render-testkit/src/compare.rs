@@ -236,6 +236,84 @@ pub fn delta_e_stats(reference: &[[u8; 4]], sample: &[[u8; 4]]) -> DeltaEStats {
     DeltaEStats { mean, p99, max }
 }
 
+/// Largest absolute difference in any channel of any pixel, alpha included,
+/// between two equally-sized RGBA8 byte buffers. `0` means byte-identical.
+pub fn max_channel_delta(reference: &[u8], sample: &[u8]) -> u8 {
+    assert_eq!(
+        reference.len(),
+        sample.len(),
+        "max_channel_delta: buffer sizes differ ({} vs {})",
+        reference.len(),
+        sample.len()
+    );
+    reference
+        .iter()
+        .zip(sample.iter())
+        .map(|(&r, &s)| r.abs_diff(s))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The **bit-adjacent** parity gate: every channel of every pixel, alpha
+/// included, differs by at most one 8-bit code, and PSNR clears the §4.4
+/// floor. Use it for CPU-versus-GPU parity on content where the §4.4 ΔE2000
+/// gate is unsatisfiable, and nowhere else.
+///
+/// # Why a second gate exists
+///
+/// The house gate is `max ΔE2000 <= 1.0` ([`TOLERANCE_DELTA_E`]). Near
+/// neutral, the CIEDE2000 chroma term is unattenuated (`S_C` is about 1), so a
+/// one-code move in **opposite** directions on two channels scores well above
+/// 1.0 even though the two pixels are as close as 8-bit output can be without
+/// being identical. Measured with this crate's own [`ciede2000`]:
+///
+/// | grey | `(v+1, v-1, v)` | `(v+1, v, v)` |
+/// |---|---|---|
+/// | 32  | 1.754 | |
+/// | 64  | 1.585 | |
+/// | 96  | 1.485 | |
+/// | 128 | 1.415 | 0.575 |
+/// | 192 | 1.311 | |
+/// | 224 | 1.273 | |
+///
+/// A gate that two bit-adjacent images cannot pass is measuring the metric,
+/// not the renders. Kernels with a steep, data-dependent gradient under every
+/// pixel (a bilateral filter's weights, a per-pixel noise field) leave many
+/// pixels sitting exactly on a rounding boundary, and one ULP of `pow` or
+/// fused-multiply-add difference between backends flips them. That is the
+/// only situation this gate is for.
+///
+/// # What it does and does not bound
+///
+/// It has no ΔE arm on purpose. Under a one-code bound the worst attainable
+/// ΔE2000 is about 2.35, at `(24,24,24)` against `(25,23,25)`, and that is a
+/// pixel differing by one code in each channel, which is the definition of
+/// bit-adjacent. Bounding ΔE here would reintroduce the problem the gate
+/// exists to remove.
+///
+/// The PSNR arm is redundant and kept as a printed diagnostic: a one-code
+/// bound implies MSE at most 1, so PSNR is at least `10 * log10(255^2)`, which
+/// is 48.13 dB, above the 45 dB floor. Conversely 45 dB alone permits an RMS
+/// error of 1.43 codes, looser than this gate, so the one-code bound is the
+/// arm that does the work.
+///
+/// Neither gate subsumes the other. A two-code single-channel move can pass
+/// the house gate at ΔE 0.8 and fail this one; a one-code opposite move can
+/// pass this one at ΔE 1.75 and fail the house gate. Tests that use this gate
+/// must print both numbers so the choice stays reviewable.
+///
+/// # Discipline
+///
+/// Do not apply this gate to a case the house gate passes. It was applied to
+/// five cases when first introduced; measured, three of them passed the house
+/// gate and were reverted. A relaxation earns its place with a number.
+///
+/// Goldens never use it. A golden is one backend against its own rendered
+/// PNG, so there is no cross-backend ULP divergence to absorb.
+pub fn bit_adjacent(reference: &[u8], sample: &[u8]) -> bool {
+    max_channel_delta(reference, sample) <= 1 && psnr(reference, sample) >= TOLERANCE_PSNR_DB
+}
+
 /// PSNR (dB) between two equally-sized RGBA8 byte buffers (spec §6; task A16).
 /// Identical inputs return [`f64::INFINITY`] (which passes any dB floor).
 pub fn psnr(reference: &[u8], sample: &[u8]) -> f64 {
@@ -347,5 +425,61 @@ mod tests {
         let stats = delta_e_stats(&a, &b);
         assert!(stats.max > TOLERANCE_DELTA_E, "max={}", stats.max);
         assert!(!stats.within_tolerance());
+    }
+
+    /// The table in `bit_adjacent`'s docs, pinned. If CIEDE2000 or the sRGB
+    /// to Lab path ever changes, the numbers that justify the second gate
+    /// change with them, and this is where that shows up.
+    #[test]
+    fn a_one_code_opposite_move_near_neutral_exceeds_the_house_gate() {
+        let de = |a: [u8; 3], b: [u8; 3]| {
+            ciede2000(
+                srgb8_to_lab([a[0], a[1], a[2], 255]),
+                srgb8_to_lab([b[0], b[1], b[2], 255]),
+            )
+        };
+        let expected = [
+            (32u8, 1.754),
+            (64, 1.585),
+            (96, 1.485),
+            (128, 1.415),
+            (192, 1.311),
+            (224, 1.273),
+        ];
+        for (v, want) in expected {
+            let got = de([v, v, v], [v + 1, v - 1, v]);
+            assert!(
+                (got - want).abs() < 0.005,
+                "grey {v}: (v+1, v-1, v) scored {got:.3}, the docs say {want}"
+            );
+            assert!(
+                got > TOLERANCE_DELTA_E,
+                "grey {v}: a one-code opposite move must exceed the house gate, got {got:.3}"
+            );
+        }
+        // A single-channel one-code move stays comfortably inside it.
+        let single = de([128, 128, 128], [129, 128, 128]);
+        assert!(
+            (single - 0.575).abs() < 0.005,
+            "single-channel: {single:.3}"
+        );
+        assert!(single < TOLERANCE_DELTA_E);
+    }
+
+    /// The gate itself: one code everywhere passes, two codes anywhere fails,
+    /// and alpha counts.
+    #[test]
+    fn bit_adjacent_counts_every_channel_including_alpha() {
+        let a = [100u8, 100, 100, 255, 50, 60, 70, 255];
+        let one = [101u8, 99, 100, 255, 50, 61, 70, 254];
+        assert_eq!(max_channel_delta(&a, &one), 1);
+        assert!(bit_adjacent(&a, &one));
+        let two_rgb = [102u8, 100, 100, 255, 50, 60, 70, 255];
+        assert_eq!(max_channel_delta(&a, &two_rgb), 2);
+        assert!(!bit_adjacent(&a, &two_rgb));
+        let two_alpha = [100u8, 100, 100, 253, 50, 60, 70, 255];
+        assert_eq!(max_channel_delta(&a, &two_alpha), 2);
+        assert!(!bit_adjacent(&a, &two_alpha), "alpha must count");
+        assert!(bit_adjacent(&a, &a), "identical is trivially adjacent");
     }
 }

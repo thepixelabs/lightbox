@@ -42,6 +42,26 @@ Dev/test-only, not shipped. It gives you:
    for the pattern: build two `Engine`s (`BackendPref::Auto` vs `ForceCpu`)
    over the same registry/template, submit the same request, compare
    readbacks.
+
+   **One exception, and it has a number attached.** The ΔE2000 ≤ 1.0 gate
+   is unsatisfiable for two renders that differ by a single 8-bit code in
+   opposite directions on two channels near neutral: that scores 1.27 to
+   1.75 by the metric's own construction, while a single-channel one-code
+   move scores 0.58. Kernels with a steep, data-dependent gradient under
+   every pixel (a bilateral filter's weights, a per-pixel noise field) leave
+   many pixels on a rounding boundary and one ULP of backend difference
+   flips them. For those cases, and only those, hold the parity leg to
+   `lightbox_render_testkit::compare::bit_adjacent` instead: no channel of
+   any pixel, alpha included, differs by more than one code. Its doc comment
+   carries the measured table and the reasoning.
+
+   The discipline: **a case earns that gate with a printed number, not by
+   association.** Print both numbers on every parity case. If the house gate
+   passes, use the house gate. When the bit-adjacent gate was first
+   introduced it was applied to five cases; measured, three passed the house
+   gate and were reverted. Goldens never use it, because a golden is one
+   backend against its own PNG and there is no cross-backend divergence to
+   absorb.
 3. **Determinism.** Each backend must be **bit-identical** across repeat
    renders of the same request (§4.4). If your algorithm has any
    nondeterminism (parallel-reduction order, uninitialized padding), fix it

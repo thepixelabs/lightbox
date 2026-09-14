@@ -37,7 +37,9 @@ use lightbox_render::ng::{
     SourceImage, SourceKind, SourceProvider, SourceQuality, SourceWant,
 };
 use lightbox_render::GpuContext;
-use lightbox_render_testkit::compare::{delta_e_stats, psnr, TOLERANCE_PSNR_DB};
+use lightbox_render_testkit::compare::{
+    bit_adjacent, delta_e_stats, max_channel_delta, psnr, TOLERANCE_PSNR_DB,
+};
 use lightbox_render_testkit::corpus::{
     compare_srgb8_to_golden, goldens_root, synth_source, CorpusKind,
 };
@@ -660,22 +662,24 @@ fn grain_is_byte_identical_across_independent_engines() {
 
 // ── CPU/GPU parity ─────────────────────────────────────────────────────────
 
-/// `has_grain` selects the gate, and the distinction is not a fudge.
+/// `bit_adjacent_gate` selects the gate, and a case earns it with a number.
 ///
 /// For a smooth kernel the shared `\u{394}E2000 max <= 1.0` gate is the right
-/// one and the vignette cases below hold it. A per-pixel noise field cannot:
-/// grain puts a steep gradient under every pixel, so one ULP of difference
-/// between a GPU `pow`/fma-contracted lerp and its Rust twin is enough to
-/// tip a pixel sitting exactly on an 8-bit quantisation boundary to the
-/// adjacent code, and in these tones a SINGLE code step is already worth
-/// about 1.0 \u{394}E2000. A max-\u{394}E gate would therefore be testing the
-/// output's quantisation grid, not the kernels.
+/// one and every vignette case below holds it. A per-pixel noise field can
+/// fail it while being as close as 8-bit output allows: grain puts a steep
+/// gradient under every pixel, so one ULP of difference between a GPU
+/// `pow`/fma-contracted lerp and its Rust twin tips a pixel sitting on a
+/// quantisation boundary to the adjacent code. A single code step in one
+/// channel costs only 0.55 to 0.92 \u{394}E2000 in these tones; what breaks
+/// the gate is two channels moving one code in opposite directions, which
+/// scores 1.27 to 1.76 near neutral. The table is in
+/// `lightbox_render_testkit::compare::bit_adjacent`'s docs.
 ///
-/// So grain cases are gated on the stronger, more literal statement that
-/// max-\u{394}E is a proxy for: **no pixel, on any channel, differs by more
-/// than one 8-bit code**, plus the same PSNR floor and a mean-\u{394}E inside
-/// the shared tolerance. A real algorithmic divergence moves all three.
-fn parity_case(name: &str, has_grain: bool, recipe: impl Fn() -> Recipe, pixels: PixelBuf) {
+/// That gate is applied only where measured necessary. `grain-60` was first
+/// held to it and measured 0.9268, inside the house gate, so it is held to
+/// the house gate. `vignette-plus-grain` measured 1.0262 at a one-code
+/// maximum, and that is the one case that keeps it.
+fn parity_case(name: &str, bit_adjacent_gate: bool, recipe: impl Fn() -> Recipe, pixels: PixelBuf) {
     let (w, h) = (pixels.extent.w, pixels.extent.h);
     let cpu_engine = build_engine(BackendPref::ForceCpu, Arc::new(NullDevice), pixels.clone());
     let cpu_out = render(&cpu_engine, w, h, recipe(), BackendId::Cpu);
@@ -692,13 +696,7 @@ fn parity_case(name: &str, has_grain: bool, recipe: impl Fn() -> Recipe, pixels:
 
     let stats = delta_e_stats(&texels(&cpu_out), &texels(&gpu_out));
     let psnr_db = psnr(&cpu_out.bytes, &gpu_out.bytes);
-    let max_code_diff = cpu_out
-        .bytes
-        .iter()
-        .zip(gpu_out.bytes.iter())
-        .map(|(a, b)| a.abs_diff(*b))
-        .max()
-        .unwrap_or(0);
+    let max_code_diff = max_channel_delta(&cpu_out.bytes, &gpu_out.bytes);
     println!(
         "[effects][{name}][gpu-vs-cpu] \u{394}E2000 max={:.4} mean={:.4} PSNR={:.2}dB \
          max_code_diff={max_code_diff}",
@@ -708,14 +706,9 @@ fn parity_case(name: &str, has_grain: bool, recipe: impl Fn() -> Recipe, pixels:
         psnr_db >= TOLERANCE_PSNR_DB,
         "[{name}] GPU/CPU parity: PSNR {psnr_db:.2} dB"
     );
-    assert!(
-        stats.mean <= 1.0,
-        "[{name}] GPU/CPU parity: mean \u{394}E2000 {:.4}",
-        stats.mean
-    );
-    if has_grain {
+    if bit_adjacent_gate {
         assert!(
-            max_code_diff <= 1,
+            bit_adjacent(&cpu_out.bytes, &gpu_out.bytes),
             "[{name}] GPU/CPU parity: a channel differs by {max_code_diff} 8-bit codes"
         );
     } else {
@@ -771,7 +764,7 @@ fn cropped_vignette_cpu_gpu_parity() {
 fn grain_cpu_gpu_parity() {
     parity_case(
         "grain-60",
-        true,
+        false,
         || {
             recipe_with(|r| {
                 r.global.effects.grain = Grain {
