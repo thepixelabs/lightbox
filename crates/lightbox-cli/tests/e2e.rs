@@ -203,6 +203,45 @@ fn create_import_list_render_check_backup_flow() {
     );
 
     // Golden compare (T27 AC: "render output passes golden compare").
+    //
+    // A raw file renders one of two pictures, and which one depends on the
+    // machine rather than on the code. With a proxy built `--features libraw`
+    // beside the binary (or named by `LIGHTBOX_RAWPROXY_BIN`) the render comes
+    // from sensor data through the camera matrices; without one the CLI falls
+    // back to the JPEG the camera embedded, which is a different, already
+    // processed image. CI builds the stub proxy and takes the fallback; a
+    // developer's machine usually has LibRaw and takes the sensor path. One
+    // golden for both would pin whichever path the last blesser happened to
+    // have, and fail on every other machine, which is exactly what it did
+    // before this: blessed against the fallback, red wherever LibRaw existed.
+    //
+    // So the test asks the same CLI it just rendered with which path this
+    // machine takes, and compares against the golden for that path. Both
+    // pictures are pinned, and the log says which one was checked. The probe
+    // has to be `decode`, not `probe`: `probe` reads metadata and never touches
+    // the proxy, so it exits 0 either way, while `decode` goes through LibRaw
+    // and fails with "rawproxy built without the `libraw` feature" on exactly
+    // the machines that will render the fallback.
+    let sensor_path = cli(&[
+        "decode",
+        "--file",
+        photos.join("canon-eos-r6.cr3").to_str().unwrap(),
+    ])
+    .status
+    .success();
+    let case = if sensor_path {
+        "canon-eos-r6-fit240-sensor"
+    } else {
+        "canon-eos-r6-fit240"
+    };
+    eprintln!(
+        "cli.render golden: comparing against `{case}` ({})",
+        if sensor_path {
+            "LibRaw proxy present, sensor data through the camera matrices"
+        } else {
+            "no LibRaw proxy, the camera's embedded JPEG"
+        }
+    );
     let cfg = GoldenConfig::new(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("goldens"),
         Path::new(env!("CARGO_TARGET_TMPDIR")).join("golden-failures"),
@@ -210,7 +249,7 @@ fn create_import_list_render_check_backup_flow() {
     let spec = GoldenSpec {
         node: "cli.render",
         pv: 1,
-        case: "canon-eos-r6-fit240",
+        case,
     };
     match check_golden(&cfg, &spec, &rendered) {
         Ok(GoldenOutcome::Matched(report)) => {
