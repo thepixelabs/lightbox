@@ -373,7 +373,19 @@ jobs:
           path: fixtures
           key: fixtures-${{ hashFiles('fixtures/manifest.toml') }}
 
+      # The job-wide RUSTFLAGS carry `-Zsanitizer`, a nightly-only flag, but
+      # `rust-toolchain.toml` pins stable and wins over `rustup default
+      # nightly` above, so building xtask here on stable failed on that flag
+      # before the sanitizer ever ran. Every run of this job since it was
+      # added died at this step in under thirty seconds; ASan has never
+      # actually executed in CI. The fetch is a downloader with nothing to
+      # instrument, so it runs with the flags cleared. The test step below
+      # selects nightly explicitly with `+nightly`, which does override the
+      # pin, and keeps the job-wide flags.
       - name: Fetch + verify pinned fixtures
+        env:
+          RUSTFLAGS: ""
+          RUSTDOCFLAGS: ""
         run: cargo run -p xtask -- fixtures
 
       # Instrument std too (-Zbuild-std) so allocations across the FFI boundary
