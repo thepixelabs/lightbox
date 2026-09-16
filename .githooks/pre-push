@@ -9,5 +9,28 @@
 # hook that is slow enough to be annoying is a hook people disable.
 set -e
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# Refuse to push a commit whose author or committer is not the GitHub noreply
+# address. This repository is public, and a personal address on a commit is
+# published the moment the commit is. Seven local commits once carried one,
+# because a merge harness set it explicitly; they were caught by a sweep
+# before any push and deleted, and this is what makes that a one-off.
+# The range is what is about to be pushed, read off stdin the way git hands
+# it to a pre-push hook: one line per ref, "<local ref> <local sha> <remote
+# ref> <remote sha>". A new branch has an all-zero remote sha, so the range
+# is the whole branch.
+zero=0000000000000000000000000000000000000000
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # deleting a ref, nothing to check
+  if [ "$remote_sha" = "$zero" ]; then range="$local_sha"; else range="$remote_sha..$local_sha"; fi
+  bad=$(git log --format='%ae%n%ce' "$range" | sort -u | grep -v 'users.noreply.github.com' || true)
+  if [ -n "$bad" ]; then
+    echo "pre-push: refusing to push. These author/committer emails are not the noreply address:" >&2
+    echo "$bad" | sed 's/^/  /' >&2
+    echo "Fix with: git rebase -i to reword, or git commit --amend --reset-author after git config user.email" >&2
+    exit 1
+  fi
+done
+
 echo "pre-push: running the quick gates (skip with --no-verify)"
 cargo run -q -p xtask -- ci --quick
