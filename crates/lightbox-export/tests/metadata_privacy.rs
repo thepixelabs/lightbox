@@ -110,13 +110,23 @@ fn has_any_gps_field(bytes: &[u8]) -> bool {
 /// them. A byte scan catches a leak through a channel the EXIF parser does
 /// not look at, such as the XMP packet or a stray comment.
 fn raw_scan_finds_location(bytes: &[u8]) -> bool {
-    let needles: [&[u8]; 6] = [
+    // Coordinates in every form Lightbox could write them, plus the tags a
+    // partial leak would arrive through. Altitude and the GPS timestamps are
+    // gated as one unit with the coordinates today, but a refactor that
+    // split them out would leak a position's third axis or its capture
+    // moment without tripping the coordinate needles, so they are named.
+    let needles: [&[u8]; 11] = [
         b"51,30.441060N",
         b"0,7.665480W",
         b"GPSLatitude",
         b"GPSLongitude",
         b"51.507351",
         b"-0.127758",
+        b"GPSAltitude",
+        b"GPSDateStamp",
+        b"GPSTimeStamp",
+        b"11/1", // 11.0 m altitude as an EXIF rational
+        b"1100/100",
     ];
     needles.iter().any(|n| find_bytes(bytes, n))
 }
@@ -198,6 +208,18 @@ fn no_level_below_all_writes_gps_into_any_container() {
     ] {
         for (name, format) in [("jpeg", JPEG), ("png", PNG), ("tiff", TIFF)] {
             let bytes = encode_at(level, format);
+            // "The parser found no GPS field" proves nothing if the parser
+            // found no fields at all. Every level writes at least the
+            // `Software` tag, so a parse that comes back empty means the
+            // container is malformed and every absence below is vacuous.
+            // TIFF is the exception by design: it carries no packed EXIF
+            // blob, only native IFD0 tags plus the XMP packet, and
+            // `kamadak-exif` reads TIFF IFD0 natively, so it parses too.
+            assert!(
+                read_back_tags(&bytes).is_some_and(|t| !t.is_empty()),
+                "{name} at {level:?}: the read-back parser found no EXIF at all, so \
+                 the GPS absence assertions below would pass on a broken file"
+            );
             assert!(
                 !has_any_gps_field(&bytes),
                 "{name} at {level:?}: the file has a GPS IFD"
@@ -312,6 +334,12 @@ fn contact_details_appear_only_from_the_contact_level_up() {
 }
 
 #[test]
+/// The description is user text. This level keeps it by design, and that
+/// includes a caption that names a place, which is why the level's docs and
+/// the CLI help say "strips the recorded position, keeps what you wrote"
+/// rather than "location-free". This test pins that the text survives; the
+/// privacy claim is about the structured GPS record, which the tests above
+/// prove absent.
 fn descriptive_fields_appear_only_from_the_all_except_level_up() {
     let caption = b"Trafalgar Square at dusk";
     for level in [

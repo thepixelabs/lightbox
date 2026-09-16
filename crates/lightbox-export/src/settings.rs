@@ -237,10 +237,18 @@ pub enum MetadataLevel {
     /// `Iptc4xmpCore:CreatorContactInfo`).
     CopyrightAndContact,
     /// Everything Lightbox models **except** camera identification
-    /// (make, model, lens, exposure, aperture, ISO, focal length) and
-    /// location (the EXIF GPS IFD and its XMP mirror).
+    /// (make, model, lens, exposure, aperture, ISO, focal length) and the
+    /// **structured** location: the EXIF GPS IFD and its XMP mirror, which
+    /// is the machine-readable position a camera or phone records.
     ///
-    /// Capture date, description and the rights/contact block survive.
+    /// Capture date, description and the rights/contact block survive, and
+    /// the description is the part to know about. It is text the
+    /// photographer (or their phone's software) wrote, and Lightbox does not
+    /// read it, so if a caption says "Trafalgar Square" or carries a `geo:`
+    /// string, that text leaves with the file at this level. This level
+    /// strips the position the device recorded; it does not censor what you
+    /// wrote. A caption you do not want to travel is edited or removed
+    /// before export, or the export is made at a lower level.
     AllExceptCameraAndLocation,
     /// Everything Lightbox models, including camera identification and the
     /// GPS position when the source carried one.

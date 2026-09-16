@@ -145,7 +145,9 @@ USAGE:
       [--color srgb|adobe-rgb|display-p3] [--sharpen low|standard|high] [--suffix <text>] [--cpu]
 
   Metadata control on export (either form). Default: copyright
-  (the safe level; only 'all' writes a GPS position into the file):
+  (the safe level). Only 'all' writes the device's recorded GPS position.
+  'all-except-camera-location' strips that position but keeps the caption,
+  which is text you wrote and may itself name a place:
       [--metadata copyright|copyright-contact|all-except-camera-location|all]
       [--copyright <text>] [--creator <name>] [--contact-email <addr>] [--contact-url <url>]
 
