@@ -56,12 +56,23 @@ fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
-/// Skips (or hard-fails under `LIGHTBOX_TEST_LIBRAW=1`) when the proxy or the
-/// fixture is absent, the same contract `raw_source_decode.rs` uses.
+/// Skips, saying why, when the fixture is absent; hard-fails under
+/// `LIGHTBOX_TEST_LIBRAW=1`. The same contract as `raw_source_decode.rs`'s
+/// gate, and for the same reason: an earlier version honoured the switch on
+/// the proxy branch and not this one, so a machine with LibRaw and no
+/// fixtures reported the whole file green in 0.00 s while running nothing.
 fn blown_fixture(test: &str) -> Option<PathBuf> {
     let path = fixtures().join(BLOWN_FIXTURE);
     if !path.exists() {
-        eprintln!("SKIPPED {test}: fixtures not fetched, run `cargo xtask fixtures`");
+        let why = format!(
+            "{test}: fixture {} not fetched, run `cargo xtask fixtures`",
+            path.display()
+        );
+        assert!(
+            std::env::var("LIGHTBOX_TEST_LIBRAW").is_err(),
+            "LIGHTBOX_TEST_LIBRAW=1 was set: {why}"
+        );
+        eprintln!("SKIPPED {why}");
         return None;
     }
     Some(path)
@@ -71,15 +82,16 @@ fn require_proxy(test: &str) -> Option<ProxySupervisor> {
     match ProxySupervisor::autodetect() {
         Some(sup) => Some(sup),
         None => {
-            eprintln!(
-                "SKIPPED {test}: no LibRaw proxy. Build it with `cargo build --release -p \
+            let why = format!(
+                "{test}: no LibRaw proxy. Build it with `cargo build --release -p \
                  lightbox-rawproxy --features libraw` or set LIGHTBOX_RAWPROXY_BIN. Set \
                  LIGHTBOX_TEST_LIBRAW=1 to make this a hard failure."
             );
             assert!(
                 std::env::var("LIGHTBOX_TEST_LIBRAW").is_err(),
-                "LIGHTBOX_TEST_LIBRAW=1 was set but no usable LibRaw proxy was found"
+                "LIGHTBOX_TEST_LIBRAW=1 was set: {why}"
             );
+            eprintln!("SKIPPED {why}");
             None
         }
     }

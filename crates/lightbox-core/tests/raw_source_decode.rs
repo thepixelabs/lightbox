@@ -23,24 +23,11 @@ fn fixtures() -> PathBuf {
 
 #[test]
 fn a_raw_decodes_to_upright_working_linear_at_sensor_resolution() {
-    let Some(provider) = RawSourceProvider::autodetect() else {
-        eprintln!(
-            "SKIPPED a_raw_decodes_to_upright_working_linear_at_sensor_resolution: no LibRaw \
-             proxy. Build it with `cargo build --release -p lightbox-rawproxy --features libraw` \
-             or set LIGHTBOX_RAWPROXY_BIN. Set LIGHTBOX_TEST_LIBRAW=1 to make this a hard failure."
-        );
-        assert!(
-            std::env::var("LIGHTBOX_TEST_LIBRAW").is_err(),
-            "LIGHTBOX_TEST_LIBRAW=1 was set but no usable LibRaw proxy was found"
-        );
+    let Some((provider, path)) =
+        provider_and_fixture("a_raw_decodes_to_upright_working_linear_at_sensor_resolution")
+    else {
         return;
     };
-
-    let path = fixtures().join("fujifilm-x100.raf");
-    if !path.exists() {
-        eprintln!("SKIPPED: fixtures not fetched, run `cargo xtask fixtures`");
-        return;
-    }
 
     let img = provider
         .decode_for_test(&path, Orientation::O1, &WbMode::AsShot, &CancelToken::new())
@@ -86,14 +73,9 @@ fn a_raw_decodes_to_upright_working_linear_at_sensor_resolution() {
 
 #[test]
 fn orientation_transposes_the_frame() {
-    let Some(provider) = RawSourceProvider::autodetect() else {
-        eprintln!("SKIPPED orientation_transposes_the_frame: no LibRaw proxy");
+    let Some((provider, path)) = provider_and_fixture("orientation_transposes_the_frame") else {
         return;
     };
-    let path = fixtures().join("fujifilm-x100.raf");
-    if !path.exists() {
-        return;
-    }
     let upright = provider
         .decode_for_test(&path, Orientation::O1, &WbMode::AsShot, &CancelToken::new())
         .expect("decodes")
@@ -111,23 +93,37 @@ fn orientation_transposes_the_frame() {
 
 // ─── absolute Kelvin white balance ──────────────────────────────────────────
 
-/// Skips (or hard-fails under `LIGHTBOX_TEST_LIBRAW=1`) when the proxy or the
-/// fixture is missing, the same gate the two tests above use.
+/// The one gate every test in this file goes through. Skips, with a line
+/// saying why, when the LibRaw proxy or the fixture is missing; **hard-fails
+/// on either** when `LIGHTBOX_TEST_LIBRAW=1` is set.
+///
+/// Both branches honour the switch, and that is the point of routing every
+/// test through here. An earlier version honoured it on the proxy branch
+/// only, and one test skipped on a missing fixture with no message at all,
+/// so on a machine with the proxy and no fixtures the whole file reported
+/// green in 0.00 s while running nothing. A test that skips is not a test
+/// that passed, and a switch named "make this a hard failure" that only
+/// half works is worse than none, because it is trusted.
 fn provider_and_fixture(test: &str) -> Option<(RawSourceProvider, PathBuf)> {
+    let hard = std::env::var("LIGHTBOX_TEST_LIBRAW").is_ok();
     let Some(provider) = RawSourceProvider::autodetect() else {
-        eprintln!(
-            "SKIPPED {test}: no LibRaw proxy. Build it with `cargo build -p lightbox-rawproxy \
-             --features libraw` or set LIGHTBOX_RAWPROXY_BIN."
+        let why = format!(
+            "{test}: no LibRaw proxy. Build it with `cargo build --release -p \
+             lightbox-rawproxy --features libraw` or set LIGHTBOX_RAWPROXY_BIN. Set \
+             LIGHTBOX_TEST_LIBRAW=1 to make this a hard failure."
         );
-        assert!(
-            std::env::var("LIGHTBOX_TEST_LIBRAW").is_err(),
-            "LIGHTBOX_TEST_LIBRAW=1 was set but no usable LibRaw proxy was found"
-        );
+        assert!(!hard, "LIGHTBOX_TEST_LIBRAW=1 was set: {why}");
+        eprintln!("SKIPPED {why}");
         return None;
     };
     let path = fixtures().join("fujifilm-x100.raf");
     if !path.exists() {
-        eprintln!("SKIPPED {test}: fixtures not fetched, run `cargo xtask fixtures`");
+        let why = format!(
+            "{test}: fixture {} not fetched, run `cargo xtask fixtures`",
+            path.display()
+        );
+        assert!(!hard, "LIGHTBOX_TEST_LIBRAW=1 was set: {why}");
+        eprintln!("SKIPPED {why}");
         return None;
     }
     Some((provider, path))

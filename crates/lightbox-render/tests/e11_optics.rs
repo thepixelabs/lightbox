@@ -41,7 +41,9 @@ use lightbox_render::ng::{
     SourceImage, SourceKind, SourceProvider, SourceQuality, SourceWant,
 };
 use lightbox_render::GpuContext;
-use lightbox_render_testkit::compare::{delta_e_stats, psnr, TOLERANCE_PSNR_DB};
+use lightbox_render_testkit::compare::{
+    assert_edit_is_not_a_no_op, delta_e_stats, psnr, TOLERANCE_PSNR_DB,
+};
 use lightbox_render_testkit::corpus::{
     compare_srgb8_to_golden, goldens_root, synth_source, CorpusKind,
 };
@@ -720,10 +722,16 @@ fn every_golden_case_differs_from_the_identity_render() {
         let engine = build_engine(BackendPref::ForceCpu, Arc::new(NullDevice), pixels);
         let base = render_px(&engine, w, h, Recipe::identity(PV_M0), BackendId::Cpu);
         let edited = render_px(&engine, w, h, recipe, BackendId::Cpu);
-        assert_ne!(
-            texels(&base),
-            texels(&edited),
-            "[{name}] the golden would pin an unedited frame"
+        // Not `assert_ne!` on the bytes: one least-significant bit in one
+        // border pixel would satisfy that, and a golden that differs from
+        // the identity render by less than the house gate still pins a
+        // no-op for every practical purpose. The shared guard demands the
+        // edit moved the picture by a margin the gate could not confuse
+        // with noise, and prints how far.
+        let moved = assert_edit_is_not_a_no_op(&texels(&base), &texels(&edited), name, 2.0);
+        println!(
+            "[optics][{name}][vs-identity] \u{394}E2000 max={:.4} mean={:.4}",
+            moved.max, moved.mean
         );
     }
 }

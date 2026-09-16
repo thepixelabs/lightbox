@@ -314,6 +314,44 @@ pub fn bit_adjacent(reference: &[u8], sample: &[u8]) -> bool {
     max_channel_delta(reference, sample) <= 1 && psnr(reference, sample) >= TOLERANCE_PSNR_DB
 }
 
+/// The one failure a golden cannot catch on its own, made a gate.
+///
+/// A golden proves a render has not changed. It cannot prove the render was
+/// ever right. If a golden is blessed from a render where the node was
+/// elided, or a parameter never reached the kernel, or the corpus was one
+/// the operator is mathematically inert on, the golden pins that no-op and
+/// stays green forever. Two cases in this repository shipped that way: a
+/// defringe golden over a corpus with no fringe in it, and a sharpening
+/// golden over a linear gradient, where the Gaussian of a ramp is the ramp
+/// and the sharpened output sat within the house gate of the unsharpened
+/// one.
+///
+/// So every golden runner renders the same source under the identity recipe
+/// first and calls this with both, requiring the edit to have moved the
+/// picture by at least `min_de` ΔE2000 somewhere. `2.0` is the working
+/// floor: twice the house gate, so a difference the gate could not tell
+/// from noise cannot pass as evidence. Returns the stats so the runner can
+/// print them beside the golden's.
+///
+/// Extent-changing edits (a crop) are self-evidently not no-ops and have
+/// nothing to compare texel for texel; callers skip this for those and say
+/// so in their log line.
+pub fn assert_edit_is_not_a_no_op(
+    identity: &[[u8; 4]],
+    edited: &[[u8; 4]],
+    label: &str,
+    min_de: f64,
+) -> DeltaEStats {
+    let stats = delta_e_stats(identity, edited);
+    assert!(
+        stats.max > min_de,
+        "[{label}] the edit changed nothing measurable against an identity render \
+         (ΔE2000 max {:.4}, floor {min_de}); a golden of this render would pin a no-op",
+        stats.max
+    );
+    stats
+}
+
 /// PSNR (dB) between two equally-sized RGBA8 byte buffers (spec §6; task A16).
 /// Identical inputs return [`f64::INFINITY`] (which passes any dB floor).
 pub fn psnr(reference: &[u8], sample: &[u8]) -> f64 {

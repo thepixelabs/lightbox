@@ -26,7 +26,8 @@ use lightbox_render::ng::{
 };
 use lightbox_render::GpuContext;
 use lightbox_render_testkit::compare::{
-    bit_adjacent, delta_e_stats, max_channel_delta, psnr, TOLERANCE_PSNR_DB,
+    assert_edit_is_not_a_no_op, bit_adjacent, delta_e_stats, max_channel_delta, psnr,
+    TOLERANCE_PSNR_DB,
 };
 use lightbox_render_testkit::corpus::{
     compare_srgb8_to_golden, goldens_root, synth_source, CorpusKind,
@@ -320,7 +321,22 @@ fn detail_case(
     let (w, h) = (pixels.extent.w, pixels.extent.h);
 
     let cpu_engine = build_engine(BackendPref::ForceCpu, Arc::new(NullDevice), pixels.clone());
+    // Identity first, then the edit, so the golden below is proven to pin an
+    // edit that does something. `sharpen_100` shipped over a linear gradient
+    // where the Gaussian of a ramp is the ramp, and its golden sat within the
+    // house gate of the unsharpened render; this is what catches that.
+    let identity = render(&cpu_engine, w, h, Recipe::identity(PV_M0), BackendId::Cpu);
     let cpu_out = render(&cpu_engine, w, h, recipe_with(f), BackendId::Cpu);
+    let moved = assert_edit_is_not_a_no_op(
+        &texels(&identity),
+        &texels(&cpu_out),
+        &format!("detail/{name}"),
+        2.0,
+    );
+    println!(
+        "[detail][{name}][vs-identity] \u{394}E2000 max={:.4} mean={:.4}",
+        moved.max, moved.mean
+    );
     let golden_path = e10_goldens_root()
         .join("detail")
         .join("pv1")
@@ -380,9 +396,14 @@ fn detail_case(
 
 #[test]
 fn sharpen_amount_100_golden_and_parity() {
+    // Not the Gradient corpus. The Gaussian of a linear ramp is the ramp, so
+    // an unsharp mask over it produces nothing except at the border, and the
+    // golden this case first shipped with sat at ΔE2000 0.80 from the
+    // unsharpened render, inside the house gate: it would have stayed green
+    // with the node deleted. An edge is what sharpening acts on.
     detail_case(
         "sharpen_100",
-        synth_source(CorpusKind::Gradient, 32, 32),
+        flat_plus_edge_pixels(48, 48),
         Parity::House,
         |g| {
             g.detail.sharpen = Sharpen {

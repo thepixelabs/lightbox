@@ -38,7 +38,8 @@ use lightbox_render::ng::{
 };
 use lightbox_render::GpuContext;
 use lightbox_render_testkit::compare::{
-    bit_adjacent, delta_e_stats, max_channel_delta, psnr, TOLERANCE_PSNR_DB,
+    assert_edit_is_not_a_no_op, bit_adjacent, delta_e_stats, max_channel_delta, psnr,
+    TOLERANCE_PSNR_DB,
 };
 use lightbox_render_testkit::corpus::{
     compare_srgb8_to_golden, goldens_root, synth_source, CorpusKind,
@@ -848,17 +849,10 @@ fn golden_case(name: &str, recipe: Recipe, pixels: PixelBuf) {
     // A crop changes the extent, so those cases are self-evidently not
     // no-ops and there is nothing to compare against pixel for pixel.
     if baseline.extent == out.extent {
-        let base_texels = texels(&baseline);
-        let changed = delta_e_stats(&base_texels, &rendered);
+        let changed = assert_edit_is_not_a_no_op(&texels(&baseline), &rendered, name, 2.0);
         println!(
             "[effects][{name}][vs-identity] \u{394}E2000 max={:.4} mean={:.4}",
             changed.max, changed.mean
-        );
-        assert!(
-            changed.max > 2.0,
-            "[{name}] the effect changed nothing measurable against an identity render \
-             (\u{394}E2000 max {:.4}); this golden would pin a no-op",
-            changed.max
         );
     } else {
         println!(
