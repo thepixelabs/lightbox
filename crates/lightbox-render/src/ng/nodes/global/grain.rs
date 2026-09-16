@@ -49,15 +49,29 @@
 //! [`grain_weight`] tapers the delta to zero at both ends of the encoded
 //! range, where there is no headroom left to perturb.
 //!
-//! # Known limit: grain size is in output-canvas pixels
+//! # Known limit: grain size is in output-canvas pixels, and the preview is
+//! # not the export
 //!
 //! [`grain_cell_px`] is measured in the pixels of the canvas this node is
-//! handed, so if the engine ever renders the develop preview at a decimated
-//! scale the on-screen grain will be coarser relative to the image than the
-//! exported full-resolution grain. It does not bite today, `util.resize` is
-//! extent-identity in this engine (`docs/plan/epics/E11-deviations.md`), so
-//! preview and export see the same canvas; it is named here rather than
-//! silently inherited.
+//! handed, and that canvas is the **request** extent, not the source's.
+//! `util.resize` (`nodes/resize.rs`, `output_extent`) takes the request
+//! extent verbatim and everything downstream of it, this node included, runs
+//! at that size. The shell only ever requests a fit-to-viewport render
+//! (`lightbox-shell/src/canvas/view.rs`, `RenderScale::Fit`), so a 24
+//! megapixel frame in a 1500 pixel viewport is decimated about four times
+//! before grain is laid on it. The on-screen grain is therefore coarser
+//! relative to the image than the exported full-resolution grain by the
+//! decimation factor, and it re-rolls whenever the viewport changes size.
+//!
+//! An earlier version of this comment said the opposite, that `util.resize`
+//! was extent-identity and the limit did not bite. That was true of the test
+//! goldens, which render at `roi == source extent`, and false of the
+//! application, which is the case the sentence was about. Lightroom has the
+//! same property for its Detail panel and shows a "zoom to 100% for an
+//! accurate preview" note; the Detail and Effects panels here now carry the
+//! same warning. Making the preview match the export means running grain at
+//! source scale and decimating afterwards, which is a pipeline-order change
+//! with a real cost, not a fix in this node.
 //!
 //! GPU (`shaders/global_grain.wgsl`) and CPU (this module) implement the
 //! identical formulas from the identical constants, so CPU/GPU parity (§4.4)

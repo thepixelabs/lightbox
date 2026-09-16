@@ -61,6 +61,24 @@
 //! by `d(srgb_eotf)/de` at that channel's own encoded value. See
 //! [`apply_nr`].
 //!
+//! # The preview is not the export
+//!
+//! This node runs at the **request** extent, not the source's. `util.resize`
+//! (`nodes/resize.rs`, `output_extent`) takes the request extent verbatim
+//! and the whole tone and colour chain, this node included, is spliced after
+//! it. The shell only ever requests a fit-to-viewport render
+//! (`lightbox-shell/src/canvas/view.rs`, `RenderScale::Fit`), so a 24
+//! megapixel frame in a 1500 pixel viewport is box-decimated about four
+//! times before this filter sees it, and box decimation has already averaged
+//! most of the sensor noise away. In the fit preview the sliders therefore
+//! appear to do little; in a 1:1 export they do what the slider says. The
+//! filter radii are in pixels of whatever it is handed, so they are one
+//! viewport pixel in the preview and the decimation factor times that at
+//! export. Lightroom's Detail panel has the same property and shows a "zoom
+//! to 100% for an accurate preview" note; the panel here carries the same
+//! warning. Running this at source scale and decimating afterwards would
+//! close the gap at the cost of a 24 megapixel bilateral on every preview.
+//!
 //! # Cost
 //!
 //! Brute-force windows, `(2*CHROMA_RADIUS+1)^2` taps per pixel, the same

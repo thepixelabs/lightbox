@@ -463,6 +463,53 @@ fn matrix() -> Vec<Case> {
             Some(NodeId("global.dehaze")),
             recipe_with(|g| g.presence.dehaze = 40.0),
         ),
+        // The Detail, Effects and Optics panels. These are the nodes this
+        // matrix exists to catch, and they were added by three agents in
+        // parallel worktrees, none of whom extended it. Detail and Optics
+        // are neighbourhood nodes with a non-trivial `roi_in`; Effects sit
+        // after geometry and derive their canvas from the crop. All three
+        // are exactly where a framing mistake would hide.
+        case(
+            "sharpen",
+            Some(NodeId("global.sharpen")),
+            recipe_with(|g| {
+                g.detail.sharpen.amount = 80.0;
+                g.detail.sharpen.radius = 1.5;
+            }),
+        ),
+        case(
+            "noise_reduction",
+            Some(NodeId("global.noise_reduction")),
+            recipe_with(|g| {
+                g.detail.nr.luma = 60.0;
+                g.detail.nr.chroma = 60.0;
+            }),
+        ),
+        case(
+            "vignette",
+            Some(NodeId("fx.vignette")),
+            recipe_with(|g| g.effects.postcrop_vignette.amount = -50.0),
+        ),
+        case(
+            "grain",
+            Some(NodeId("fx.grain")),
+            recipe_with(|g| g.effects.grain.amount = 40.0),
+        ),
+        case(
+            "lens",
+            Some(NodeId("geom.lens")),
+            recipe_with(|g| {
+                g.optics.lens_profile = Some(lightbox_edit::LensCorrection {
+                    manual_distortion: -30.0,
+                    ..Default::default()
+                });
+            }),
+        ),
+        case(
+            "defringe",
+            Some(NodeId("geom.defringe")),
+            recipe_with(|g| g.optics.defringe = 60.0),
+        ),
     ]
 }
 

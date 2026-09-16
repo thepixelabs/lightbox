@@ -57,6 +57,19 @@
 //! extremum" clamp, because overshoot at an edge is exactly what sharpening
 //! is for. Halo control here is `detail` and `masking`.
 //!
+//! # The preview is not the export
+//!
+//! This node runs at the **request** extent, not the source's. `util.resize`
+//! (`nodes/resize.rs`, `output_extent`) takes the request extent verbatim
+//! and the whole tone and colour chain, this node included, is spliced after
+//! it. The shell only ever requests a fit-to-viewport render
+//! (`lightbox-shell/src/canvas/view.rs`, `RenderScale::Fit`), so `radius` is
+//! a sigma in **viewport** pixels in the preview and in source pixels at
+//! export: on a 24 megapixel frame in a 1500 pixel viewport, radius 1.0 is
+//! one viewport pixel on screen and about four source pixels in the file.
+//! Lightroom's Detail panel has the same property and shows a "zoom to 100%
+//! for an accurate preview" note; the panel here carries the same warning.
+//!
 //! # Not to be confused with export output sharpening
 //!
 //! `lightbox-export`'s `pixel::sharpen_in_place` is a separate, later,

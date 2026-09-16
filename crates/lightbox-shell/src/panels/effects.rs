@@ -152,8 +152,21 @@ fn vignette_section(ui: &mut egui::Ui, ctx: &mut DevelopCtx<'_>) {
     }
 }
 
+/// Grain size is in pixels of the canvas the node is handed, and the canvas
+/// only ever requests a fit-to-viewport render, so on-screen grain is coarser
+/// relative to the frame than the exported grain by the decimation factor.
+/// See the "preview is not the export" section in `grain.rs`.
+const GRAIN_PREVIEW_NOTE: &str = "Grain is laid on the decimated preview, so it looks \
+    coarser here than it will in the export. Judge grain size on an export.";
+
 fn grain_section(ui: &mut egui::Ui, ctx: &mut DevelopCtx<'_>) {
     ui.label(egui::RichText::new("Grain").strong());
+    ui.label(
+        egui::RichText::new("Preview is decimated: judge size on an export")
+            .small()
+            .weak(),
+    )
+    .on_hover_text(GRAIN_PREVIEW_NOTE);
     let g = current_grain(ctx);
     grain_slider(ui, ctx, &g, GrainField::Amount);
     // Size and roughness only shape grain that is actually being added.

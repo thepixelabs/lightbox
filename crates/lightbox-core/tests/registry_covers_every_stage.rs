@@ -38,7 +38,7 @@
 
 use lightbox_edit::{CurvePoint, Recipe};
 use lightbox_render::ng::{
-    colorimetry::SourceColorimetry, shipping_compiler, Extent, SourceDesc, SourceKind,
+    colorimetry::SourceColorimetry, shipping_compiler, Extent, NodeId, SourceDesc, SourceKind,
 };
 use lightbox_types::{ImageId, PV_M0};
 
@@ -76,6 +76,23 @@ fn maximal_recipe() -> Recipe {
     r.geometry.crop.right = 0.9;
     r.geometry.crop.bottom = 0.9;
 
+    // Detail, Effects and Optics. Six nodes added by three agents in parallel
+    // worktrees, none of whom extended this recipe, which is the exact
+    // failure this test's doc comment says it exists to make cheap. Every
+    // one of them is a real node with its own `is_identity`, so every one of
+    // them was invisible here until this block.
+    r.global.detail.sharpen.amount = 60.0;
+    r.global.detail.nr.luma = 40.0;
+    r.global.detail.nr.chroma = 40.0;
+    r.global.effects.postcrop_vignette.amount = -40.0;
+    r.global.effects.grain.amount = 30.0;
+    r.global.optics.lens_profile = Some(lightbox_edit::LensCorrection {
+        manual_distortion: -25.0,
+        ..Default::default()
+    });
+    r.global.optics.defringe = 50.0;
+    r.global.optics.vignette_corr = 30.0;
+
     r
 }
 
@@ -111,6 +128,38 @@ fn shipping_registry_can_build_every_stage_the_compiler_emits() {
          are being identity-elided when they should not be",
         graph.node_count()
     );
+
+    // "More than three nodes" cannot tell a missing node from a present
+    // one. Name every develop node the maximal recipe is supposed to splice
+    // and require each in the graph, so a new node whose `is_identity`
+    // quietly elides it under this recipe fails here by name rather than
+    // passing on the strength of its neighbours.
+    for id in [
+        "global.exposure",
+        "global.contrast",
+        "global.tone_recovery",
+        "global.whites_blacks",
+        "global.tone_curve",
+        "global.vibrance_sat",
+        "global.clarity",
+        "global.texture",
+        "global.dehaze",
+        "global.noise_reduction",
+        "global.sharpen",
+        "geom.defringe",
+        "geom.lens",
+        "geom.warp",
+        "geom.crop",
+        "fx.vignette",
+        "fx.grain",
+    ] {
+        assert!(
+            graph.node_index(NodeId(id)).is_some(),
+            "the maximal recipe should splice {id} but the compiled graph has no \
+             such node. Either the recipe above no longer pushes that stage off \
+             identity, or the node's `is_identity` elides a value it should not."
+        );
+    }
 }
 
 /// Straighten and crop specifically, each on its own, since those are the

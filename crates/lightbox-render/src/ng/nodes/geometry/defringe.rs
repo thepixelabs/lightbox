@@ -248,6 +248,27 @@ fn luma(p: &[f32; 4]) -> f32 {
     0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
 }
 
+/// The pixel as it would display: each channel held to `[0, 1]`.
+///
+/// Fringe **detection** runs on this, not on the working value, and the
+/// distinction is what keeps highlight recovery and defringe from fighting.
+/// Recovery hands this node above-white pixels with a real colour cast,
+/// because a sensor clips green about a stop before red, so a recovered sky
+/// arrives as something like `[2.28, 1.15, 1.72]`. Its opponent channel is
+/// strongly negative and it sits on a high-contrast edge: by the numbers it
+/// is a textbook magenta fringe. It is not one. A lens fringe is an artefact
+/// of the visible image, so the detector looks at the visible image, where
+/// that pixel is white with an opponent of zero. The correction it produces
+/// is still applied to the real, unclamped green.
+fn as_displayed(p: &[f32; 4]) -> [f32; 4] {
+    [
+        p[0].clamp(0.0, 1.0),
+        p[1].clamp(0.0, 1.0),
+        p[2].clamp(0.0, 1.0),
+        p[3],
+    ]
+}
+
 /// The green-magenta opponent channel. Purple/violet fringes drive it
 /// negative, green fringes positive, which is the pair of hues defringe
 /// targets.
@@ -436,7 +457,7 @@ impl RenderNode for GeomDefringeNode {
                         let sy = (iy + j as i64).clamp(0, max_y.max(0)) as u32;
                         for i in -DEFRINGE_RADIUS..=DEFRINGE_RADIUS {
                             let sx = (ix + i as i64).clamp(0, max_x.max(0)) as u32;
-                            let q = input.get_rgba_f32(sx, sy);
+                            let q = as_displayed(&input.get_rgba_f32(sx, sy));
                             cd_sum += opponent(&q);
                             n += 1.0;
                             let y = luma(&q);
@@ -445,10 +466,19 @@ impl RenderNode for GeomDefringeNode {
                         }
                     }
                     let cd_ref = cd_sum / n.max(1.0);
-                    let cd = opponent(&p);
+                    let cd = opponent(&as_displayed(&p));
+                    // Both lumas are in `[0, 1]` now, so the denominator can
+                    // only be zero, never negative, and the `1e-6` guard is
+                    // sufficient.
                     let contrast = (y_max - y_min) / (y_max + y_min).max(1e-6);
                     let edge = smoothstep(EDGE_LO, EDGE_HI, contrast);
-                    p[1] = (p[1] + amount * edge * (cd_ref - cd)).max(0.0);
+                    let delta = amount * edge * (cd_ref - cd);
+                    // Floor at zero only when the correction is the thing
+                    // pulling green down. A pixel this pass does not touch
+                    // keeps whatever it had, including a slightly negative
+                    // out-of-gamut green that a later stage may resolve.
+                    let g = p[1] + delta;
+                    p[1] = if delta < 0.0 { g.max(0.0) } else { g };
                 }
 
                 PixelBuf::encode_pixel(fmt, &mut row[lx as usize * bpp..], p);
@@ -698,6 +728,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A recovered highlight next to a shadow must not be read as a fringe.
+    ///
+    /// Highlight recovery hands this node above-white pixels with a real
+    /// colour cast, because a sensor clips green about a stop before red, so
+    /// a recovered sky arrives as something like `[2.28, 1.15, 1.72]`. Its
+    /// opponent channel is strongly negative, exactly what a magenta lens
+    /// fringe looks like, and it sits on a high-contrast edge, exactly where
+    /// a fringe would be. Without a guard the 7x7 mean of the opponent
+    /// channel over a highlight-and-shadow window drags every shadow pixel's
+    /// green toward that negative reference, floors at 0, and paints a dark
+    /// magenta rim one to three pixels wide around every recovered highlight
+    /// at any non-zero amount.
+    #[test]
+    fn a_recovered_highlight_does_not_strip_green_from_the_shadow_beside_it() {
+        let extent = Extent { w: 24, h: 8 };
+        let mut px = PixelBuf::new_zeroed(PixelFormat::Rgba32F, extent);
+        for y in 0..extent.h {
+            for x in 0..extent.w {
+                let p = if x < 12 {
+                    [2.28, 1.15, 1.72, 1.0]
+                } else {
+                    [0.10, 0.10, 0.10, 1.0]
+                };
+                px.set_rgba_f32(x, y, p);
+            }
+        }
+        let out = run_cpu(px, &optics_defringe(100.0));
+        // The three shadow columns nearest the edge are the ones inside the
+        // 7x7 window that also sees the highlight.
+        for x in 12..15 {
+            let p = out.get_rgba_f32(x, 4);
+            assert!(
+                p[1] > 0.08,
+                "shadow column {x} lost its green to the recovered highlight beside it: {p:?}"
+            );
+        }
+        // And the highlight itself keeps its recovered cast rather than
+        // being "corrected" toward green.
+        let h = out.get_rgba_f32(9, 4);
+        assert!(
+            (h[1] - 1.15).abs() < 0.05,
+            "the recovered highlight was treated as a fringe: {h:?}"
+        );
     }
 
     /// Amount zero is elided upstream, but the node must also be a

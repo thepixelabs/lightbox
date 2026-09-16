@@ -74,7 +74,29 @@ pub fn def() -> PanelDef {
     }
 }
 
+/// Why the panel carries a warning, and why Lightroom's does too.
+///
+/// Both nodes run at the render request's extent, downstream of
+/// `util.resize`, and the canvas only ever requests a fit-to-viewport
+/// render. So on a 24 megapixel frame in a 1500 pixel viewport the pixels
+/// these sliders act on have already been decimated about four times, which
+/// averages most of the sensor noise away before noise reduction sees it and
+/// makes a sharpening radius mean one viewport pixel rather than one source
+/// pixel. The export runs at full resolution and does what the slider says.
+/// Lightroom's Detail panel shows the same note for the same reason. See the
+/// "preview is not the export" sections in `sharpen.rs` and
+/// `noise_reduction.rs`.
+const PREVIEW_NOTE: &str = "The fit preview is decimated before these run, so the export \
+    will show more than the canvas does here. Judge sharpening and noise \
+    reduction on an export, or at 1:1 once the canvas can render it.";
+
 fn build(ui: &mut egui::Ui, ctx: &mut DevelopCtx<'_>) {
+    ui.label(
+        egui::RichText::new("Preview is decimated: judge these on an export")
+            .small()
+            .weak(),
+    )
+    .on_hover_text(PREVIEW_NOTE);
     section_label(ui, "Sharpening");
     sharpen_section(ui, ctx);
     ui.separator();

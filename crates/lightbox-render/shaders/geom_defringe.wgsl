@@ -191,7 +191,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sy = clamp(ly + j, 0, max_y);
             for (var i: i32 = -DEFRINGE_RADIUS; i <= DEFRINGE_RADIUS; i = i + 1) {
                 let sx = clamp(lx + i, 0, max_x);
-                let p = textureLoad(src, vec2<i32>(sx, sy), 0).rgb;
+                // Detection runs on the pixel as it would display, held to
+                // [0, 1], so a recovered above-white highlight reads as white
+                // with an opponent of zero rather than as a magenta fringe.
+                // Mirrors `as_displayed` in defringe.rs.
+                let p = clamp(textureLoad(src, vec2<i32>(sx, sy), 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0));
                 cd_sum = cd_sum + opponent(p);
                 n = n + 1.0;
                 let y = luma(p);
@@ -207,11 +211,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // reference is compared against is the CA-corrected one, which is
         // exact.
         let cd_ref = cd_sum / max(n, 1.0);
-        let cd = opponent(rgba.rgb);
+        let cd = opponent(clamp(rgba.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
         let contrast = (y_max - y_min) / max(y_max + y_min, 1e-6);
         let edge = smoothstep(EDGE_LO, EDGE_HI, contrast);
-        let g = rgba.g + params.amount * edge * (cd_ref - cd);
-        rgba = vec4<f32>(rgba.r, max(g, 0.0), rgba.b, rgba.a);
+        let delta = params.amount * edge * (cd_ref - cd);
+        // Floor at zero only when the correction pulls green down; an
+        // untouched pixel keeps its value, negative out-of-gamut included.
+        let g = rgba.g + delta;
+        rgba = vec4<f32>(rgba.r, select(g, max(g, 0.0), delta < 0.0), rgba.b, rgba.a);
     }
 
     textureStore(dst, vec2<i32>(i32(gid.x), i32(gid.y)), rgba);
