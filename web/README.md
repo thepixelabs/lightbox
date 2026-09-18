@@ -25,8 +25,6 @@ to a static image.
 |---|---|
 | `index.html` | The whole page. One file, sectioned with comments. |
 | `css/site.css` | Design tokens at the top, then sections in page order, responsive rules and reduced-motion overrides at the bottom. |
-| `js/develop.js` | A small raw develop pipeline in WebGL: white balance, exposure, tone, saturation, split tone, vignette and grain, plus histogram read-back from a 128 by 80 offscreen target. |
-| `js/scenes.js` | The canvas set pieces: the interactive tone curve, and the HSL, white balance, crop, histogram and export demonstrations. All share one animation loop that only runs while a scene is on screen. |
 | `js/site.js` | Navigation, reveal on scroll, one entry animation and the copy buttons. Four and a half kilobytes, no canvas and no WebGL: the live develop demos were removed because they demonstrated a browser shader rather than Lightbox. |
 | `assets/img/` | Photographs and screenshots, WebP only apart from the social card. See the provenance note below. |
 | `assets/fonts/` | Self-hosted webfonts. Inter and JetBrains Mono are Latin subsets of the very TTFs the application embeds; Inter Tight is the Latin subset of the variable face. All SIL OFL 1.1. |
